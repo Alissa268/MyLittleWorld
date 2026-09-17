@@ -596,7 +596,7 @@ _AVAILABILITY_POLARITY_TERMS = (
 def _has_compound_day_semantics(text: str) -> bool:
     """Detect polarity risk around named days; leave its interpretation to AI."""
     has_named_day = bool(
-        re.search(r"(?:週|星期|禮拜)[一二三四五六日天]", text)
+        re.search(r"(?:週|周|星期|禮拜)[一二三四五六日天]", text)
         or any(term in text for term in ("平日", "工作日", "週末", "假日"))
     )
     return has_named_day and any(term in text for term in _AVAILABILITY_POLARITY_TERMS)

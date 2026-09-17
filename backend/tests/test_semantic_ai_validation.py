@@ -141,6 +141,10 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
                 ["週一", "週二", "週四", "週五", "週六", "週日"],
             ),
             (
+                "我下周三有事其他時間應該都可以",
+                ["週一", "週二", "週四", "週五", "週六", "週日"],
+            ),
+            (
                 "週三跟週五不行，其他都可以",
                 ["週一", "週二", "週四", "週六", "週日"],
             ),
@@ -171,7 +175,9 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
     async def test_simple_day_values_keep_zero_ai_fast_path(self):
         for answer, expected in (
             ("週三", ["週三"]),
+            ("周三", ["週三"]),
             ("週三週四", ["週三", "週四"]),
+            ("周三周四", ["週三", "週四"]),
         ):
             with self.subTest(answer=answer):
                 case = TriageCase(case_id=f"semantic-ai-simple-day-{answer}")
