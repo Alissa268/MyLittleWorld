@@ -14,6 +14,8 @@ from app.services.ai_service import complete_runtime_json as _complete_runtime_j
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS
 from app.services.department_preference_service import capture_department_preference
 from app.services.field_acceptance import (
+    BODY_PART_TERMS,
+    SYMPTOM_TERMS,
     ai_normalized_value_rejection_reason,
     has_symptom_semantics,
     plausible_semantic_target,
@@ -27,6 +29,7 @@ from app.services.rule_engine import (
     missing_checklist_fields,
 )
 from app.services.semantic_normalizer import (
+    SESSION_ALIASES,
     is_ambiguous_red_flag_answer,
     normalize_urgency,
 )
@@ -86,6 +89,8 @@ async def extract_batch_answers(
     outcome = BatchExtractionOutcome()
     answered_text: dict[str, str] = {}
     ambiguous_fallbacks: dict[str, SemanticExtraction] = {}
+    semantic_failure_fallbacks: dict[str, SemanticExtraction] = {}
+    semantic_refinement_sources: dict[str, str] = {}
     settings = get_settings()
     provider = "cerebras"
 
@@ -142,15 +147,41 @@ async def extract_batch_answers(
             if fallback is not None:
                 ambiguous_fallbacks[key] = fallback
         extractions = _deterministic_extractions_for_answer(case, key, text)
-        primary = next((item for item in extractions if item.field == key), None)
-        if (
-            primary is not None
-            and key != "red_flags"
-            and not _is_clear_deterministic_fast_path(key, text, primary)
-        ):
-            if key == "severity":
-                ambiguous_fallbacks[key] = primary
-            extractions = [item for item in extractions if item is not primary]
+        accepted_extractions: list[SemanticExtraction] = []
+        for extraction in extractions:
+            is_primary = extraction.field == key
+            if key == "red_flags":
+                accepted_fast_path, fast_path_reason = True, "red_flags_turn_deterministic_only"
+            else:
+                accepted_fast_path, fast_path_reason = _deterministic_fast_path_decision(
+                    extraction.field,
+                    text,
+                    extraction,
+                    is_primary=is_primary,
+                )
+            logger.info(
+                "[SEMANTIC_FAST_PATH] case_id=%s current_field=%s field=%s "
+                "candidate=%r accepted=%s reason=%s",
+                case.case_id,
+                key,
+                extraction.field,
+                extraction.normalized_value,
+                str(accepted_fast_path).lower(),
+                fast_path_reason,
+            )
+            if accepted_fast_path:
+                accepted_extractions.append(extraction)
+                continue
+            if extraction.field != "red_flags":
+                # Do not commit a lossy deterministic candidate. Keeping the
+                # field empty lets the semantic result land without tripping
+                # duplicate_existing_value.
+                semantic_refinement_sources.setdefault(extraction.field, text)
+                if extraction.field in {"body_part", "severity"}:
+                    semantic_failure_fallbacks.setdefault(extraction.field, extraction)
+            if is_primary and key == "severity":
+                ambiguous_fallbacks[key] = extraction
+        extractions = accepted_extractions
         if extractions:
             apply_semantic_extractions(case, extractions)
         if (
@@ -186,11 +217,17 @@ async def extract_batch_answers(
     # A non-empty keyed answer for an unresolved field must reach the semantic
     # provider once when it is available. Failing to understand the answer
     # deterministically is exactly when semantic refinement is needed.
+    current_missing = set(missing_checklist_fields(case, apply_attempt_fallback=False))
     semantic_sources = {
+        field_name: source_text
+        for field_name, source_text in semantic_refinement_sources.items()
+        if field_name in current_missing and field_name != "red_flags"
+    }
+    semantic_sources.update({
         field_name: answered_text[field_name]
         for field_name in unresolved
-        if field_name != "red_flags"
-    }
+        if field_name != "red_flags" and field_name not in semantic_sources
+    })
     if semantic_sources:
         all_missing = missing_checklist_fields(case, apply_attempt_fallback=False)
         for source_text in tuple(semantic_sources.values()):
@@ -213,7 +250,11 @@ async def extract_batch_answers(
 
     if not runtime_ai_available(settings):
         outcome.fallback_reason = f"provider_key_missing:{provider}"
-        _apply_ambiguous_fallbacks(case, ambiguous_fallbacks, outcome)
+        _apply_ambiguous_fallbacks(
+            case,
+            {**semantic_failure_fallbacks, **ambiguous_fallbacks},
+            outcome,
+        )
         outcome.unresolved_fields = [
             field_name
             for field_name in missing_checklist_fields(case)
@@ -255,7 +296,11 @@ async def extract_batch_answers(
         status = getattr(exc, "status_code", None)
         suffix = f":{status}" if status is not None else ""
         outcome.fallback_reason = f"{type(exc).__name__}{suffix}"
-        _apply_ambiguous_fallbacks(case, ambiguous_fallbacks, outcome)
+        _apply_ambiguous_fallbacks(
+            case,
+            {**semantic_failure_fallbacks, **ambiguous_fallbacks},
+            outcome,
+        )
         logger.warning(
             "batch extraction provider fallback provider=%s reason=%s",
             provider,
@@ -469,28 +514,152 @@ def _looks_ambiguous(text: str) -> bool:
     return requires_semantic_refinement(text)
 
 
+def _deterministic_fast_path_decision(
+    field_name: str,
+    text: str,
+    extraction: SemanticExtraction,
+    *,
+    is_primary: bool,
+) -> tuple[bool, str]:
+    """Keep only high-confidence, low-interpretation answers on the zero-AI path."""
+    if field_name == "red_flags":
+        return True, "red_flags_deterministic_only"
+    if requires_semantic_refinement(text):
+        return False, "semantic_refinement_required"
+    if extraction.confidence < ACCEPT_THRESHOLD:
+        return False, "confidence_below_threshold"
+    if field_name == "preferred_sessions" and _has_compound_session_semantics(text):
+        return False, "compound_session_semantics"
+    if field_name == "severity":
+        direct_scale_terms = ("輕微", "普通", "中等", "中度", "嚴重", "很痛", "劇痛")
+        if extraction.confidence >= 0.85 or any(term in text for term in direct_scale_terms):
+            return True, "clear_canonical_value"
+        return False, "indirect_severity_semantics"
+    if field_name == "body_part":
+        if _body_part_candidate_is_coarse(text, extraction.normalized_value):
+            reason = "coarse_primary_extraction" if is_primary else "coarse_secondary_extraction"
+            return False, reason
+    return True, "clear_canonical_value"
+
+
 def _is_clear_deterministic_fast_path(
     field_name: str,
     text: str,
     extraction: SemanticExtraction,
 ) -> bool:
-    """Keep only high-confidence, low-interpretation answers on the zero-AI path."""
-    if requires_semantic_refinement(text):
+    """Compatibility wrapper used by focused tests and callers."""
+    accepted_fast_path, _ = _deterministic_fast_path_decision(
+        field_name,
+        text,
+        extraction,
+        is_primary=True,
+    )
+    return accepted_fast_path
+
+
+_COMPOUND_SESSION_TERMS = (
+    "不要",
+    "不想",
+    "不方便",
+    "不能",
+    "沒空",
+    "不行",
+    "但是",
+    "可是",
+    "不過",
+    "除了",
+    "其他",
+    "其餘",
+    "上班",
+    "下班",
+    "之後",
+    "以前",
+    "才方便",
+)
+
+
+def _has_compound_session_semantics(text: str) -> bool:
+    mentioned_sessions = {
+        canonical
+        for canonical, aliases in SESSION_ALIASES.items()
+        if any(alias in text for alias in aliases)
+    }
+    return len(mentioned_sessions) >= 2 or any(term in text for term in _COMPOUND_SESSION_TERMS)
+
+
+def _body_part_candidate_is_coarse(text: str, value: Any) -> bool:
+    """Detect obvious rule compression without constructing another anatomy dictionary."""
+    normalized = str(value or "").strip()
+    source = text.strip(" ，。！？!?")
+    if not normalized or normalized not in source:
+        # Existing canonical conversions such as 腸胃 -> 腹 are intentional.
         return False
-    if extraction.confidence < ACCEPT_THRESHOLD:
+    if source == normalized:
         return False
-    if field_name == "severity":
-        direct_scale_terms = ("輕微", "普通", "中等", "中度", "嚴重", "很痛", "劇痛")
-        return extraction.confidence >= 0.85 or any(term in text for term in direct_scale_terms)
-    if field_name == "body_part":
-        normalized = str(extraction.normalized_value or "").strip()
-        if len(normalized) != 1 or normalized not in text:
-            return True
-        if text.strip(" ，。！？!?") == normalized or text.rstrip(" ，。！？!?").endswith(normalized):
-            return True
-        remainder = text.replace(normalized, "", 1)
-        return has_symptom_semantics(remainder)
-    return True
+
+    matched_terms = [term for term in BODY_PART_TERMS if term in source]
+    longest_match = max(matched_terms, key=len, default="")
+    if len(longest_match) > len(normalized):
+        # Known canonical compression (膝蓋 -> 膝, 腹部 -> 腹) is safe.
+        return False
+
+    source_sides = {side for side in ("左", "右") if side in source}
+    normalized_sides = {side for side in ("左", "右") if side in normalized}
+    if len(source_sides) == 1 and not normalized_sides:
+        return True
+    # A short match followed by another CJK character is likely only the
+    # prefix of a more specific anatomical phrase (手 + 腕, 腳 + 踝).
+    # Symptom characters such as 痛/酸 are excluded so 頭痛 and 手痛 remain
+    # valid clear paths.
+    if len(normalized) <= 2:
+        start = 0
+        while True:
+            index = source.find(normalized, start)
+            if index < 0:
+                break
+            next_index = index + len(normalized)
+            if next_index < len(source):
+                suffix = source[next_index:]
+                if _is_cjk_character(suffix[0]) and not _starts_with_symptom_expression(suffix):
+                    return True
+            start = index + 1
+    return False
+
+
+def _is_cjk_character(character: str) -> bool:
+    return bool(character) and "\u4e00" <= character <= "\u9fff"
+
+
+def _starts_with_symptom_expression(value: str) -> bool:
+    text = value.lstrip(" ，。！？!?、")
+    prefixes = (
+        "會",
+        "有點",
+        "有一點",
+        "很",
+        "一直",
+        "感到",
+        "覺得",
+        "不太",
+        "就",
+        "附近",
+        "這邊",
+        "那邊",
+        "周圍",
+        "旁邊",
+        "位置",
+    )
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if text.startswith(prefix):
+                text = text[len(prefix) :]
+                changed = True
+                break
+    return not text or text in {"吧", "啦", "啊", "的"} or any(
+        text.startswith(term) for term in SYMPTOM_TERMS
+    )
 
 
 def _is_meta_reply(text: str) -> bool:

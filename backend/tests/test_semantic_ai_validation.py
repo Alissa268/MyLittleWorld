@@ -73,6 +73,90 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(outcome.ai_attempted)
         self.assertEqual(case.patient_input.body_part, "手腕")
 
+    async def test_lossy_secondary_wrist_is_refined_in_the_same_batch(self):
+        answer = "我最近左手手腕會酸痛還有灼熱感，尤其是晚上的時候"
+        case, outcome, provider = await self._extract(
+            "symptom",
+            answer,
+            {
+                "field": "body_part",
+                "normalized_value": "手腕",
+                "semantic_status": "available",
+                "confidence": 0.9,
+                "source_text": "左手手腕",
+            },
+        )
+
+        provider.assert_awaited_once()
+        self.assertEqual(case.patient_input.symptom, answer)
+        self.assertEqual(case.patient_input.body_part, "手腕")
+        self.assertEqual(case.availability.preferred_sessions, [])
+        self.assertNotEqual(case.patient_input.body_part, "手")
+        self.assertEqual(outcome.ai_fields, ["body_part"])
+
+    async def test_lossy_secondary_ankle_is_refined_in_the_same_batch(self):
+        answer = "右腳腳踝腫痛"
+        case, _, provider = await self._extract(
+            "symptom",
+            answer,
+            {
+                "field": "body_part",
+                "normalized_value": "腳踝",
+                "semantic_status": "available",
+                "confidence": 0.9,
+                "source_text": "右腳腳踝",
+            },
+        )
+
+        provider.assert_awaited_once()
+        self.assertEqual(case.patient_input.body_part, "腳踝")
+
+    async def test_compound_session_answers_use_one_semantic_request(self):
+        examples = (
+            ("我不要上午和晚上", ["下午"]),
+            ("上午跟晚上都不方便", ["下午"]),
+            ("下午可以，但是晚上不要", ["下午"]),
+        )
+        for answer, expected in examples:
+            with self.subTest(answer=answer):
+                case, _, provider = await self._extract(
+                    "preferred_sessions",
+                    answer,
+                    {
+                        "field": "preferred_sessions",
+                        "normalized_value": expected,
+                        "semantic_status": "partial",
+                        "confidence": 0.9,
+                        "source_text": answer,
+                    },
+                )
+
+                provider.assert_awaited_once()
+                self.assertEqual(case.availability.preferred_sessions, expected)
+
+    async def test_simple_session_values_keep_zero_ai_fast_path(self):
+        for answer, expected in (("下午", ["下午"]), ("都可以", ["上午", "下午", "夜間"])):
+            with self.subTest(answer=answer):
+                case = TriageCase(case_id=f"semantic-ai-simple-session-{answer}")
+                provider = AsyncMock(side_effect=AssertionError("simple session must not call AI"))
+                with patch.object(
+                    batch_extraction_service,
+                    "runtime_ai_available",
+                    return_value=True,
+                ), patch.object(
+                    batch_extraction_service,
+                    "complete_prompt",
+                    new=provider,
+                ):
+                    outcome = await extract_batch_answers(
+                        case,
+                        [BatchAnswer(key="preferred_sessions", answer=answer)],
+                    )
+
+                provider.assert_not_awaited()
+                self.assertFalse(outcome.ai_attempted)
+                self.assertEqual(case.availability.preferred_sessions, expected)
+
     async def test_ai_symptom_is_not_limited_to_symptom_terms(self):
         answer = "一直有燒灼的感覺"
         self.assertFalse(has_symptom_semantics(answer))
@@ -213,6 +297,58 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[SEMANTIC_AI_PARSED]", output)
         self.assertIn("[SEMANTIC_AI_DECISION]", output)
         self.assertIn("accepted=true", output)
+
+    async def test_fast_path_logs_rejected_secondary_and_clear_value(self):
+        with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
+            await self._extract(
+                "symptom",
+                "左手手腕酸痛",
+                {
+                    "field": "body_part",
+                    "normalized_value": "手腕",
+                    "semantic_status": "available",
+                    "confidence": 0.9,
+                    "source_text": "左手手腕",
+                },
+            )
+
+        output = "\n".join(logs.output)
+        self.assertIn("[SEMANTIC_FAST_PATH]", output)
+        self.assertIn("field=body_part", output)
+        self.assertIn("accepted=false", output)
+        self.assertIn("reason=coarse_secondary_extraction", output)
+
+    def test_ai_body_part_laterality_must_not_reverse_the_source(self):
+        examples = (
+            ("右下腹", "左下腹", False),
+            ("左手腕", "手腕", True),
+            ("左手腕", "右手腕", False),
+        )
+        for source, normalized, accepted in examples:
+            with self.subTest(source=source, normalized=normalized):
+                with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
+                    parsed = batch_extraction_service._parse_ai_extractions(
+                        json.dumps(
+                            {
+                                "extractions": [
+                                    {
+                                        "field": "body_part",
+                                        "normalized_value": normalized,
+                                        "semantic_status": "available",
+                                        "confidence": 0.9,
+                                        "source_text": source,
+                                    }
+                                ]
+                            },
+                            ensure_ascii=False,
+                        ),
+                        {"body_part": source},
+                        ["body_part"],
+                    )
+
+                self.assertEqual(bool(parsed), accepted)
+                if not accepted:
+                    self.assertIn("reject_reason=laterality_conflict", "\n".join(logs.output))
 
     def test_ai_cannot_overwrite_an_existing_confirmed_body_part(self):
         case = TriageCase(case_id="semantic-ai-no-overwrite", visit_type=VisitType.INITIAL)

@@ -390,9 +390,28 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         case.patient_input.red_flags_status = "negative"
         case.patient_input.body_part = "頭"
         case.patient_input.duration = "3天"
-        provider = AsyncMock(side_effect=AssertionError("clear deterministic answers must not call Cerebras"))
+        provider = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "extractions": [
+                        {
+                            "field": "preferred_sessions",
+                            "normalized_value": ["下午"],
+                            "semantic_status": "partial",
+                            "confidence": 0.9,
+                            "source_text": "我不想要夜間也不想上午",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
 
-        with patch.object(batch_extraction_service, "complete_prompt", new=provider):
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
             await extract_batch_answers(
                 case,
                 [BatchAnswer(key="severity", answer="沒有到影響日常活動")],
@@ -418,7 +437,7 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("上午", case.availability.preferred_sessions)
         self.assertNotIn("夜間", case.availability.preferred_sessions)
         self.assertEqual(missing_checklist_fields(case), [])
-        provider.assert_not_awaited()
+        provider.assert_awaited_once()
 
     def test_relative_days_preserve_both_later_dates(self):
         weekday_names = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]

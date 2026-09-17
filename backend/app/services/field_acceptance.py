@@ -371,6 +371,14 @@ def ai_normalized_value_rejection_reason(
 
     if text in {"左", "右", "左邊", "右邊", "附近", "這裡", "那裡", "身體"}:
         return "invalid_normalized_value"
+    source_sides = {side for side in ("左", "右") if side in source}
+    normalized_sides = {side for side in ("左", "右") if side in text}
+    if (
+        len(source_sides) == 1
+        and len(normalized_sides) == 1
+        and source_sides != normalized_sides
+    ):
+        return "laterality_conflict"
     if text in source:
         return None
     if any(text[index : index + 2] in source for index in range(max(len(text) - 1, 0))):

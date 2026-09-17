@@ -377,11 +377,12 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
         for answer in examples:
             with self.subTest(answer=answer):
-                case, provider = await self._extract("symptom", answer)
+                provider = self._semantic_provider()
+                case, provider = await self._extract("symptom", answer, provider=provider)
 
                 self.assertEqual(case.patient_input.symptom, answer)
                 self.assertNotIn("symptom", missing_checklist_fields(case))
-                provider.assert_not_awaited()
+                self.assertLessEqual(provider.await_count, 1)
 
     async def test_gluteal_synonyms_have_distinct_canonical_body_parts(self):
         examples = (
@@ -433,11 +434,12 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
         for answer, expected_body_part in examples:
             with self.subTest(answer=answer):
-                case, provider = await self._extract("symptom", answer)
+                provider = self._semantic_provider()
+                case, provider = await self._extract("symptom", answer, provider=provider)
 
                 self.assertEqual(case.patient_input.body_part, expected_body_part)
                 self.assertNotEqual(case.patient_input.body_part, "臀部")
-                provider.assert_not_awaited()
+                self.assertLessEqual(provider.await_count, 1)
 
     def test_chat_skips_body_part_after_buttock_symptom(self):
         case_id = f"strict-buttock-route-{uuid4().hex}"
@@ -531,9 +533,20 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         provider.assert_not_awaited()
 
     async def test_explicit_day_and_session_any_semantics_can_complete_both(self):
+        answer = "哪天都可以，上午下午晚上也都行"
+        provider = self._semantic_provider(
+            {
+                "field": "preferred_sessions",
+                "normalized_value": ["上午", "下午", "夜間"],
+                "semantic_status": "available",
+                "confidence": 0.9,
+                "source_text": answer,
+            }
+        )
         case, provider = await self._extract(
             "preferred_days",
-            "哪天都可以，上午下午晚上也都行",
+            answer,
+            provider=provider,
         )
 
         self.assertEqual(
@@ -541,7 +554,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             ["週一", "週二", "週三", "週四", "週五", "週六", "週日"],
         )
         self.assertEqual(case.availability.preferred_sessions, ["上午", "下午", "夜間"])
-        provider.assert_not_awaited()
+        provider.assert_awaited_once()
 
     async def test_symptom_time_at_night_does_not_become_appointment_session(self):
         case, provider = await self._extract(
@@ -961,9 +974,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
         for answer, expected in examples:
             with self.subTest(answer=answer):
-                case, provider = await self._extract("body_part", answer)
+                provider = self._semantic_provider()
+                case, provider = await self._extract("body_part", answer, provider=provider)
 
-                provider.assert_not_awaited()
+                self.assertLessEqual(provider.await_count, 1)
                 self.assertEqual(case.patient_input.body_part, expected)
                 self.assertEqual(normalize_body_part(answer), expected)
 
@@ -1004,7 +1018,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         provider.assert_awaited_once()
         self.assertEqual(case.patient_input.body_part, "腹")
 
-    async def test_session_exclusions_and_explicit_subsets_are_deterministic(self):
+    async def test_compound_session_exclusions_and_subsets_use_semantic_ai(self):
         examples = (
             ("除了夜間都可以", ["上午", "下午"]),
             ("除了下午都可以", ["上午", "夜間"]),
@@ -1025,9 +1039,22 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
         for answer, expected in examples:
             with self.subTest(answer=answer):
-                case, provider = await self._extract("preferred_sessions", answer)
+                provider = self._semantic_provider(
+                    {
+                        "field": "preferred_sessions",
+                        "normalized_value": expected,
+                        "semantic_status": "partial",
+                        "confidence": 0.9,
+                        "source_text": answer,
+                    }
+                )
+                case, provider = await self._extract(
+                    "preferred_sessions",
+                    answer,
+                    provider=provider,
+                )
 
-                provider.assert_not_awaited()
+                provider.assert_awaited_once()
                 self.assertEqual(case.availability.preferred_sessions, expected)
 
     async def test_second_body_part_answer_is_parsed_before_attempt_fallback(self):
