@@ -1,0 +1,305 @@
+from __future__ import annotations
+
+import re
+from typing import Any
+
+
+SYMPTOM_TERMS = (
+    "睡不著",
+    "很難入睡",
+    "難以入睡",
+    "失眠",
+    "一直醒來",
+    "一直醒",
+    "睡不好",
+    "不舒服",
+    "不太舒服",
+    "疼",
+    "痛",
+    "癢",
+    "麻",
+    "腫",
+    "暈",
+    "咳",
+    "喘",
+    "發燒",
+    "發熱",
+    "噁心",
+    "想吐",
+    "嘔吐",
+    "腹瀉",
+    "拉肚子",
+    "紅疹",
+    "皮疹",
+    "流鼻水",
+    "鼻塞",
+    "耳鳴",
+    "出血",
+    "無力",
+    "痠",
+    "酸",
+    "刺",
+    "卡卡",
+    "感冒",
+)
+
+BODY_PART_TERMS = (
+    "左大腿",
+    "右大腿",
+    "左小腿",
+    "右小腿",
+    "左腿",
+    "右腿",
+    "左邊屁股",
+    "右邊屁股",
+    "左側屁股",
+    "右側屁股",
+    "左屁股",
+    "右屁股",
+    "肛門周圍",
+    "肛門口",
+    "左臀部",
+    "右臀部",
+    "全身",
+    "身上",
+    "關節",
+    "屁股",
+    "臀部",
+    "臀側",
+    "尾椎",
+    "髖部",
+    "肛門",
+    "膝蓋",
+    "膝部",
+    "大腿",
+    "小腿",
+    "手臂",
+    "腳踝",
+    "胸口",
+    "肚子",
+    "喉嚨",
+    "肩膀",
+    "頭部",
+    "腹部",
+    "腰部",
+    "背部",
+    "皮膚",
+    "耳朵",
+    "眼睛",
+    "膝",
+    "胸",
+    "頭",
+    "腹",
+    "眼",
+    "耳",
+    "腰",
+    "背",
+    "肩",
+    "手",
+    "腳",
+    "腿",
+    "臀",
+    "髖",
+)
+
+_CONTEXTUAL_DISCOMFORT_TERMS = (
+    "怪怪",
+    "不對勁",
+    "不太對勁",
+    "卡卡",
+    "酸酸",
+    "痠痠",
+    "麻麻",
+    "悶悶",
+)
+
+_DURATION_PATTERN = re.compile(
+    r"(?:\d+|[一二兩三四五六七八九十]+)\s*(?:(?:個)?(?:禮拜|星期)|天|週|周|個月|年)"
+)
+_DURATION_ONSET_PATTERN = re.compile(
+    r"(?:從)?(?:今天|昨天|前天|早上|上午|中午|下午|晚上|半夜|上週|上個月)(?:就)?(?:開始|起)"
+)
+_DEPARTMENT_INTENT_TERMS = (
+    "想看", "要看", "希望看", "直接看", "改看", "我要", "想要",
+    "想掛", "要掛", "掛號", "掛診", "想改", "改成", "改為", "科別",
+)
+
+
+def has_symptom_semantics(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if any(term in text for term in SYMPTOM_TERMS):
+        return True
+    return any(part in text for part in BODY_PART_TERMS) and any(
+        term in text for term in _CONTEXTUAL_DISCOMFORT_TERMS
+    )
+
+
+def has_body_part_semantics(value: str) -> bool:
+    text = str(value or "").strip()
+    if not text:
+        return False
+    if looks_like_department_request(text) and not has_symptom_semantics(text):
+        return False
+    return any(term in text for term in BODY_PART_TERMS)
+
+
+def normalize_body_part(value: str) -> str | None:
+    text = str(value or "").strip()
+    if not has_body_part_semantics(text):
+        return None
+
+    # These neighboring anatomical regions remain distinct because they may
+    # lead to different downstream clinical considerations.
+    if "肛門" in text:
+        return "肛門周圍" if "肛門周圍" in text else "肛門"
+    if "尾椎" in text:
+        return "尾椎"
+    if "髖部" in text or "髖" in text:
+        return "髖部"
+    if "屁股" in text or "臀部" in text or "臀側" in text or "臀" in text:
+        if any(term in text for term in ("左邊屁股", "左側屁股", "左屁股", "左臀部", "左臀")):
+            return "左臀部"
+        if any(term in text for term in ("右邊屁股", "右側屁股", "右屁股", "右臀部", "右臀")):
+            return "右臀部"
+        return "臀部"
+
+    for part in BODY_PART_TERMS:
+        if part in text:
+            return {
+                "膝蓋": "膝",
+                "頭部": "頭",
+                "胸口": "胸",
+                "腹部": "腹",
+                "耳朵": "耳",
+                "眼睛": "眼",
+                "腰部": "腰",
+                "背部": "背",
+            }.get(part, part)
+    return None
+
+
+def has_duration_semantics(value: str) -> bool:
+    text = str(value or "").strip()
+    return bool(
+        _DURATION_PATTERN.search(text)
+        or _DURATION_ONSET_PATTERN.search(text)
+        or any(
+            term in text
+            for term in (
+                "半天",
+                "半年",
+                "一年半",
+                "幾天",
+                "好幾天",
+                "幾週",
+                "好幾週",
+                "幾個禮拜",
+                "幾禮拜",
+                "好幾個禮拜",
+                "好幾禮拜",
+                "幾個星期",
+                "幾星期",
+                "好幾個星期",
+                "好幾星期",
+                "一陣子",
+                "一段時間",
+            )
+        )
+    )
+
+
+def has_severity_semantics(value: str) -> bool:
+    text = str(value or "").strip().lower()
+    if text in {"mild", "moderate", "severe"}:
+        return True
+    return any(
+        term in text
+        for term in (
+            "輕微",
+            "有點痛",
+            "一點痛",
+            "微痛",
+            "不太影響",
+            "沒有影響",
+            "正常生活",
+            "正常作息",
+            "不影響日常生活",
+            "不影響睡眠",
+            "正常上班",
+            "正常走路",
+            "沒什麼影響",
+            "沒有很嚴重",
+            "還好但",
+            "普通",
+            "中等",
+            "中度",
+            "明顯",
+            "很痛",
+            "劇痛",
+            "嚴重",
+            "受不了",
+            "影響生活",
+            "影響睡覺",
+            "影響睡眠",
+            "睡不著",
+            "痛醒",
+            "無法工作",
+            "不能工作",
+            "無法走路",
+            "走路困難",
+            "沒辦法正常生活",
+            "沒辦法上班",
+            "不能正常走路",
+            "無法正常活動",
+        )
+    )
+
+
+def looks_like_department_request(value: str) -> bool:
+    text = str(value or "").strip()
+    return "科" in text and any(term in text for term in _DEPARTMENT_INTENT_TERMS)
+
+
+def normalized_value_valid(field: str, value: Any, status: str) -> bool:
+    if status in {"unknown", "ambiguous"}:
+        return True
+    if status == "unavailable" and field in {"preferred_days", "preferred_sessions"}:
+        return isinstance(value, list)
+    if field == "symptom":
+        return isinstance(value, str) and has_symptom_semantics(value)
+    if field == "body_part":
+        return isinstance(value, str) and has_body_part_semantics(value)
+    if field == "duration":
+        return isinstance(value, str) and has_duration_semantics(value)
+    if field == "severity":
+        level = value.get("severity_level") if isinstance(value, dict) else value
+        return str(level or "").strip().lower() in {"mild", "moderate", "severe"}
+    if field == "preferred_days":
+        return isinstance(value, list) and bool(value) and all(
+            str(item) in {"週一", "週二", "週三", "週四", "週五", "週六", "週日"}
+            for item in value
+        )
+    if field == "preferred_sessions":
+        return isinstance(value, list) and bool(value) and all(
+            str(item) in {"上午", "下午", "夜間"} for item in value
+        )
+    return False
+
+
+def plausible_semantic_target(field: str, text: str) -> bool:
+    """Identify possible extra slots; never use this to block a keyed fallback."""
+    if field == "symptom":
+        return has_symptom_semantics(text)
+    if field == "body_part":
+        return has_body_part_semantics(text) or any(term in text for term in ("部位", "位置", "附近", "左邊", "右邊"))
+    if field == "duration":
+        return has_duration_semantics(text) or any(term in text for term in ("持續", "開始", "多久", "前陣子"))
+    if field == "severity":
+        return has_severity_semantics(text) or any(term in text for term in ("程度", "影響", "忍受"))
+    if field == "preferred_days":
+        return any(term in text for term in ("週", "星期", "禮拜", "日期", "哪天", "今天", "明天", "後天", "平日", "週末"))
+    if field == "preferred_sessions":
+        return any(term in text for term in ("上午", "早上", "下午", "晚上", "夜間", "時段", "全天", "整天", "任何時段"))
+    return False
