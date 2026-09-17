@@ -134,6 +134,66 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
                 provider.assert_awaited_once()
                 self.assertEqual(case.availability.preferred_sessions, expected)
 
+    async def test_compound_day_answers_use_one_semantic_request(self):
+        examples = (
+            (
+                "我下週三有事其他時間應該都可以",
+                ["週一", "週二", "週四", "週五", "週六", "週日"],
+            ),
+            (
+                "週三跟週五不行，其他都可以",
+                ["週一", "週二", "週四", "週六", "週日"],
+            ),
+        )
+        for answer, expected in examples:
+            with self.subTest(answer=answer):
+                with self.assertLogs(level="INFO") as logs:
+                    case, _, provider = await self._extract(
+                        "preferred_days",
+                        answer,
+                        {
+                            "field": "preferred_days",
+                            "normalized_value": expected,
+                            "semantic_status": "partial",
+                            "confidence": 0.9,
+                            "source_text": answer,
+                            "needs_clarification": False,
+                        },
+                    )
+
+                provider.assert_awaited_once()
+                self.assertEqual(case.availability.preferred_days, expected)
+                self.assertNotIn("preferred_days", missing_checklist_fields(case))
+                output = "\n".join(logs.output)
+                self.assertIn("reason=compound_day_semantics", output)
+                self.assertIn("field=preferred_days accepted=true", output)
+
+    async def test_simple_day_values_keep_zero_ai_fast_path(self):
+        for answer, expected in (
+            ("週三", ["週三"]),
+            ("週三週四", ["週三", "週四"]),
+        ):
+            with self.subTest(answer=answer):
+                case = TriageCase(case_id=f"semantic-ai-simple-day-{answer}")
+                provider = AsyncMock(side_effect=AssertionError("simple days must not call AI"))
+                with patch.object(
+                    batch_extraction_service,
+                    "runtime_ai_available",
+                    return_value=True,
+                ), patch.object(
+                    batch_extraction_service,
+                    "complete_prompt",
+                    new=provider,
+                ):
+                    outcome = await extract_batch_answers(
+                        case,
+                        [BatchAnswer(key="preferred_days", answer=answer)],
+                    )
+
+                provider.assert_not_awaited()
+                self.assertFalse(outcome.ai_attempted)
+                self.assertEqual(case.availability.preferred_days, expected)
+
     async def test_simple_session_values_keep_zero_ai_fast_path(self):
         for answer, expected in (("下午", ["下午"]), ("都可以", ["上午", "下午", "夜間"])):
             with self.subTest(answer=answer):
@@ -381,6 +441,10 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("不影響吧", prompt)
         self.assertIn("弱語氣不等於無法回答", prompt)
         self.assertIn("ambiguous 只用於互相衝突", prompt)
+        self.assertIn("preferred_days 與 preferred_sessions 是封閉集合", prompt)
+        self.assertIn("我不喜歡早上跟晚上", prompt)
+        self.assertIn("其他都可以／其餘都可以", prompt)
+        self.assertIn("partial 是可直接寫入的有效答案", prompt)
 
 
 if __name__ == "__main__":

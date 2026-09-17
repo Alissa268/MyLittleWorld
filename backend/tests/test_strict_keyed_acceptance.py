@@ -502,7 +502,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("symptom", missing_checklist_fields(case))
                 provider.assert_awaited_once()
 
-    async def test_excluded_weekday_is_complement_without_consuming_session(self):
+    async def test_excluded_weekday_complements_use_semantic_ai(self):
         examples = (
             "除了禮拜三都可以",
             "除了週三之外都行",
@@ -511,12 +511,26 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         expected = ["週一", "週二", "週四", "週五", "週六", "週日"]
         for answer in examples:
             with self.subTest(answer=answer):
-                case, provider = await self._extract("preferred_days", answer)
+                provider = self._semantic_provider(
+                    {
+                        "field": "preferred_days",
+                        "normalized_value": expected,
+                        "semantic_status": "partial",
+                        "confidence": 0.9,
+                        "source_text": answer,
+                        "needs_clarification": False,
+                    }
+                )
+                case, provider = await self._extract(
+                    "preferred_days",
+                    answer,
+                    provider=provider,
+                )
 
                 self.assertEqual(case.availability.preferred_days, expected)
                 self.assertEqual(case.availability.preferred_sessions, [])
                 self.assertIn("preferred_sessions", missing_checklist_fields(case))
-                provider.assert_not_awaited()
+                provider.assert_awaited_once()
 
     async def test_any_session_is_scoped_to_session_question(self):
         case, provider = await self._extract("preferred_sessions", "都可以")
@@ -579,23 +593,39 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         case.patient_input.red_flags_checked = True
         case.patient_input.red_flags_status = "negative"
         save_case(case)
-
-        response = TestClient(app).post(
-            "/chat",
-            json={
-                "case_id": case.case_id,
-                "answers": [
-                    {"key": "preferred_days", "answer": "除了禮拜三都可以"}
-                ],
-            },
+        answer = "除了禮拜三都可以"
+        expected = ["週一", "週二", "週四", "週五", "週六", "週日"]
+        provider = self._semantic_provider(
+            {
+                "field": "preferred_days",
+                "normalized_value": expected,
+                "semantic_status": "partial",
+                "confidence": 0.9,
+                "source_text": answer,
+                "needs_clarification": False,
+            }
         )
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            response = TestClient(app).post(
+                "/chat",
+                json={
+                    "case_id": case.case_id,
+                    "answers": [{"key": "preferred_days", "answer": answer}],
+                },
+            )
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
         self.assertTrue(data["needMoreInfo"])
         self.assertEqual(data["question_batch"][0]["key"], "preferred_sessions")
+        self.assertEqual(data["triage_case"]["availability"]["preferred_days"], expected)
         self.assertEqual(data["triage_case"]["availability"]["preferred_sessions"], [])
         self.assertIsNone(data["department_result"])
+        provider.assert_awaited_once()
 
     async def test_weak_tone_half_year_duration_is_deterministic(self):
         answer = "大概半年了吧"
@@ -706,14 +736,14 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.patient_input.severity, "severe")
         self.assertNotIn("severity", missing_checklist_fields(case))
 
-    async def test_weak_tone_excluded_day_answer_is_deterministic(self):
+    async def test_weak_tone_excluded_day_answer_uses_semantic_ai(self):
         answer = "下禮拜除了禮拜三之外應該都可以"
         expected = ["週一", "週二", "週四", "週五", "週六", "週日"]
         provider = self._semantic_provider(
             {
                 "field": "preferred_days",
                 "normalized_value": expected,
-                "semantic_status": "available",
+                "semantic_status": "partial",
                 "confidence": 0.91,
                 "source_text": answer,
                 "needs_clarification": False,
@@ -723,7 +753,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
 
         case, provider = await self._extract("preferred_days", answer, provider=provider)
 
-        provider.assert_not_awaited()
+        provider.assert_awaited_once()
         self.assertEqual(case.availability.preferred_days, expected)
         self.assertNotIn("preferred_days", missing_checklist_fields(case))
 

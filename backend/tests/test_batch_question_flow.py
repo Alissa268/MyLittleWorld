@@ -439,6 +439,80 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing_checklist_fields(case), [])
         provider.assert_awaited_once()
 
+    async def test_availability_complements_complete_the_real_batch_flow(self):
+        case = TriageCase(case_id=_case_id("availability_complements"), visit_type=VisitType.INITIAL)
+        case.patient_input.symptom = "頭痛"
+        case.patient_input.body_part = "頭"
+        case.patient_input.duration = "3天"
+        case.patient_input.severity = "mild"
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
+        day_answer = "我下週三有事其他時間應該都可以"
+        session_answer = "我不喜歡早上跟晚上"
+        expected_days = ["週一", "週二", "週四", "週五", "週六", "週日"]
+        provider = AsyncMock(
+            side_effect=(
+                json.dumps(
+                    {
+                        "extractions": [
+                            {
+                                "field": "preferred_days",
+                                "normalized_value": expected_days,
+                                "semantic_status": "partial",
+                                "confidence": 0.9,
+                                "source_text": day_answer,
+                                "needs_clarification": False,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+                json.dumps(
+                    {
+                        "extractions": [
+                            {
+                                "field": "preferred_sessions",
+                                "normalized_value": ["下午"],
+                                "semantic_status": "partial",
+                                "confidence": 0.9,
+                                "source_text": session_answer,
+                                "needs_clarification": False,
+                            }
+                        ]
+                    },
+                    ensure_ascii=False,
+                ),
+            )
+        )
+
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_days", answer=day_answer)],
+            )
+            self.assertEqual(case.availability.preferred_days, expected_days)
+            self.assertEqual(
+                [item.key for item in build_question_batch(case, mark_asked=False)],
+                ["preferred_sessions"],
+            )
+
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_sessions", answer=session_answer)],
+            )
+
+        self.assertEqual(provider.await_count, 2)
+        self.assertEqual(case.availability.preferred_days, expected_days)
+        self.assertEqual(case.availability.preferred_sessions, ["下午"])
+        self.assertNotIn("週三", case.availability.preferred_days)
+        self.assertNotIn("上午", case.availability.preferred_sessions)
+        self.assertNotIn("夜間", case.availability.preferred_sessions)
+        self.assertEqual(missing_checklist_fields(case), [])
+
     def test_relative_days_preserve_both_later_dates(self):
         weekday_names = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
         today = _taipei_today()

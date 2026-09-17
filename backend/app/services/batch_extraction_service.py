@@ -528,6 +528,8 @@ def _deterministic_fast_path_decision(
         return False, "semantic_refinement_required"
     if extraction.confidence < ACCEPT_THRESHOLD:
         return False, "confidence_below_threshold"
+    if field_name == "preferred_days" and _has_compound_day_semantics(text):
+        return False, "compound_day_semantics"
     if field_name == "preferred_sessions" and _has_compound_session_semantics(text):
         return False, "compound_session_semantics"
     if field_name == "severity":
@@ -576,6 +578,28 @@ _COMPOUND_SESSION_TERMS = (
     "以前",
     "才方便",
 )
+
+_AVAILABILITY_POLARITY_TERMS = (
+    "不方便",
+    "不能",
+    "沒空",
+    "不行",
+    "除了",
+    "其他",
+    "其餘",
+    "但是",
+    "可是",
+    "不過",
+)
+
+
+def _has_compound_day_semantics(text: str) -> bool:
+    """Detect polarity risk around named days; leave its interpretation to AI."""
+    has_named_day = bool(
+        re.search(r"(?:週|星期|禮拜)[一二三四五六日天]", text)
+        or any(term in text for term in ("平日", "工作日", "週末", "假日"))
+    )
+    return has_named_day and any(term in text for term in _AVAILABILITY_POLARITY_TERMS)
 
 
 def _has_compound_session_semantics(text: str) -> bool:
@@ -749,7 +773,14 @@ symptom 可正規化為簡短症狀文字，不必受手寫症狀詞表限制；
 body_part 若是未知於既有 canonical 的部位，normalized_value 應保留 source_text 中可逐字找到的核心部位（例如「鎖骨附近」→「鎖骨」、「手腕那邊」→「手腕」）；只有已知 canonical 可改寫（例如「腸胃」→「腹」）。不得把來源中的部位替換成無關部位。
 duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 severity 的 normalized_value 只能是字串 "mild"、"moderate" 或 "severe"；輕微／還好轉為 mild，普通／中等／中度轉為 moderate，嚴重／很嚴重／痛到無法睡覺轉為 severe。不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
-preferred_days 只能正規化為週一至週日；preferred_sessions 只能是上午、下午、夜間。"""
+preferred_days 與 preferred_sessions 是封閉集合：
+- preferred_days 全集只能是 ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]。
+- preferred_sessions 全集只能是 ["上午", "下午", "夜間"]；早上等同上午，晚上等同夜間。
+- 在目前問題就是該 availability 欄位時，若原文明確排除部分 option，且剩餘 option 可由全集唯一、安全地推導，normalized_value 必須回傳剩餘可用集合，不可只回被排除的 option，也不可因此回 unknown、ambiguous 或空陣列。
+- preferred_sessions 例如「我不喜歡早上跟晚上」→ ["下午"]；「不要下午」→ ["上午", "夜間"]；「下午可以，但是晚上不要」→ ["下午"]。
+- preferred_days 只有在原文明確表達 complement（例如「其他都可以／其餘都可以」）時才補全集：例如「我下週三有事其他時間都可以」→ ["週一", "週二", "週四", "週五", "週六", "週日"]；「週三跟週五不行，其他都可以」→ ["週一", "週二", "週四", "週六", "週日"]。單獨說「週三不行」不可擅自假設其他六天都可以。
+- availability 回傳全部 option 時 semantic_status=available；只回部分可用 option（包含 complement 後的剩餘集合）時 semantic_status=partial。partial 是可直接寫入的有效答案，needs_clarification=false。
+- source_text 仍必須是使用者本次回答中的連續逐字原文，不得把 normalized_value 當成 source_text。"""
 
 
 def _parse_ai_extractions(
