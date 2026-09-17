@@ -23,6 +23,11 @@ ALL_WEEKDAYS = ["週一", "週二", "週三", "週四", "週五", "週六", "週
 WEEKDAY_DAYS = ["週一", "週二", "週三", "週四", "週五"]
 WEEKEND_DAYS = ["週六", "週日"]
 ALL_SESSIONS = ["上午", "下午", "夜間"]
+SESSION_ALIASES = {
+    "上午": ("上午", "早上", "早晨", "一早", "中午前"),
+    "下午": ("下午", "午後", "中午後"),
+    "夜間": ("夜間", "晚上", "晚間", "夜診", "下班後"),
+}
 
 ANY_SESSION_TERMS = [
     "都可以", "我都可以", "隨便", "隨便安排", "都行", "皆可", "任何時段都可以",
@@ -124,6 +129,10 @@ def normalize_severity(text: str) -> SeverityNormalization:
     explicit_mild_terms = [
         "沒有影響",
         "沒有影響生活",
+        "沒有影響日常活動",
+        "沒有到影響日常活動",
+        "沒有明顯影響日常生活",
+        "沒有到影響日常生活",
         "都可以正常生活",
         "可以正常生活",
         "可以正常作息",
@@ -451,16 +460,7 @@ def normalize_preferred_sessions(text: str, last_question_key: str | None = None
         return None
 
     excluded_sessions = _extract_excluded_sessions(text)
-    if excluded_sessions:
-        sessions = [session for session in ALL_SESSIONS if session not in excluded_sessions]
-        return _extraction(
-            PREFERRED_SESSIONS_KEY,
-            sessions,
-            "partial",
-            confidence_with_uncertainty(0.92, text),
-            text,
-        )
-    if _is_unavailable_answer(text, last_question_key, PREFERRED_SESSIONS_KEY):
+    if not excluded_sessions and _is_unavailable_answer(text, last_question_key, PREFERRED_SESSIONS_KEY):
         return _extraction(PREFERRED_SESSIONS_KEY, [], "unavailable", 0.75, text, "使用者表示時段不方便")
 
     sessions: list[str] = []
@@ -469,15 +469,10 @@ def normalize_preferred_sessions(text: str, last_question_key: str | None = None
         sessions.extend(ALL_SESSIONS)
         confidence = max(confidence, confidence_with_uncertainty(0.72, text))
 
-    if any(term in text for term in ["上午", "早上", "早晨", "一早", "中午前"]):
-        sessions.append("上午")
-        confidence = max(confidence, confidence_with_uncertainty(0.86, text))
-    if any(term in text for term in ["下午", "午後", "中午後"]):
-        sessions.append("下午")
-        confidence = max(confidence, confidence_with_uncertainty(0.86, text))
-    if any(term in text for term in ["夜間", "晚上", "晚間", "夜診", "下班後"]):
-        sessions.append("夜間")
-        confidence = max(confidence, confidence_with_uncertainty(0.86, text))
+    for session, aliases in SESSION_ALIASES.items():
+        if session not in excluded_sessions and any(term in text for term in aliases):
+            sessions.append(session)
+            confidence = max(confidence, confidence_with_uncertainty(0.86, text))
     if any(term in text for term in ["全天", "整天", "任何時段"]):
         sessions.extend(ALL_SESSIONS)
         confidence = max(confidence, confidence_with_uncertainty(0.88, text))
@@ -491,6 +486,12 @@ def normalize_preferred_sessions(text: str, last_question_key: str | None = None
     ):
         sessions.extend(ALL_SESSIONS)
         confidence = confidence_with_uncertainty(0.78, text)
+
+    if excluded_sessions:
+        sessions = [session for session in sessions if session not in excluded_sessions]
+        confidence = max(confidence, confidence_with_uncertainty(0.92, text))
+        if not sessions:
+            sessions = [session for session in ALL_SESSIONS if session not in excluded_sessions]
 
     if not sessions:
         return None
@@ -605,18 +606,14 @@ def _extract_excluded_weekdays(text: str) -> list[str]:
 
 
 def _extract_excluded_sessions(text: str) -> list[str]:
-    aliases = {
-        "上午": ("上午", "早上", "早晨"),
-        "下午": ("下午", "午後"),
-        "夜間": ("夜間", "晚上", "晚間", "夜診"),
-    }
-
     def mentioned(segment: str) -> list[str]:
         return [
             session
-            for session, terms in aliases.items()
+            for session, terms in SESSION_ALIASES.items()
             if any(term in segment for term in terms)
         ]
+
+    excluded_sessions: set[str] = set()
 
     if "除了" in text:
         segment = text.split("除了", 1)[1]
@@ -628,7 +625,7 @@ def _extract_excluded_sessions(text: str) -> list[str]:
         if boundaries:
             excluded = mentioned(segment[: min(boundaries)])
             if excluded:
-                return excluded
+                excluded_sessions.update(excluded)
 
     complement_markers = (
         "其他都可以",
@@ -643,8 +640,18 @@ def _extract_excluded_sessions(text: str) -> list[str]:
     matching_markers = [marker for marker in complement_markers if marker in text]
     if matching_markers and any(term in text for term in ("不行", "不能", "沒空", "不方便")):
         boundary = min(text.find(marker) for marker in matching_markers)
-        return mentioned(text[:boundary])
-    return []
+        excluded_sessions.update(mentioned(text[:boundary]))
+
+    direct_negations = ("不要", "不想要", "不想", "不希望", "不方便", "不能", "不行", "沒空", "無法")
+    negation_pattern = "|".join(map(re.escape, direct_negations))
+    for session, aliases in SESSION_ALIASES.items():
+        alias_pattern = "|".join(map(re.escape, aliases))
+        before_session = rf"(?:{negation_pattern})\s*(?:{alias_pattern})"
+        after_session = rf"(?:{alias_pattern})\s*(?:{negation_pattern})"
+        if re.search(before_session, text) or re.search(after_session, text):
+            excluded_sessions.add(session)
+
+    return [session for session in ALL_SESSIONS if session in excluded_sessions]
 
 
 def _has_appointment_session_context(text: str, last_question_key: str | None) -> bool:

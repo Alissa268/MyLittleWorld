@@ -383,6 +383,43 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
             ["週五", "週六"],
         )
 
+    async def test_real_flow_keeps_mild_severity_and_only_non_negated_session(self):
+        case = TriageCase(case_id=_case_id("severity_session_negation"), visit_type=VisitType.INITIAL)
+        case.patient_input.symptom = "頭痛"
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
+        case.patient_input.body_part = "頭"
+        case.patient_input.duration = "3天"
+        provider = AsyncMock(side_effect=AssertionError("clear deterministic answers must not call Cerebras"))
+
+        with patch.object(batch_extraction_service, "complete_prompt", new=provider):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="severity", answer="沒有到影響日常活動")],
+            )
+            self.assertEqual(case.patient_input.severity, "mild")
+            self.assertEqual(
+                [item.key for item in build_question_batch(case, mark_asked=False)],
+                ["preferred_days"],
+            )
+
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_days", answer="週三或週四")],
+            )
+            self.assertEqual(case.availability.preferred_days, ["週三", "週四"])
+
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_sessions", answer="我不想要夜間也不想上午")],
+            )
+
+        self.assertEqual(case.availability.preferred_sessions, ["下午"])
+        self.assertNotIn("上午", case.availability.preferred_sessions)
+        self.assertNotIn("夜間", case.availability.preferred_sessions)
+        self.assertEqual(missing_checklist_fields(case), [])
+        provider.assert_not_awaited()
+
     def test_relative_days_preserve_both_later_dates(self):
         weekday_names = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
         today = _taipei_today()

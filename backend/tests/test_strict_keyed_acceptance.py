@@ -253,6 +253,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             ("沒有都可以正常作息", "mild"),
             ("沒有影響", "mild"),
             ("沒有影響生活", "mild"),
+            ("沒有影響日常活動", "mild"),
+            ("沒有到影響日常活動", "mild"),
+            ("沒有明顯影響日常生活", "mild"),
+            ("沒有到影響日常生活", "mild"),
             ("都可以正常生活", "mild"),
             ("可以正常作息", "mild"),
             ("不影響作息", "mild"),
@@ -282,6 +286,15 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertNotIn("severity", missing_checklist_fields(case))
                 provider.assert_not_awaited()
+
+    async def test_bare_negative_does_not_guess_mild_severity(self):
+        provider = self._semantic_provider()
+
+        case, provider = await self._extract("severity", "沒有", provider=provider)
+
+        self.assertIsNone(case.patient_input.severity)
+        self.assertIn("severity", missing_checklist_fields(case))
+        provider.assert_awaited_once()
 
     async def test_meta_reply_rechecks_previous_severity_answer(self):
         case = TriageCase(case_id="strict-meta-recheck", visit_type=VisitType.INITIAL)
@@ -999,6 +1012,16 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             ("夜間不行，其他都可以", ["上午", "下午"]),
             ("下午不方便，其他時段都行", ["上午", "夜間"]),
             ("上午跟下午都可以", ["上午", "下午"]),
+            ("我不想要夜間也不想上午", ["下午"]),
+            ("不要夜間", ["上午", "下午"]),
+            ("不要上午", ["下午", "夜間"]),
+            ("上午不方便", ["下午", "夜間"]),
+            ("晚上不要", ["上午", "下午"]),
+            ("夜間不行", ["上午", "下午"]),
+            ("下午沒空", ["上午", "夜間"]),
+            ("下午可以，夜間不要", ["下午"]),
+            ("上午可以，下午不方便", ["上午"]),
+            ("下午跟夜間都可以", ["下午", "夜間"]),
         )
         for answer, expected in examples:
             with self.subTest(answer=answer):

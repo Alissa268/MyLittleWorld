@@ -28,6 +28,16 @@ class QuestionSpecTest(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(QUESTION_SPEC_BY_ID[spec.question_id].state_field, spec.state_field)
                 self.assertIs(QUESTION_SPEC_BY_FIELD[spec.state_field], spec)
 
+    def test_every_severity_variant_asks_for_the_same_three_level_scale(self):
+        variants = QUESTION_SPEC_BY_ID["severity"].variants
+
+        self.assertEqual(len(variants), 5)
+        for variant in variants:
+            with self.subTest(variant=variant):
+                self.assertIn("輕微", variant)
+                self.assertTrue(any(term in variant for term in ("普通", "中等")))
+                self.assertTrue(any(term in variant for term in ("嚴重", "很痛")))
+
     def test_seeded_selector_is_reproducible(self):
         first_rng = random.Random(42)
         second_rng = random.Random(42)
