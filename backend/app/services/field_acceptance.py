@@ -342,6 +342,52 @@ def normalized_value_valid(field: str, value: Any, status: str) -> bool:
     return False
 
 
+def ai_normalized_value_rejection_reason(
+    field: str,
+    value: Any,
+    status: str,
+    source_text: str,
+) -> str | None:
+    """Validate AI output shape without requiring free-text values to be in rule dictionaries."""
+    if status in {"unknown", "ambiguous"}:
+        return None
+    if field not in {"symptom", "body_part"}:
+        return None if normalized_value_valid(field, value, status) else "invalid_canonical_value"
+
+    text = str(value or "").strip()
+    source = str(source_text or "").strip()
+    max_length = 24 if field == "symptom" else 16
+    if not text or len(text) > max_length or re.search(r"[\r\n，。！？；;]", text):
+        return "invalid_normalized_value"
+    if "科" in text or any(term in text for term in ("門診", "醫院", "診所", "掛號")):
+        return "invalid_normalized_value"
+    if re.search(r"\d{4}-\d{2}-\d{2}", text) or text in {
+        "週一", "週二", "週三", "週四", "週五", "週六", "週日", "上午", "下午", "夜間",
+    }:
+        return "invalid_normalized_value"
+
+    if field == "symptom":
+        return None
+
+    if text in {"左", "右", "左邊", "右邊", "附近", "這裡", "那裡", "身體"}:
+        return "invalid_normalized_value"
+    if text in source:
+        return None
+    if any(text[index : index + 2] in source for index in range(max(len(text) - 1, 0))):
+        return None
+    # Known canonicalization (for example 腸胃 -> 腹) is allowed, while novel
+    # anatomy remains open-ended as long as the normalized phrase is quoted
+    # from the grounded source. This blocks unrelated replacements such as
+    # 鎖骨附近 -> 膝蓋 without rebuilding an anatomy dictionary.
+    if normalize_body_part(source) == text:
+        return None
+    return "normalized_value_not_supported_by_source"
+
+
+def ai_normalized_value_valid(field: str, value: Any, status: str, source_text: str) -> bool:
+    return ai_normalized_value_rejection_reason(field, value, status, source_text) is None
+
+
 def plausible_semantic_target(field: str, text: str) -> bool:
     """Identify possible extra slots; never use this to block a keyed fallback."""
     if field == "symptom":

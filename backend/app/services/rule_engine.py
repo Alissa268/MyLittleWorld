@@ -11,6 +11,7 @@ from app.services.clarification_engine import clarification_prompt
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS, accepted
 from app.services.field_acceptance import (
     DURATION_ONSET_PATTERN,
+    ai_normalized_value_valid,
     has_symptom_semantics,
     looks_like_department_request,
     normalize_body_part,
@@ -505,31 +506,94 @@ def apply_semantic_extractions(
     """Apply schema-validated extraction while preserving deterministic gates."""
     accepted_extractions: list[SemanticExtraction] = []
     for extraction in extractions:
+        is_ai_extraction = extraction.extractor.startswith("ai")
         if extraction.field not in {*CHECKLIST_FIELD_ORDER, PREFERRED_DATES_KEY}:
+            if is_ai_extraction:
+                _log_ai_apply_decision(case, extraction, False, "invalid_field")
             continue
         if extraction.field == RED_FLAG_QUESTION_KEY and not allow_red_flag_completion:
+            if is_ai_extraction:
+                _log_ai_apply_decision(case, extraction, False, "red_flags_deterministic_only")
             continue
         if (
-            extraction.field not in {RED_FLAG_QUESTION_KEY, PREFERRED_DATES_KEY}
-            and extraction.semantic_status != "uncertain"
-            and not normalized_value_valid(
+            is_ai_extraction
+            and not case.conversation_state.revision_mode
+            and extraction.semantic_status in {"available", "partial"}
+            and _field_has_value(case, extraction.field)
+        ):
+            _log_ai_apply_decision(case, extraction, False, "duplicate_existing_value")
+            continue
+        value_valid = (
+            ai_normalized_value_valid(
+                extraction.field,
+                extraction.normalized_value,
+                extraction.semantic_status,
+                extraction.source_text,
+            )
+            if is_ai_extraction
+            else normalized_value_valid(
                 extraction.field,
                 extraction.normalized_value,
                 extraction.semantic_status,
             )
+        )
+        if (
+            extraction.field not in {RED_FLAG_QUESTION_KEY, PREFERRED_DATES_KEY}
+            and extraction.semantic_status != "uncertain"
+            and not value_valid
         ):
             logger.info(
                 "semantic extraction rejected field=%s reason=strict_field_validation",
                 extraction.field,
             )
+            if is_ai_extraction:
+                _log_ai_apply_decision(case, extraction, False, "invalid_normalized_value")
+            continue
+        if is_ai_extraction and not accepted(extraction.confidence, extraction.semantic_status):
+            reason = (
+                "confidence_too_low"
+                if extraction.semantic_status not in {"unknown", "ambiguous"}
+                else "status_requires_clarification"
+            )
+            _record_semantic_extraction(case, extraction)
+            _log_ai_apply_decision(case, extraction, False, reason)
             continue
         _record_semantic_extraction(case, extraction)
         _apply_semantic_extraction(case, extraction)
         accepted_extractions.append(extraction)
+        if is_ai_extraction:
+            _log_ai_apply_decision(case, extraction, True, None)
     if accepted_extractions:
         case.semantic_extractions.extend(accepted_extractions)
         case.semantic_extractions = case.semantic_extractions[-50:]
     _refresh_collected_fields(case)
+
+
+def _field_has_value(case: TriageCase, field_name: str) -> bool:
+    if field_name in {"symptom", "body_part", "duration", "severity"}:
+        return bool(getattr(case.patient_input, field_name))
+    if field_name == "preferred_dates":
+        return bool(case.availability.preferred_dates)
+    if field_name == "preferred_days":
+        return bool(case.availability.preferred_days)
+    if field_name == "preferred_sessions":
+        return bool(case.availability.preferred_sessions)
+    return False
+
+
+def _log_ai_apply_decision(
+    case: TriageCase,
+    extraction: SemanticExtraction,
+    accepted_value: bool,
+    reject_reason: str | None,
+) -> None:
+    logger.info(
+        "[SEMANTIC_AI_DECISION] case_id=%s field=%s accepted=%s reject_reason=%s",
+        case.case_id,
+        extraction.field,
+        str(accepted_value).lower(),
+        reject_reason or "null",
+    )
 
 
 def _record_semantic_extraction(case: TriageCase, extraction: SemanticExtraction) -> None:

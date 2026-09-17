@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -10,14 +11,15 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from app.config import get_settings
 from app.schemas import BatchAnswer, Message, SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
-from app.services.confidence_scoring import MAX_QUESTION_ATTEMPTS
+from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS
 from app.services.department_preference_service import capture_department_preference
 from app.services.field_acceptance import (
+    ai_normalized_value_rejection_reason,
     has_symptom_semantics,
-    normalized_value_valid as strict_normalized_value_valid,
     plausible_semantic_target,
     requires_semantic_refinement,
 )
+from app.services.question_specs import question_spec_for_field
 from app.services.rule_engine import (
     CHECKLIST_FIELD_ORDER,
     apply_semantic_extractions,
@@ -140,6 +142,15 @@ async def extract_batch_answers(
             if fallback is not None:
                 ambiguous_fallbacks[key] = fallback
         extractions = _deterministic_extractions_for_answer(case, key, text)
+        primary = next((item for item in extractions if item.field == key), None)
+        if (
+            primary is not None
+            and key != "red_flags"
+            and not _is_clear_deterministic_fast_path(key, text, primary)
+        ):
+            if key == "severity":
+                ambiguous_fallbacks[key] = primary
+            extractions = [item for item in extractions if item is not primary]
         if extractions:
             apply_semantic_extractions(case, extractions)
         if (
@@ -214,9 +225,22 @@ async def extract_batch_answers(
 
     outcome.ai_attempted = True
     prompt = _build_batch_prompt(case, semantic_sources, ai_targets)
+    for field_name in ai_targets:
+        logger.info(
+            "[SEMANTIC_AI_REQUEST] case_id=%s field=%s question=%r answer=%r",
+            case.case_id,
+            field_name,
+            question_spec_for_field(field_name).canonical_text,
+            semantic_sources[field_name],
+        )
     try:
         raw = await complete_prompt(prompt)
-        extractions = _parse_ai_extractions(raw, answered_text, ai_targets)
+        extractions = _parse_ai_extractions(
+            raw,
+            semantic_sources,
+            ai_targets,
+            case_id=case.case_id,
+        )
         apply_semantic_extractions(
             case,
             extractions,
@@ -445,6 +469,30 @@ def _looks_ambiguous(text: str) -> bool:
     return requires_semantic_refinement(text)
 
 
+def _is_clear_deterministic_fast_path(
+    field_name: str,
+    text: str,
+    extraction: SemanticExtraction,
+) -> bool:
+    """Keep only high-confidence, low-interpretation answers on the zero-AI path."""
+    if requires_semantic_refinement(text):
+        return False
+    if extraction.confidence < ACCEPT_THRESHOLD:
+        return False
+    if field_name == "severity":
+        direct_scale_terms = ("輕微", "普通", "中等", "中度", "嚴重", "很痛", "劇痛")
+        return extraction.confidence >= 0.85 or any(term in text for term in direct_scale_terms)
+    if field_name == "body_part":
+        normalized = str(extraction.normalized_value or "").strip()
+        if len(normalized) != 1 or normalized not in text:
+            return True
+        if text.strip(" ，。！？!?") == normalized or text.rstrip(" ，。！？!?").endswith(normalized):
+            return True
+        remainder = text.replace(normalized, "", 1)
+        return has_symptom_semantics(remainder)
+    return True
+
+
 def _is_meta_reply(text: str) -> bool:
     normalized = "".join(character for character in text if character not in " \t\r\n，。！？!?、")
     return any(term in normalized for term in _META_REPLY_TERMS)
@@ -477,6 +525,14 @@ def _build_batch_prompt(
     targets: list[str],
 ) -> str:
     target_answers = {key: answered_text[key] for key in targets}
+    current_questions = {
+        key: {
+            "current_question_field": key,
+            "current_question": question_spec_for_field(key).canonical_text,
+            "user_answer": answered_text[key],
+        }
+        for key in targets
+    }
     history = [item.model_dump() for item in case.history_records[-20:]]
     return f"""你是醫療問診的 structured extraction 元件，只能抽取指定欄位。
 不得決定 stage、is_complete、confirmed、red_flags_checked、next_question 或推薦流程。
@@ -484,6 +540,9 @@ def _build_batch_prompt(
 允許欄位：{json.dumps(targets, ensure_ascii=False)}
 本批仍需協助解析的 keyed answers：
 {json.dumps(target_answers, ensure_ascii=False, indent=2)}
+
+目前正在回答的問題語境（current_question_field、current_question、user_answer）：
+{json.dumps(current_questions, ensure_ascii=False, indent=2)}
 
 目前 patient_input：
 {json.dumps(case.patient_input.model_dump(), ensure_ascii=False, indent=2)}
@@ -515,6 +574,10 @@ key 只表示目前系統正在問的欄位，不代表原句一定回答了該�
 最外層 key 必須且只能是 extractions，不可改成 semantic_extractions 或其他名稱。
 source_text 必須逐字複製自本批 keyed answers 的一段連續原文，不可改寫或省略。
 只要原句對任一允許欄位有明確資訊，就必須輸出該 extraction；不要因其他欄位不確定而整體回空。
+弱語氣不等於無法回答：「吧、可能、大概、應該、好像、差不多、左右」若仍有清楚核心資訊，必須輸出 available（集合欄位可用 partial）、needs_clarification=false。
+available 表示資訊足以寫入；partial 表示可用但只涵蓋集合的一部分；ambiguous 只用於互相衝突且無法安全選擇；unknown 只用於未提供資訊或明確表示不知道。
+symptom 可正規化為簡短症狀文字，不必受手寫症狀詞表限制；body_part 可正規化為簡短解剖位置，不必受手寫部位詞表限制。
+body_part 若是未知於既有 canonical 的部位，normalized_value 應保留 source_text 中可逐字找到的核心部位（例如「鎖骨附近」→「鎖骨」、「手腕那邊」→「手腕」）；只有已知 canonical 可改寫（例如「腸胃」→「腹」）。不得把來源中的部位替換成無關部位。
 duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 severity 的 normalized_value 只能是字串 "mild"、"moderate" 或 "severe"；輕微／還好轉為 mild，普通／中等／中度轉為 moderate，嚴重／很嚴重／痛到無法睡覺轉為 severe。不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
 preferred_days 只能正規化為週一至週日；preferred_sessions 只能是上午、下午、夜間。"""
@@ -524,6 +587,8 @@ def _parse_ai_extractions(
     raw: str,
     answered_text: dict[str, str],
     targets: list[str],
+    *,
+    case_id: str | None = None,
 ) -> list[SemanticExtraction]:
     text = str(raw).strip().replace("```json", "").replace("```", "").strip()
     try:
@@ -532,7 +597,9 @@ def _parse_ai_extractions(
     except (json.JSONDecodeError, ValidationError, TypeError) as exc:
         envelope_keys = sorted(raw_payload.keys()) if isinstance(locals().get("raw_payload"), dict) else []
         logger.warning(
-            "[AI] purpose=semantic_validation schema_validation=failed envelope_keys=%s error_type=%s",
+            "[SEMANTIC_AI_DECISION] case_id=%s field=unknown accepted=false "
+            "reject_reason=schema_invalid envelope_keys=%s error_type=%s",
+            case_id or "unknown",
             envelope_keys,
             type(exc).__name__,
         )
@@ -549,11 +616,38 @@ def _parse_ai_extractions(
         reason = _semantic_rejection_reason(item, target_set, seen)
         if reason:
             rejected.append({"field": field_name or "empty", "reason": reason})
+            _log_semantic_ai_decision(case_id, field_name or "empty", False, reason)
             continue
         normalized_fields.append(field_name)
         source_text = item.source_text.strip()
-        if not _source_text_grounded(source_text, answered_text):
+        logger.info(
+            "[SEMANTIC_AI_PARSED] case_id=%s field=%s normalized_value=%r status=%s "
+            "confidence=%.3f source_text=%r",
+            case_id or "unknown",
+            field_name,
+            item.normalized_value,
+            item.semantic_status,
+            item.confidence,
+            source_text,
+        )
+        source_required = item.semantic_status in {"available", "partial", "unavailable"}
+        if (source_required or source_text) and not _source_text_grounded(
+            field_name,
+            source_text,
+            answered_text,
+        ):
             rejected.append({"field": field_name, "reason": "source_not_grounded"})
+            _log_semantic_ai_decision(case_id, field_name, False, "source_not_grounded")
+            continue
+        normalized_reason = ai_normalized_value_rejection_reason(
+            field_name,
+            item.normalized_value,
+            item.semantic_status,
+            source_text,
+        )
+        if normalized_reason:
+            rejected.append({"field": field_name, "reason": normalized_reason})
+            _log_semantic_ai_decision(case_id, field_name, False, normalized_reason)
             continue
         grounded_fields.append(field_name)
         seen.add(field_name)
@@ -569,6 +663,9 @@ def _parse_ai_extractions(
                 extractor="ai_batch",
             )
         )
+    if not payload.extractions:
+        for field_name in targets:
+            _log_semantic_ai_decision(case_id, field_name, False, "no_extraction")
     logger.info(
         "[AI] purpose=semantic_validation raw_fields=%s schema_validation=passed "
         "normalized_fields=%s grounded_fields=%s final_fields=%s rejected=%s",
@@ -588,23 +685,42 @@ def _semantic_rejection_reason(
 ) -> str | None:
     field_name = item.field.strip()
     if field_name not in _ALLOWED_FIELDS:
-        return "field_not_allowed"
+        return "invalid_field"
     if field_name not in target_set:
-        return "field_not_requested"
+        return "invalid_field"
     if field_name == "red_flags":
         return "red_flags_deterministic_only"
     if field_name in seen:
         return "duplicate_field"
     if item.semantic_status not in _ALLOWED_STATUSES:
         return "invalid_status"
-    if not _normalized_value_valid(field_name, item.normalized_value, item.semantic_status):
-        return "invalid_normalized_value"
+    if (
+        item.semantic_status in {"available", "partial", "unavailable"}
+        and item.confidence < ACCEPT_THRESHOLD
+    ):
+        return "confidence_too_low"
     return None
 
 
-def _source_text_grounded(source_text: str, answered_text: dict[str, str]) -> bool:
-    return bool(source_text) and any(source_text in answer for answer in answered_text.values())
+def _source_text_grounded(
+    field_name: str,
+    source_text: str,
+    answered_text: dict[str, str],
+) -> bool:
+    answer = answered_text.get(field_name, "")
+    return bool(source_text) and source_text in answer
 
 
-def _normalized_value_valid(field_name: str, value: Any, status: str) -> bool:
-    return strict_normalized_value_valid(field_name, value, status)
+def _log_semantic_ai_decision(
+    case_id: str | None,
+    field_name: str,
+    accepted_value: bool,
+    reject_reason: str | None,
+) -> None:
+    logger.info(
+        "[SEMANTIC_AI_DECISION] case_id=%s field=%s accepted=%s reject_reason=%s",
+        case_id or "unknown",
+        field_name,
+        str(accepted_value).lower(),
+        reject_reason or "null",
+    )

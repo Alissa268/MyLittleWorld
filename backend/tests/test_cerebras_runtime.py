@@ -92,7 +92,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
                     "extractions": [
                         {
                             "field": "body_part",
-                            "normalized_value": "右肩",
+                            "normalized_value": "肩膀",
                             "semantic_status": "available",
                             "confidence": 0.91,
                             "source_text": "不知道是不是肩膀附近",
@@ -112,7 +112,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
 
         provider.assert_awaited_once()
         self.assertTrue(outcome.ai_attempted)
-        self.assertEqual(case.patient_input.body_part, "右肩")
+        self.assertEqual(case.patient_input.body_part, "肩膀")
 
     async def test_invalid_semantic_field_is_rejected(self):
         case = TriageCase(case_id="invalid-field", visit_type=VisitType.INITIAL)

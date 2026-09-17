@@ -1127,7 +1127,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
                     "extractions": [
                         {
                             "field": "body_part",
-                            "normalized_value": "右肩",
+                            "normalized_value": "肩膀",
                             "semantic_status": "available",
                             "confidence": 0.91,
                             "source_text": "不知道是不是肩膀附近",
@@ -1149,7 +1149,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(provider.await_count, 1)
         self.assertIsInstance(provider.await_args.args[0], str)
-        self.assertEqual(case.patient_input.body_part, "右肩")
+        self.assertEqual(case.patient_input.body_part, "肩膀")
         self.assertEqual(outcome.ai_fields, ["body_part"])
 
     async def test_timeout_402_429_and_malformed_json_fall_back(self):
