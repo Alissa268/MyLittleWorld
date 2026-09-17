@@ -9,9 +9,10 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import BatchAnswer, Message, TriageCase, VisitType
-from app.services import batch_extraction_service, department_preference_service
+from app.services import batch_extraction_service, department_preference_service, rag_triage_adapter
 from app.services.batch_extraction_service import extract_batch_answers
 from app.services.case_store import save_case
+from app.services.field_acceptance import normalize_body_part
 from app.services.rule_engine import mark_questions_asked, missing_checklist_fields
 
 
@@ -187,22 +188,11 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         provider.assert_awaited_once()
 
     async def test_valid_duration_is_accepted(self):
-        provider = self._semantic_provider(
-            {
-                "field": "duration",
-                "normalized_value": "3天",
-                "semantic_status": "available",
-                "confidence": 0.95,
-                "source_text": "大概三天",
-                "needs_clarification": False,
-                "follow_up_reason": None,
-            }
-        )
-        case, provider = await self._extract("duration", "大概三天", provider=provider)
+        case, provider = await self._extract("duration", "大概三天")
 
         self.assertEqual(case.patient_input.duration, "3天")
         self.assertNotIn("duration", missing_checklist_fields(case))
-        provider.assert_awaited_once()
+        provider.assert_not_awaited()
 
     async def test_natural_week_duration_forms_are_canonicalized_without_ai(self):
         clear_examples = (
@@ -223,28 +213,17 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotIn("duration", missing_checklist_fields(case))
                 provider.assert_not_awaited()
 
-        ambiguous_examples = (
+        weak_tone_examples = (
             ("大概一週左右", "1週"),
             ("這個症狀差不多三個禮拜了", "3週"),
         )
-        for answer, expected in ambiguous_examples:
+        for answer, expected in weak_tone_examples:
             with self.subTest(answer=answer):
-                provider = self._semantic_provider(
-                    {
-                        "field": "duration",
-                        "normalized_value": expected,
-                        "semantic_status": "available",
-                        "confidence": 0.95,
-                        "source_text": answer,
-                        "needs_clarification": False,
-                        "follow_up_reason": None,
-                    }
-                )
-                case, provider = await self._extract("duration", answer, provider=provider)
+                case, provider = await self._extract("duration", answer)
 
                 self.assertEqual(case.patient_input.duration, expected)
                 self.assertNotIn("duration", missing_checklist_fields(case))
-                provider.assert_awaited_once()
+                provider.assert_not_awaited()
 
     async def test_weekday_phrases_are_not_consumed_as_duration(self):
         examples = (
@@ -592,7 +571,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(data["triage_case"]["availability"]["preferred_sessions"], [])
         self.assertIsNone(data["department_result"])
 
-    async def test_ambiguous_half_year_duration_is_refined_once(self):
+    async def test_weak_tone_half_year_duration_is_deterministic(self):
         answer = "大概半年了吧"
         provider = self._semantic_provider(
             {
@@ -608,12 +587,12 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
 
         case, provider = await self._extract("duration", answer, provider=provider)
 
-        provider.assert_awaited_once()
+        provider.assert_not_awaited()
         self.assertEqual(case.patient_input.duration, "6個月")
         self.assertNotIn("duration", missing_checklist_fields(case))
         self.assertEqual(case.semantic_extractions[-1].source_text, answer)
 
-    def test_chat_route_accepts_refined_half_year_and_advances(self):
+    def test_chat_route_accepts_deterministic_half_year_and_advances(self):
         answer = "大概半年了吧"
         case = TriageCase(
             case_id=f"strict-half-year-route-{uuid4().hex}",
@@ -656,7 +635,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        provider.assert_awaited_once()
+        provider.assert_not_awaited()
         self.assertEqual(data["triage_case"]["patient_input"]["duration"], "6個月")
         self.assertEqual(data["conversation_state"]["field_statuses"]["duration"], "available")
         self.assertEqual(data["question_batch"][0]["key"], "severity")
@@ -701,7 +680,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.patient_input.severity, "severe")
         self.assertNotIn("severity", missing_checklist_fields(case))
 
-    async def test_ambiguous_excluded_day_answer_is_refined_once(self):
+    async def test_weak_tone_excluded_day_answer_is_deterministic(self):
         answer = "下禮拜除了禮拜三之外應該都可以"
         expected = ["週一", "週二", "週四", "週五", "週六", "週日"]
         provider = self._semantic_provider(
@@ -718,7 +697,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
 
         case, provider = await self._extract("preferred_days", answer, provider=provider)
 
-        provider.assert_awaited_once()
+        provider.assert_not_awaited()
         self.assertEqual(case.availability.preferred_days, expected)
         self.assertNotIn("preferred_days", missing_checklist_fields(case))
 
@@ -764,11 +743,295 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         case, provider = await self._extract("red_flags", "不知道有沒有")
 
         provider.assert_not_awaited()
-        self.assertTrue(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "negative")
-        self.assertNotIn("red_flags", missing_checklist_fields(case))
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+        self.assertIn("red_flags", missing_checklist_fields(case))
 
-    async def test_semantically_plausible_ambiguity_calls_cerebras_at_most_once(self):
+    async def test_second_uncertain_red_flag_answer_uses_safety_completion(self):
+        case = TriageCase(case_id="strict-red-flag-clarification", visit_type=VisitType.INITIAL)
+        case.conversation_state.last_question_key = "red_flags"
+        provider = AsyncMock(side_effect=AssertionError("red flags must never call Cerebras"))
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="red_flags", answer="不知道有沒有")],
+            )
+            self.assertFalse(case.patient_input.red_flags_checked)
+            case.conversation_state.last_question_key = "red_flags"
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="red_flags", answer="真的不知道")],
+            )
+
+        provider.assert_not_awaited()
+        self.assertTrue(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "uncertain")
+        self.assertEqual(
+            case.patient_input.urgency_normalized.answer_classification,
+            "uncertain_after_clarification",
+        )
+
+    async def test_red_flag_negative_and_positive_answers_keep_safe_meaning(self):
+        examples = (
+            ("都沒有", "negative", []),
+            ("沒有以上症狀", "negative", []),
+            ("沒有胸痛也沒有呼吸困難", "negative", []),
+            ("無上述情形", "negative", []),
+            ("有胸痛", "positive_specific", ["突發胸痛"]),
+            ("有一點喘", "positive_specific", ["嚴重呼吸困難"]),
+        )
+        for answer, expected_status, expected_flags in examples:
+            with self.subTest(answer=answer):
+                case, provider = await self._extract("red_flags", answer)
+
+                provider.assert_not_awaited()
+                self.assertTrue(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags_status, expected_status)
+                self.assertEqual(case.patient_input.red_flags, expected_flags)
+
+    async def test_morning_wakeup_symptom_does_not_fill_duration_or_session(self):
+        case = TriageCase(case_id="strict-morning-symptom", visit_type=VisitType.INITIAL)
+        case.patient_input.body_part = "腹"
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
+        case.conversation_state.last_question_key = "symptom"
+        provider = AsyncMock(side_effect=AssertionError("clear symptom must not call Cerebras"))
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="symptom", answer="我最近早上起床的時候會有點想吐")],
+            )
+
+        provider.assert_not_awaited()
+        self.assertEqual(case.patient_input.symptom, "我最近早上起床的時候會有點想吐")
+        self.assertIsNone(case.patient_input.duration)
+        self.assertEqual(case.availability.preferred_sessions, [])
+        self.assertEqual(missing_checklist_fields(case)[0], "duration")
+
+    async def test_explicit_yesterday_onset_still_sets_duration(self):
+        case, provider = await self._extract("symptom", "我從昨天開始就一直想吐")
+
+        provider.assert_not_awaited()
+        self.assertEqual(case.patient_input.duration, "1天")
+
+    async def test_weak_tone_mild_severity_is_deterministic(self):
+        case, provider = await self._extract("severity", "算輕微吧")
+
+        provider.assert_not_awaited()
+        self.assertEqual(case.patient_input.severity, "mild")
+        self.assertNotIn("severity", missing_checklist_fields(case))
+
+    async def test_stomach_and_directional_abdomen_terms_are_canonicalized(self):
+        examples = (
+            ("胃痛", "腹"),
+            ("胃這邊不舒服", "腹"),
+            ("可能是腸胃吧", "腹"),
+            ("右下腹痛", "右下腹"),
+        )
+        for answer, expected in examples:
+            with self.subTest(answer=answer):
+                case, provider = await self._extract("body_part", answer)
+
+                provider.assert_not_awaited()
+                self.assertEqual(case.patient_input.body_part, expected)
+                self.assertEqual(normalize_body_part(answer), expected)
+
+        ai_result = batch_extraction_service._parse_ai_extractions(
+            json.dumps(
+                {
+                    "extractions": [
+                        {
+                            "field": "body_part",
+                            "normalized_value": "腹",
+                            "semantic_status": "available",
+                            "confidence": 0.91,
+                            "source_text": "可能是腸胃吧",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            {"body_part": "可能是腸胃吧"},
+            ["body_part"],
+        )
+        self.assertEqual(ai_result[0].normalized_value, "腹")
+
+    async def test_ai_stomach_value_is_applied_as_abdomen_canonical(self):
+        answer = "不知道是不是胃部"
+        provider = self._semantic_provider(
+            {
+                "field": "body_part",
+                "normalized_value": "胃部",
+                "semantic_status": "available",
+                "confidence": 0.91,
+                "source_text": answer,
+            }
+        )
+
+        case, provider = await self._extract("body_part", answer, provider=provider)
+
+        provider.assert_awaited_once()
+        self.assertEqual(case.patient_input.body_part, "腹")
+
+    async def test_session_exclusions_and_explicit_subsets_are_deterministic(self):
+        examples = (
+            ("除了夜間都可以", ["上午", "下午"]),
+            ("除了下午都可以", ["上午", "夜間"]),
+            ("除了上午都可以", ["下午", "夜間"]),
+            ("夜間不行，其他都可以", ["上午", "下午"]),
+            ("下午不方便，其他時段都行", ["上午", "夜間"]),
+            ("上午跟下午都可以", ["上午", "下午"]),
+        )
+        for answer, expected in examples:
+            with self.subTest(answer=answer):
+                case, provider = await self._extract("preferred_sessions", answer)
+
+                provider.assert_not_awaited()
+                self.assertEqual(case.availability.preferred_sessions, expected)
+
+    async def test_second_body_part_answer_is_parsed_before_attempt_fallback(self):
+        case = TriageCase(case_id="strict-second-body-answer", visit_type=VisitType.INITIAL)
+        case.conversation_state.last_question_key = "body_part"
+        case.conversation_state.question_attempts["body_part"] = 2
+        case.conversation_state.field_statuses["body_part"] = "unknown"
+        provider = AsyncMock(side_effect=AssertionError("clear second answer must not call Cerebras"))
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="body_part", answer="右下腹")],
+            )
+
+        provider.assert_not_awaited()
+        self.assertEqual(case.patient_input.body_part, "右下腹")
+        self.assertNotEqual(case.conversation_state.field_statuses["body_part"], "unknown")
+        self.assertNotIn("body_part", missing_checklist_fields(case))
+
+    async def test_second_unresolved_answer_falls_back_only_after_empty_ai_result(self):
+        case = TriageCase(case_id="strict-second-body-empty", visit_type=VisitType.INITIAL)
+        case.conversation_state.last_question_key = "body_part"
+        case.conversation_state.question_attempts["body_part"] = 2
+        case.conversation_state.field_statuses["body_part"] = "unknown"
+        provider = self._semantic_provider()
+        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=True), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            outcome = await extract_batch_answers(
+                case,
+                [BatchAnswer(key="body_part", answer="完全說不上來")],
+            )
+
+        provider.assert_awaited_once()
+        self.assertIsNone(case.patient_input.body_part)
+        self.assertIn("body_part", case.conversation_state.consumed_fields)
+        self.assertEqual(case.conversation_state.field_statuses["body_part"], "unknown")
+        self.assertNotIn("body_part", missing_checklist_fields(case))
+        self.assertNotIn("body_part", outcome.accepted_fields)
+
+    def test_severity_prompt_contract_and_strict_ai_values(self):
+        case = TriageCase(case_id="strict-severity-prompt", visit_type=VisitType.INITIAL)
+        prompt = batch_extraction_service._build_batch_prompt(
+            case,
+            {"severity": "算輕微吧"},
+            ["severity"],
+        )
+        legacy_prompt = rag_triage_adapter._build_symptom_collection_prompt(case)
+        for value in ("mild", "moderate", "severe"):
+            self.assertIn(value, prompt)
+            self.assertIn(value, legacy_prompt)
+
+        accepted = batch_extraction_service._parse_ai_extractions(
+            json.dumps(
+                {
+                    "extractions": [
+                        {
+                            "field": "severity",
+                            "normalized_value": "mild",
+                            "semantic_status": "available",
+                            "confidence": 0.9,
+                            "source_text": "算輕微吧",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            {"severity": "算輕微吧"},
+            ["severity"],
+        )
+        rejected = batch_extraction_service._parse_ai_extractions(
+            json.dumps(
+                {
+                    "extractions": [
+                        {
+                            "field": "severity",
+                            "normalized_value": "輕微",
+                            "semantic_status": "available",
+                            "confidence": 0.9,
+                            "source_text": "算輕微吧",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            ),
+            {"severity": "算輕微吧"},
+            ["severity"],
+        )
+
+        self.assertEqual(accepted[0].normalized_value, "mild")
+        self.assertEqual(rejected, [])
+
+    async def test_ai_mild_severity_lands_and_noncanonical_chinese_is_rejected(self):
+        answer = "我說不上來，但如果一定要選就算輕微"
+        valid_provider = self._semantic_provider(
+            {
+                "field": "severity",
+                "normalized_value": "mild",
+                "semantic_status": "available",
+                "confidence": 0.9,
+                "source_text": answer,
+            }
+        )
+        valid_case, valid_provider = await self._extract(
+            "severity",
+            answer,
+            provider=valid_provider,
+        )
+
+        invalid_provider = self._semantic_provider(
+            {
+                "field": "severity",
+                "normalized_value": "輕微",
+                "semantic_status": "available",
+                "confidence": 0.9,
+                "source_text": answer,
+            }
+        )
+        invalid_case, invalid_provider = await self._extract(
+            "severity",
+            answer,
+            provider=invalid_provider,
+        )
+
+        valid_provider.assert_awaited_once()
+        invalid_provider.assert_awaited_once()
+        self.assertEqual(valid_case.patient_input.severity, "mild")
+        self.assertIsNone(invalid_case.patient_input.severity)
+        self.assertIn("severity", missing_checklist_fields(invalid_case))
+
+    async def test_weak_body_part_tone_keeps_reliable_deterministic_value(self):
         provider = AsyncMock(
             return_value=json.dumps(
                 {
@@ -792,8 +1055,8 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             provider=provider,
         )
 
-        self.assertEqual(case.patient_input.body_part, "右肩")
-        self.assertEqual(provider.await_count, 1)
+        self.assertEqual(case.patient_input.body_part, "肩膀")
+        provider.assert_not_awaited()
 
     async def test_ai_cannot_validate_an_off_topic_raw_value(self):
         provider = AsyncMock(

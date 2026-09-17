@@ -44,6 +44,12 @@ SYMPTOM_TERMS = (
 )
 
 BODY_PART_TERMS = (
+    "右上腹",
+    "左上腹",
+    "右下腹",
+    "左下腹",
+    "上腹",
+    "下腹",
     "左大腿",
     "右大腿",
     "左小腿",
@@ -77,6 +83,9 @@ BODY_PART_TERMS = (
     "腳踝",
     "胸口",
     "肚子",
+    "胃部",
+    "腸胃",
+    "胃",
     "喉嚨",
     "肩膀",
     "頭部",
@@ -116,8 +125,27 @@ _CONTEXTUAL_DISCOMFORT_TERMS = (
 _DURATION_PATTERN = re.compile(
     r"(?:\d+|[一二兩三四五六七八九十]+)\s*(?:(?:個)?(?:禮拜|星期)|天|週|周|個月|年)"
 )
-_DURATION_ONSET_PATTERN = re.compile(
-    r"(?:從)?(?:今天|昨天|前天|早上|上午|中午|下午|晚上|半夜|上週|上個月)(?:就)?(?:開始|起)"
+DURATION_ONSET_PATTERN = re.compile(
+    r"(?:從)?(?:今天|昨天|前天|上週|上個月)"
+    r"(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)"
+)
+STRONG_UNCERTAINTY_TERMS = (
+    "不知道",
+    "不確定",
+    "不清楚",
+    "說不上來",
+    "說不準",
+    "無法判斷",
+    "沒辦法判斷",
+    "難以判斷",
+)
+COMPOUND_AMBIGUITY_TERMS = (
+    "可是",
+    "但是",
+    "不過",
+    "但有時",
+    "，但",
+    "還好但",
 )
 _DEPARTMENT_INTENT_TERMS = (
     "想看", "要看", "希望看", "直接看", "改看", "我要", "想要",
@@ -165,6 +193,12 @@ def normalize_body_part(value: str) -> str | None:
             return "右臀部"
         return "臀部"
 
+    for part in ("右上腹", "左上腹", "右下腹", "左下腹", "上腹", "下腹"):
+        if part in text:
+            return part
+    if any(part in text for part in ("胃部", "腸胃", "胃")):
+        return "腹"
+
     for part in BODY_PART_TERMS:
         if part in text:
             return {
@@ -172,6 +206,7 @@ def normalize_body_part(value: str) -> str | None:
                 "頭部": "頭",
                 "胸口": "胸",
                 "腹部": "腹",
+                "肚子": "腹",
                 "耳朵": "耳",
                 "眼睛": "眼",
                 "腰部": "腰",
@@ -180,11 +215,26 @@ def normalize_body_part(value: str) -> str | None:
     return None
 
 
+def has_strong_uncertainty(value: str) -> bool:
+    text = str(value or "").strip()
+    return any(term in text for term in STRONG_UNCERTAINTY_TERMS)
+
+
+def has_compound_ambiguity(value: str) -> bool:
+    text = str(value or "").strip()
+    return any(term in text for term in COMPOUND_AMBIGUITY_TERMS)
+
+
+def requires_semantic_refinement(value: str) -> bool:
+    """Return true only for uncertainty that can invalidate a parsed core value."""
+    return has_strong_uncertainty(value) or has_compound_ambiguity(value)
+
+
 def has_duration_semantics(value: str) -> bool:
     text = str(value or "").strip()
     return bool(
         _DURATION_PATTERN.search(text)
-        or _DURATION_ONSET_PATTERN.search(text)
+        or DURATION_ONSET_PATTERN.search(text)
         or any(
             term in text
             for term in (

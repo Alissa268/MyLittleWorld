@@ -41,7 +41,7 @@ UNAVAILABLE_TERMS = ["沒空", "不能", "不行", "不方便", "無法", "沒�
 
 RED_FLAG_BUCKETS = {
     "突發胸痛": ["突發胸痛", "劇烈胸痛", "胸痛", "胸悶冒冷汗", "痛到冒冷汗"],
-    "嚴重呼吸困難": ["呼吸困難", "呼吸很困難", "喘不過氣", "無法呼吸", "有點喘"],
+    "嚴重呼吸困難": ["呼吸困難", "呼吸很困難", "喘不過氣", "無法呼吸", "有點喘", "有一點喘"],
     "中風徵象": ["嘴歪", "半邊無力", "半邊沒力", "說話不清", "中風"],
     "大量出血": ["大量出血", "血流不止"],
     "意識異常": ["昏倒", "快昏倒", "昏迷", "意識不清", "叫不醒"],
@@ -70,6 +70,7 @@ RED_FLAG_AMBIGUOUS_TERMS = {
     "我就不知道啊",
     "沒辦法判斷",
     "無法判斷",
+    "說不準",
 }
 
 
@@ -244,17 +245,6 @@ def normalize_urgency(text: str, last_question_key: str | None = None) -> Urgenc
             answer_classification="positive_specific",
         )
 
-    if _has_negation(text) and (_mentions_red_flag(text) or last_question_key == "red_flags"):
-        return UrgencyNormalization(
-            urgency_level="low",
-            matched_red_flags=[],
-            confidence=0.9,
-            warning_required=False,
-            semantic_status="unavailable",
-            source_text=text,
-            answer_classification="negative",
-        )
-
     if last_question_key == "red_flags" and normalized_text in RED_FLAG_POSITIVE_UNSPECIFIED_TERMS:
         return UrgencyNormalization(
             urgency_level="low",
@@ -283,6 +273,17 @@ def normalize_urgency(text: str, last_question_key: str | None = None) -> Urgenc
             needs_clarification=True,
             follow_up_reason="使用者無法確認紅旗症狀",
             answer_classification="ambiguous",
+        )
+
+    if _has_negation(text) and (_mentions_red_flag(text) or last_question_key == "red_flags"):
+        return UrgencyNormalization(
+            urgency_level="low",
+            matched_red_flags=[],
+            confidence=0.9,
+            warning_required=False,
+            semantic_status="unavailable",
+            source_text=text,
+            answer_classification="negative",
         )
 
     return UrgencyNormalization(source_text=text)
@@ -441,17 +442,24 @@ def normalize_preferred_dates(
 def normalize_preferred_sessions(text: str, last_question_key: str | None = None) -> SemanticExtraction | None:
     if _is_unknown_answer(text, last_question_key, PREFERRED_SESSIONS_KEY):
         return _extraction(PREFERRED_SESSIONS_KEY, [], "unknown", 0.2, text, "看診時段不確定")
-    if _is_unavailable_answer(text, last_question_key, PREFERRED_SESSIONS_KEY):
-        return _extraction(PREFERRED_SESSIONS_KEY, [], "unavailable", 0.75, text, "使用者表示時段不方便")
     if not _has_appointment_session_context(text, last_question_key):
         return None
 
+    excluded_sessions = _extract_excluded_sessions(text)
+    if excluded_sessions:
+        sessions = [session for session in ALL_SESSIONS if session not in excluded_sessions]
+        return _extraction(
+            PREFERRED_SESSIONS_KEY,
+            sessions,
+            "partial",
+            confidence_with_uncertainty(0.92, text),
+            text,
+        )
+    if _is_unavailable_answer(text, last_question_key, PREFERRED_SESSIONS_KEY):
+        return _extraction(PREFERRED_SESSIONS_KEY, [], "unavailable", 0.75, text, "使用者表示時段不方便")
+
     sessions: list[str] = []
     confidence = 0.0
-    if last_question_key == PREFERRED_SESSIONS_KEY and any(term in text for term in ANY_SESSION_TERMS):
-        sessions.extend(ALL_SESSIONS)
-        confidence = confidence_with_uncertainty(0.78, text)
-
     if last_question_key == PREFERRED_SESSIONS_KEY and any(term in text for term in NO_WORK_TERMS):
         sessions.extend(ALL_SESSIONS)
         confidence = max(confidence, confidence_with_uncertainty(0.72, text))
@@ -468,6 +476,16 @@ def normalize_preferred_sessions(text: str, last_question_key: str | None = None
     if any(term in text for term in ["全天", "整天", "任何時段"]):
         sessions.extend(ALL_SESSIONS)
         confidence = max(confidence, confidence_with_uncertainty(0.88, text))
+
+    # Generic "都可以" must not broaden an explicitly named subset such as
+    # "上午跟下午都可以" into all three sessions.
+    if (
+        not sessions
+        and last_question_key == PREFERRED_SESSIONS_KEY
+        and any(term in text for term in ANY_SESSION_TERMS)
+    ):
+        sessions.extend(ALL_SESSIONS)
+        confidence = confidence_with_uncertainty(0.78, text)
 
     if not sessions:
         return None
@@ -578,6 +596,49 @@ def _extract_excluded_weekdays(text: str) -> list[str]:
         boundary = min(text.find(marker) for marker in matching_markers)
         excluded = text[:boundary]
         return [day for day in ALL_WEEKDAYS if day in excluded]
+    return []
+
+
+def _extract_excluded_sessions(text: str) -> list[str]:
+    aliases = {
+        "上午": ("上午", "早上", "早晨"),
+        "下午": ("下午", "午後"),
+        "夜間": ("夜間", "晚上", "晚間", "夜診"),
+    }
+
+    def mentioned(segment: str) -> list[str]:
+        return [
+            session
+            for session, terms in aliases.items()
+            if any(term in segment for term in terms)
+        ]
+
+    if "除了" in text:
+        segment = text.split("除了", 1)[1]
+        boundaries = [
+            index
+            for marker in ("之外", "其他", "其餘", "都可以", "都行", "皆可")
+            if (index := segment.find(marker)) >= 0
+        ]
+        if boundaries:
+            excluded = mentioned(segment[: min(boundaries)])
+            if excluded:
+                return excluded
+
+    complement_markers = (
+        "其他都可以",
+        "其他都行",
+        "其他皆可",
+        "其他時段都可以",
+        "其他時段都行",
+        "其餘都可以",
+        "其餘都行",
+        "其餘皆可",
+    )
+    matching_markers = [marker for marker in complement_markers if marker in text]
+    if matching_markers and any(term in text for term in ("不行", "不能", "沒空", "不方便")):
+        boundary = min(text.find(marker) for marker in matching_markers)
+        return mentioned(text[:boundary])
     return []
 
 

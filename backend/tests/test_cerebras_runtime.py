@@ -95,7 +95,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
                             "normalized_value": "右肩",
                             "semantic_status": "available",
                             "confidence": 0.91,
-                            "source_text": "好像在肩膀附近吧",
+                            "source_text": "不知道是不是肩膀附近",
                         }
                     ]
                 },
@@ -107,7 +107,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await extract_batch_answers(
                 case,
-                [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
             )
 
         provider.assert_awaited_once()
@@ -125,7 +125,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
                             "normalized_value": "recommending",
                             "semantic_status": "available",
                             "confidence": 1.0,
-                            "source_text": "好像在肩膀附近吧",
+                            "source_text": "不知道是不是肩膀附近",
                         }
                     ]
                 },
@@ -138,7 +138,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await extract_batch_answers(
                 case,
-                [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
             )
 
         provider.assert_awaited_once()
@@ -270,7 +270,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await extract_batch_answers(
                 case,
-                [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
             )
 
         self.assertEqual(outcome.ai_fields, [])
@@ -284,7 +284,7 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await extract_batch_answers(
                 case,
-                [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
             )
 
         self.assertEqual(outcome.ai_fields, [])

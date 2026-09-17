@@ -5,7 +5,11 @@ from typing import Any
 
 from app.schemas import TriageCase
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
-from app.services.field_acceptance import plausible_semantic_target
+from app.services.field_acceptance import (
+    has_strong_uncertainty,
+    plausible_semantic_target,
+    requires_semantic_refinement,
+)
 
 
 _SUPPORTED_FIELDS = (
@@ -18,30 +22,6 @@ _SUPPORTED_FIELDS = (
     "preferred_sessions",
 )
 _UNRELIABLE_STATUSES = {"unknown", "ambiguous"}
-_STRONG_AMBIGUITY_TERMS = (
-    "不知道",
-    "不確定",
-    "不清楚",
-    "說不上來",
-    "無法判斷",
-    "難以判斷",
-)
-_SOFT_AMBIGUITY_TERMS = (
-    "大概",
-    "差不多",
-    "大約",
-    "左右",
-    "好像",
-    "也許",
-    "可能",
-    "應該",
-    "似乎",
-    "前幾天",
-    "可是",
-    "但是",
-    "不過",
-    "吧",
-)
 _VAGUE_DURATION_VALUES = {"幾天", "好幾天", "unknown"}
 
 
@@ -110,7 +90,7 @@ def decide_semantic_refinement(
     if conflicting_fields:
         return SemanticRefinementDecision(True, "deterministic_value_conflict", target)
 
-    if any(term in text for term in _STRONG_AMBIGUITY_TERMS):
+    if has_strong_uncertainty(text):
         return SemanticRefinementDecision(True, "strongly_ambiguous_user_text", target)
 
     reliable_fields = tuple(
@@ -184,7 +164,7 @@ def _field_is_reliable(case: TriageCase, field: str, user_text: str) -> bool:
     if not _has_value(value, field):
         return False
 
-    if field != "red_flags" and any(term in user_text for term in _SOFT_AMBIGUITY_TERMS):
+    if field != "red_flags" and requires_semantic_refinement(user_text):
         return False
 
     if field == "duration" and value in _VAGUE_DURATION_VALUES:

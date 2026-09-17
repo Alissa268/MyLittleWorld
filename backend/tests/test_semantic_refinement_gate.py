@@ -154,7 +154,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         semantic.assert_awaited_once()
 
-    async def test_ambiguous_half_year_duration_calls_semantic_provider(self):
+    async def test_weak_tone_half_year_duration_skips_semantic_provider(self):
         case = self._case_waiting_for("duration")
         case.patient_input.duration = None
 
@@ -166,7 +166,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        semantic.assert_awaited_once()
+        semantic.assert_not_awaited()
         self.assertEqual(response.json()["triage_case"]["patient_input"]["duration"], "6個月")
 
     async def test_ambiguous_natural_language_calls_semantic_provider(self):

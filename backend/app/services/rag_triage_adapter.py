@@ -355,6 +355,7 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
 7. 不要輸出 patient_input、triage、next_question、stage、科別或掛號資訊。
 8. duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 9. source_text 必須逐字複製使用者原話中的連續文字，不可改寫。
+10. severity 的 normalized_value 只能輸出字串 "mild"、"moderate" 或 "severe"：輕微／還好 → mild，普通／中等／中度 → moderate，嚴重／很嚴重／痛到無法睡覺 → severe；不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
 
 請只輸出 JSON，不要輸出其他文字：
 {{

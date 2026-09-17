@@ -486,7 +486,14 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.availability.preferred_sessions, ["下午"])
 
     async def test_symptom_onset_time_is_not_mistaken_for_appointment_session(self):
-        for answer in ("昨天下午開始喉嚨痛", "下午開始頭痛", "下午比較嚴重"):
+        for answer in (
+            "昨天下午開始喉嚨痛",
+            "下午開始頭痛",
+            "下午比較嚴重",
+            "我最近早上起床會想吐",
+            "晚上會痛醒",
+            "下午比較痛",
+        ):
             with self.subTest(answer=answer):
                 case = TriageCase(case_id=_case_id("onset_not_session"), visit_type=VisitType.INITIAL)
                 await extract_batch_answers(case, [BatchAnswer(key="symptom", answer=answer)])
@@ -509,6 +516,8 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
             "晚上看診",
             "夜間門診",
             "想掛夜診",
+            "我下午比較方便看診",
+            "掛號的話晚上可以",
         )
         for answer in examples:
             with self.subTest(answer=answer):
@@ -622,7 +631,7 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(outcome.ai_attempted)
                 provider.assert_not_awaited()
 
-    async def test_approximate_duration_is_semantically_confirmed_and_keeps_relative_day(self):
+    async def test_approximate_duration_is_deterministic_and_keeps_relative_day(self):
         case = TriageCase(case_id=_case_id("relative_day"), visit_type=VisitType.INITIAL)
         provider = AsyncMock(
             return_value=json.dumps(
@@ -655,8 +664,8 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.patient_input.duration, "3天")
         self.assertEqual(len(case.availability.preferred_days), 1)
         self.assertEqual(case.availability.preferred_sessions, [])
-        self.assertTrue(outcome.ai_attempted)
-        provider.assert_awaited_once()
+        self.assertFalse(outcome.ai_attempted)
+        provider.assert_not_awaited()
 
 
 class DepartmentPreferenceRevisionTest(unittest.TestCase):
@@ -1084,7 +1093,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
                             "normalized_value": "右肩",
                             "semantic_status": "available",
                             "confidence": 0.91,
-                            "source_text": "好像在肩膀附近吧",
+                            "source_text": "不知道是不是肩膀附近",
                         }
                     ]
                 },
@@ -1098,7 +1107,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
         ):
             outcome = await extract_batch_answers(
                 case,
-                [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
             )
 
         self.assertEqual(provider.await_count, 1)
@@ -1127,7 +1136,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
                 ):
                     outcome = await extract_batch_answers(
                         case,
-                        [BatchAnswer(key="body_part", answer="好像在肩膀附近吧")],
+                        [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
                     )
 
                 self.assertEqual(provider.await_count, 1)
@@ -1168,7 +1177,7 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
                 case,
                 [
                     BatchAnswer(key="red_flags", answer="不確定"),
-                    BatchAnswer(key="body_part", answer="好像在肩膀附近吧"),
+                    BatchAnswer(key="body_part", answer="不知道是不是肩膀附近"),
                 ],
             )
 

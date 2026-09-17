@@ -16,6 +16,7 @@ from app.services.field_acceptance import (
     has_symptom_semantics,
     normalized_value_valid as strict_normalized_value_valid,
     plausible_semantic_target,
+    requires_semantic_refinement,
 )
 from app.services.rule_engine import (
     CHECKLIST_FIELD_ORDER,
@@ -117,7 +118,7 @@ async def extract_batch_answers(
                 )
             continue
         answered_text[key] = text
-        before_missing = set(missing_checklist_fields(case))
+        before_missing = set(missing_checklist_fields(case, apply_attempt_fallback=False))
         case.history_records.append(Message(role="user", content=f"[{key}] {text}"))
         if key == "department_clarification":
             case.patient_input.department_context = text
@@ -152,7 +153,7 @@ async def extract_batch_answers(
                 case.conversation_state.question_attempts.get("red_flags", 0),
                 case.patient_input.red_flags_status,
             )
-        after_missing = set(missing_checklist_fields(case))
+        after_missing = set(missing_checklist_fields(case, apply_attempt_fallback=False))
         resolved_now = [field_name for field_name in before_missing if field_name not in after_missing]
         for field_name in resolved_now:
             if field_name not in outcome.deterministic_fields:
@@ -162,7 +163,7 @@ async def extract_batch_answers(
 
     unresolved = [
         field_name
-        for field_name in missing_checklist_fields(case)
+        for field_name in missing_checklist_fields(case, apply_attempt_fallback=False)
         if field_name in answered_text
     ]
     # Red-flag completion is deterministic-only. AI may never mark the screen
@@ -176,7 +177,7 @@ async def extract_batch_answers(
         if field_name != "red_flags"
     }
     if semantic_sources:
-        all_missing = missing_checklist_fields(case)
+        all_missing = missing_checklist_fields(case, apply_attempt_fallback=False)
         for source_text in tuple(semantic_sources.values()):
             for field_name in all_missing:
                 if (
@@ -187,7 +188,11 @@ async def extract_batch_answers(
                     semantic_sources[field_name] = source_text
     ai_targets = list(semantic_sources)
     if not ai_targets:
-        outcome.unresolved_fields = unresolved
+        outcome.unresolved_fields = [
+            field_name
+            for field_name in missing_checklist_fields(case)
+            if field_name in answered_text
+        ]
         _log_extraction_outcome(answered_text, outcome, provider, settings)
         return outcome
 
@@ -214,7 +219,7 @@ async def extract_batch_answers(
             allow_red_flag_completion=False,
         )
         outcome.ai_fields = [item.field for item in extractions]
-        remaining = set(missing_checklist_fields(case))
+        remaining = set(missing_checklist_fields(case, apply_attempt_fallback=False))
         for item in extractions:
             if item.field not in remaining and item.field not in outcome.accepted_fields:
                 outcome.accepted_fields.append(item.field)
@@ -266,7 +271,7 @@ def _apply_ambiguous_fallbacks(
     if not fallbacks:
         return
     apply_semantic_extractions(case, list(fallbacks.values()))
-    remaining = set(missing_checklist_fields(case))
+    remaining = set(missing_checklist_fields(case, apply_attempt_fallback=False))
     for field_name in fallbacks:
         if field_name in remaining:
             continue
@@ -371,6 +376,8 @@ def _deterministic_extractions_for_answer(
     """Extract the keyed field plus other explicit deterministic slots."""
     primary = _deterministic_extraction_for_answer(case, key, text)
     results = [primary] if primary is not None else []
+    if _looks_ambiguous(text):
+        return results
     temporary = TriageCase(case_id=case.case_id)
     temporary.conversation_state.last_question_key = key
     apply_user_message(temporary, text)
@@ -431,28 +438,7 @@ def _deterministic_extractions_for_answer(
 
 
 def _looks_ambiguous(text: str) -> bool:
-    return any(
-        term in text
-        for term in (
-            "不知道",
-            "不確定",
-            "不清楚",
-            "說不上來",
-            "可能",
-            "好像",
-            "大概",
-            "差不多",
-            "大約",
-            "左右",
-            "應該",
-            "也許",
-            "似乎",
-            "可是",
-            "但是",
-            "不過",
-            "吧",
-        )
-    )
+    return requires_semantic_refinement(text)
 
 
 def _is_explicit_red_flag_uncertainty(text: str) -> bool:
@@ -530,6 +516,7 @@ key 只表示目前系統正在問的欄位，不代表原句一定回答了該�
 source_text 必須逐字複製自本批 keyed answers 的一段連續原文，不可改寫或省略。
 只要原句對任一允許欄位有明確資訊，就必須輸出該 extraction；不要因其他欄位不確定而整體回空。
 duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
+severity 的 normalized_value 只能是字串 "mild"、"moderate" 或 "severe"；輕微／還好轉為 mild，普通／中等／中度轉為 moderate，嚴重／很嚴重／痛到無法睡覺轉為 severe。不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
 preferred_days 只能正規化為週一至週日；preferred_sessions 只能是上午、下午、夜間。"""
 
 

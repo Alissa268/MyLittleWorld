@@ -10,6 +10,7 @@ from app.schemas import Message, SemanticExtraction, TriageCase, UrgencyResult
 from app.services.clarification_engine import clarification_prompt
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS, accepted
 from app.services.field_acceptance import (
+    DURATION_ONSET_PATTERN,
     has_symptom_semantics,
     looks_like_department_request,
     normalize_body_part,
@@ -38,7 +39,7 @@ CHINESE_DURATION_NUMBERS = {
 
 RED_FLAG_PATTERNS = {
     "突發胸痛": ["突發胸痛", "胸痛", "胸悶冒冷汗"],
-    "嚴重呼吸困難": ["呼吸困難", "喘不過氣", "無法呼吸"],
+    "嚴重呼吸困難": ["呼吸困難", "喘不過氣", "無法呼吸", "有點喘", "有一點喘"],
     "中風徵象": ["嘴歪", "半邊無力", "說話不清", "中風"],
     "大量出血": ["大量出血", "血流不止"],
     "嚴重外傷": ["嚴重外傷", "車禍", "高處墜落"],
@@ -356,7 +357,11 @@ def _next_question_key(case: TriageCase) -> Optional[str]:
     return missing[0] if missing else None
 
 
-def missing_checklist_fields(case: TriageCase) -> list[str]:
+def missing_checklist_fields(
+    case: TriageCase,
+    *,
+    apply_attempt_fallback: bool = True,
+) -> list[str]:
     """Return deterministic checklist gaps without letting AI control flow."""
     _sync_consumed_fields(case)
     missing: list[str] = []
@@ -364,8 +369,9 @@ def missing_checklist_fields(case: TriageCase) -> list[str]:
         if _field_satisfied(case, field):
             continue
         if field != RED_FLAG_QUESTION_KEY and _question_attempts(case, field) >= MAX_QUESTION_ATTEMPTS:
-            _fallback_field(case, field)
-            continue
+            if apply_attempt_fallback:
+                _fallback_field(case, field)
+                continue
         missing.append(field)
     return missing
 
@@ -536,6 +542,10 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
 
     if extraction.field in {"symptom", "body_part", "duration"}:
         text = str(extraction.normalized_value or "").strip()
+        if extraction.field == "body_part" and any(
+            term in text for term in ("胃部", "腸胃", "胃")
+        ):
+            text = normalize_body_part(text) or text
         current = getattr(case.patient_input, extraction.field)
         more_specific_batch_body_part = (
             extraction.field == "body_part"
@@ -727,12 +737,16 @@ def _is_red_flag_screen_answer(
 ) -> bool:
     if positive_red_flags:
         return True
+    if _is_explicit_red_flag_uncertainty(text):
+        return False
     if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY and _has_negation(text):
         return True
     return _mentions_red_flag_screen(text) and _has_negation(text)
 
 
 def _is_negative_red_flag_answer(case: TriageCase, text: str) -> bool:
+    if _is_explicit_red_flag_uncertainty(text):
+        return False
     if not _has_negation(text):
         return False
     if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY:
@@ -819,13 +833,19 @@ def _extract_duration(text: str) -> Optional[str]:
             if unit == "周":
                 unit = "週"
             return f"{amount}{unit}"
-    if re.search(r"(?:從)?昨天(?:就)?(?:開始|起)", text):
+    if re.search(r"(?:從)?昨天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
         return "1天"
-    if re.search(r"(?:從)?今天(?:就)?(?:開始|起)", text):
+    if re.search(r"(?:從)?今天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
         return "1天內"
-    onset_match = re.search(r"(?:從)?(早上|上午|中午|下午|晚上|半夜)(?:就)?(?:開始|起)", text)
+    if re.search(r"(?:從)?前天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
+        return "2天"
+    onset_match = DURATION_ONSET_PATTERN.search(text)
     if onset_match:
-        return f"從{onset_match.group(1)}開始"
+        matched = onset_match.group(0)
+        if "上週" in matched:
+            return "從上週開始"
+        if "上個月" in matched:
+            return "從上個月開始"
     return None
 
 
