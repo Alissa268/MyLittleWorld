@@ -24,6 +24,10 @@ from app.services.rule_engine import (
     apply_user_message,
     missing_checklist_fields,
 )
+from app.services.semantic_normalizer import (
+    is_ambiguous_red_flag_answer,
+    normalize_urgency,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -291,7 +295,7 @@ def _deterministic_extraction_for_answer(
     if (
         key == "red_flags"
         and case.patient_input.red_flags_status == "ambiguous"
-        and _is_explicit_red_flag_uncertainty(text)
+        and is_ambiguous_red_flag_answer(normalize_urgency(text, "red_flags"))
     ):
         return SemanticExtraction(
             field=key,
@@ -439,10 +443,6 @@ def _deterministic_extractions_for_answer(
 
 def _looks_ambiguous(text: str) -> bool:
     return requires_semantic_refinement(text)
-
-
-def _is_explicit_red_flag_uncertainty(text: str) -> bool:
-    return any(term in text for term in ("不知道", "不確定", "不清楚", "沒辦法判斷", "無法判斷", "說不準"))
 
 
 def _is_meta_reply(text: str) -> bool:

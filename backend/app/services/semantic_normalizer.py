@@ -289,6 +289,11 @@ def normalize_urgency(text: str, last_question_key: str | None = None) -> Urgenc
     return UrgencyNormalization(source_text=text)
 
 
+def is_ambiguous_red_flag_answer(urgency: UrgencyNormalization | None) -> bool:
+    """Use the normalizer's safety classification as the single ambiguity source."""
+    return bool(urgency and urgency.answer_classification == "ambiguous")
+
+
 def _normalize_availability(text: str, last_question_key: str | None) -> list[SemanticExtraction]:
     extractions: list[SemanticExtraction] = []
     dates = normalize_preferred_dates(text, last_question_key)

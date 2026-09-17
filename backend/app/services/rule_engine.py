@@ -18,7 +18,11 @@ from app.services.field_acceptance import (
 )
 from app.services.negation_utils import is_negated_keyword, strip_negated_red_flags
 from app.services.question_specs import QUESTION_SPECS, question_spec_for_field, select_question_variant
-from app.services.semantic_normalizer import NormalizationResult, normalize_message
+from app.services.semantic_normalizer import (
+    NormalizationResult,
+    is_ambiguous_red_flag_answer,
+    normalize_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -105,7 +109,7 @@ def apply_user_message(case: TriageCase, message: str) -> TriageCase:
     if (
         case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
         and previous_red_flag_status == "ambiguous"
-        and _is_explicit_red_flag_uncertainty(text)
+        and is_ambiguous_red_flag_answer(semantic_result.urgency)
     ):
         _complete_uncertain_red_flag_screen(case, text)
 
@@ -148,11 +152,23 @@ def apply_user_message(case: TriageCase, message: str) -> TriageCase:
         positive_red_flags = semantic_result.urgency.matched_red_flags
     else:
         positive_red_flags = detect_red_flags(text)
-    red_flag_answered = _is_red_flag_screen_answer(case, text, positive_red_flags)
+    red_flag_classification = (
+        semantic_result.urgency.answer_classification if semantic_result.urgency else None
+    )
+    red_flag_answered = _is_red_flag_screen_answer(
+        case,
+        text,
+        positive_red_flags,
+        red_flag_classification,
+    )
     if red_flag_answered:
         patient.red_flags_checked = True
         _consume_field(case, RED_FLAG_QUESTION_KEY, "available" if positive_red_flags else "unavailable", 0.9)
-        if not positive_red_flags and _is_negative_red_flag_answer(case, text):
+        if not positive_red_flags and _is_negative_red_flag_answer(
+            case,
+            text,
+            red_flag_classification,
+        ):
             patient.red_flags = []
 
     for red_flag in positive_red_flags:
@@ -734,18 +750,23 @@ def _is_red_flag_screen_answer(
     case: TriageCase,
     text: str,
     positive_red_flags: list[str],
+    answer_classification: str | None = None,
 ) -> bool:
     if positive_red_flags:
         return True
-    if _is_explicit_red_flag_uncertainty(text):
+    if answer_classification in {"ambiguous", "positive_unspecified"}:
         return False
     if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY and _has_negation(text):
         return True
     return _mentions_red_flag_screen(text) and _has_negation(text)
 
 
-def _is_negative_red_flag_answer(case: TriageCase, text: str) -> bool:
-    if _is_explicit_red_flag_uncertainty(text):
+def _is_negative_red_flag_answer(
+    case: TriageCase,
+    text: str,
+    answer_classification: str | None = None,
+) -> bool:
+    if answer_classification in {"ambiguous", "positive_unspecified"}:
         return False
     if not _has_negation(text):
         return False
@@ -833,19 +854,22 @@ def _extract_duration(text: str) -> Optional[str]:
             if unit == "周":
                 unit = "週"
             return f"{amount}{unit}"
-    if re.search(r"(?:從)?昨天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
-        return "1天"
-    if re.search(r"(?:從)?今天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
-        return "1天內"
-    if re.search(r"(?:從)?前天(?:早上|上午|中午|下午|晚上|半夜)?(?:就)?(?:開始|起)", text):
-        return "2天"
     onset_match = DURATION_ONSET_PATTERN.search(text)
     if onset_match:
         matched = onset_match.group(0)
+        if "昨天" in matched:
+            return "1天"
+        if "今天" in matched:
+            return "1天內"
+        if "前天" in matched:
+            return "2天"
         if "上週" in matched:
             return "從上週開始"
         if "上個月" in matched:
             return "從上個月開始"
+        for daypart in ("早上", "上午", "中午", "下午", "晚上", "半夜"):
+            if daypart in matched:
+                return f"從{daypart}開始"
     return None
 
 
@@ -963,14 +987,6 @@ def _is_any_days_answer(text: str, last_question_key: Optional[str]) -> bool:
 
 def _taipei_today():
     return datetime.now(ZoneInfo("Asia/Taipei")).date()
-
-
-def _is_explicit_red_flag_uncertainty(text: str) -> bool:
-    normalized = re.sub(r"[\s，。！？!?、]", "", text)
-    return any(
-        term in normalized
-        for term in ("不知道", "不確定", "不清楚", "沒辦法判斷", "無法判斷", "說不準")
-    )
 
 
 def _complete_uncertain_red_flag_screen(case: TriageCase, source_text: str) -> None:
