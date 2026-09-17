@@ -440,6 +440,46 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("preferred_sessions", missing_checklist_fields(case))
         provider.assert_not_awaited()
 
+    async def test_meta_reply_preserves_unavailable_availability_without_ai(self):
+        for field_name in ("preferred_days", "preferred_sessions"):
+            with self.subTest(field=field_name):
+                case = TriageCase(
+                    case_id=f"strict-meta-unavailable-{field_name}",
+                    visit_type=VisitType.INITIAL,
+                )
+                case.conversation_state.field_statuses[field_name] = "unavailable"
+                provider = AsyncMock(
+                    side_effect=AssertionError("completed unavailable field must not call Cerebras")
+                )
+
+                with patch.object(
+                    batch_extraction_service,
+                    "runtime_ai_available",
+                    return_value=True,
+                ), patch.object(
+                    batch_extraction_service,
+                    "complete_prompt",
+                    new=provider,
+                ):
+                    with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
+                        outcome = await extract_batch_answers(
+                            case,
+                            [BatchAnswer(key=field_name, answer="我剛剛說過了")],
+                        )
+
+                value = getattr(case.availability, field_name)
+                self.assertEqual(value, [])
+                self.assertEqual(
+                    case.conversation_state.field_statuses[field_name],
+                    "unavailable",
+                )
+                self.assertIn(field_name, outcome.accepted_fields)
+                self.assertNotIn(field_name, missing_checklist_fields(case))
+                provider.assert_not_awaited()
+                log_output = "\n".join(logs.output)
+                self.assertIn("already_satisfied=true", log_output)
+                self.assertIn("semantic_replay=false", log_output)
+
     async def test_meta_reply_without_previous_answer_stays_unresolved(self):
         case = TriageCase(case_id="strict-meta-no-previous", visit_type=VisitType.INITIAL)
         case.conversation_state.question_attempts["preferred_sessions"] = 2

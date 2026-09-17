@@ -729,9 +729,15 @@ def _field_has_accepted_value(case: TriageCase, field_name: str) -> bool:
     if field_name in {"symptom", "body_part", "duration", "severity"}:
         return bool(getattr(patient, field_name))
     if field_name == "preferred_days":
-        return bool(case.availability.preferred_days)
+        return (
+            bool(case.availability.preferred_days)
+            or case.conversation_state.field_statuses.get(field_name) == "unavailable"
+        )
     if field_name == "preferred_sessions":
-        return bool(case.availability.preferred_sessions)
+        return (
+            bool(case.availability.preferred_sessions)
+            or case.conversation_state.field_statuses.get(field_name) == "unavailable"
+        )
     return False
 
 
