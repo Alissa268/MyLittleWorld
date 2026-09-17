@@ -384,13 +384,19 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("accepted=false", output)
         self.assertIn("reason=coarse_secondary_extraction", output)
 
-    def test_ai_body_part_laterality_must_not_reverse_the_source(self):
+    def test_ai_body_part_must_be_lexically_grounded_and_laterality_safe(self):
         examples = (
-            ("右下腹", "左下腹", False),
-            ("左手腕", "手腕", True),
-            ("左手腕", "右手腕", False),
+            ("右下腹", "左下腹", False, "laterality_conflict"),
+            ("左手腕", "手腕", True, None),
+            ("左手腕", "右手腕", False, "laterality_conflict"),
+            ("左手腕", "左手臂", False, "normalized_value_not_supported_by_source"),
+            ("右腳踝", "右腳掌", False, "normalized_value_not_supported_by_source"),
+            ("手腕", "左手腕", False, "laterality_not_grounded"),
+            ("鎖骨附近", "鎖骨", True, None),
+            ("腸胃", "腹", True, None),
+            ("左邊手腕", "左手腕", True, None),
         )
-        for source, normalized, accepted in examples:
+        for source, normalized, accepted, reason in examples:
             with self.subTest(source=source, normalized=normalized):
                 with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
                     parsed = batch_extraction_service._parse_ai_extractions(
@@ -413,8 +419,8 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
                     )
 
                 self.assertEqual(bool(parsed), accepted)
-                if not accepted:
-                    self.assertIn("reject_reason=laterality_conflict", "\n".join(logs.output))
+                if reason:
+                    self.assertIn(f"reject_reason={reason}", "\n".join(logs.output))
 
     def test_ai_cannot_overwrite_an_existing_confirmed_body_part(self):
         case = TriageCase(case_id="semantic-ai-no-overwrite", visit_type=VisitType.INITIAL)

@@ -155,6 +155,15 @@ _DEPARTMENT_INTENT_TERMS = (
     "想看", "要看", "希望看", "直接看", "改看", "我要", "想要",
     "想掛", "要掛", "掛號", "掛診", "想改", "改成", "改為", "科別",
 )
+_BODY_LOCATION_FILLERS = (
+    "附近",
+    "那邊",
+    "這邊",
+    "部位",
+    "位置",
+    "邊",
+    "側",
+)
 
 
 def has_symptom_semantics(value: str) -> bool:
@@ -379,9 +388,13 @@ def ai_normalized_value_rejection_reason(
         and source_sides != normalized_sides
     ):
         return "laterality_conflict"
+    if not source_sides and normalized_sides:
+        return "laterality_not_grounded"
     if text in source:
         return None
-    if any(text[index : index + 2] in source for index in range(max(len(text) - 1, 0))):
+    source_without_fillers = _remove_body_location_fillers(source)
+    text_without_fillers = _remove_body_location_fillers(text)
+    if text_without_fillers and text_without_fillers in source_without_fillers:
         return None
     # Known canonicalization (for example 腸胃 -> 腹) is allowed, while novel
     # anatomy remains open-ended as long as the normalized phrase is quoted
@@ -389,7 +402,25 @@ def ai_normalized_value_rejection_reason(
     # 鎖骨附近 -> 膝蓋 without rebuilding an anatomy dictionary.
     if normalize_body_part(source) == text:
         return None
+    if _has_grounded_abdominal_direction(source, text):
+        return None
     return "normalized_value_not_supported_by_source"
+
+
+def _remove_body_location_fillers(value: str) -> str:
+    """Remove only non-anatomical location wording for lexical grounding."""
+    result = str(value or "").strip()
+    for filler in _BODY_LOCATION_FILLERS:
+        result = result.replace(filler, "")
+    return result
+
+
+def _has_grounded_abdominal_direction(source: str, normalized: str) -> bool:
+    """Allow a navel-relative quadrant without restoring arbitrary overlap."""
+    match = re.fullmatch(r"([左右])([上下])腹", normalized)
+    if not match or not any(anchor in source for anchor in ("肚臍", "腹", "肚子")):
+        return False
+    return f"{match.group(1)}{match.group(2)}" in source
 
 
 def ai_normalized_value_valid(field: str, value: Any, status: str, source_text: str) -> bool:

@@ -40,6 +40,11 @@ _ALLOWED_FIELDS = frozenset(CHECKLIST_FIELD_ORDER)
 _ALLOWED_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous"}
 _META_REPLY_TERMS = (
     "我剛剛已經回答了",
+    "我剛剛說過了",
+    "我剛才說過了",
+    "我已經說過了",
+    "我前面說過了",
+    "剛剛不是說了嗎",
     "我不是說了嗎",
     "剛剛有講",
     "前面講過了",
@@ -99,38 +104,56 @@ async def extract_batch_answers(
         if not text:
             continue
         key = str(answer.key)
+        append_answer_history = True
         if key in _ALLOWED_FIELDS and key != "red_flags" and _is_meta_reply(text):
             previous_answer = _previous_keyed_answer(case, key)
+            already_satisfied = _field_has_accepted_value(case, key)
+            semantic_replay = bool(previous_answer and not already_satisfied)
             case.history_records.append(Message(role="user", content=f"[{key}] {text}"))
-            if previous_answer:
-                previous_extractions = _deterministic_extractions_for_answer(
-                    case,
-                    key,
-                    previous_answer,
-                )
-                apply_semantic_extractions(case, previous_extractions)
-            if _field_has_accepted_value(case, key):
+            logger.info(
+                "[SEMANTIC_META_REPLAY] case_id=%s field=%s previous_answer_found=%s "
+                "already_satisfied=%s semantic_replay=%s",
+                case.case_id,
+                key,
+                str(bool(previous_answer)).lower(),
+                str(already_satisfied).lower(),
+                str(semantic_replay).lower(),
+            )
+            if already_satisfied:
                 if key not in outcome.deterministic_fields:
                     outcome.deterministic_fields.append(key)
                 if key not in outcome.accepted_fields:
                     outcome.accepted_fields.append(key)
-            else:
-                attempts = case.conversation_state.question_attempts.get(key, 0)
-                case.conversation_state.question_attempts[key] = min(
-                    attempts,
-                    MAX_QUESTION_ATTEMPTS - 1,
-                )
-                if key in case.conversation_state.consumed_fields:
-                    case.conversation_state.consumed_fields.remove(key)
-                case.conversation_state.field_statuses[key] = "unknown"
-                case.conversation_state.field_confidence[key] = 0.0
-                case.conversation_state.clarification_reasons[key] = (
-                    "meta reply did not count as a new clinical answer"
-                )
-            continue
+                continue
+
+            # The displayed clarification already incremented the attempt
+            # counter. A meta reply is not a new clinical answer, so keep the
+            # field below the fallback threshold whether replay succeeds or
+            # not. This preserves one real answer opportunity.
+            attempts = case.conversation_state.question_attempts.get(key, 0)
+            case.conversation_state.question_attempts[key] = min(
+                attempts,
+                MAX_QUESTION_ATTEMPTS - 1,
+            )
+            if key in case.conversation_state.consumed_fields:
+                case.conversation_state.consumed_fields.remove(key)
+            case.conversation_state.field_statuses[key] = "unknown"
+            case.conversation_state.field_confidence[key] = 0.0
+            case.conversation_state.clarification_reasons[key] = (
+                "meta reply did not count as a new clinical answer"
+            )
+            if not previous_answer:
+                continue
+
+            # Replay the prior clinical text through the same deterministic
+            # fast-path and semantic-refinement pipeline as a fresh answer.
+            # Only the meta reply itself is appended to history.
+            text = previous_answer
+            append_answer_history = False
         answered_text[key] = text
         before_missing = set(missing_checklist_fields(case, apply_attempt_fallback=False))
-        case.history_records.append(Message(role="user", content=f"[{key}] {text}"))
+        if append_answer_history:
+            case.history_records.append(Message(role="user", content=f"[{key}] {text}"))
         if key == "department_clarification":
             case.patient_input.department_context = text
         preference = capture_department_preference(case, text)

@@ -332,7 +332,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.question_attempts["severity"] = 2
         case.conversation_state.field_statuses["severity"] = "unknown"
         case.conversation_state.consumed_fields.append("severity")
-        provider = AsyncMock(side_effect=AssertionError("meta reply must not call Cerebras"))
+        provider = self._semantic_provider()
 
         with patch.object(
             batch_extraction_service,
@@ -352,7 +352,134 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("severity", case.conversation_state.consumed_fields)
         self.assertIn("severity", missing_checklist_fields(case))
         self.assertEqual(case.conversation_state.question_attempts["severity"], 1)
+        provider.assert_awaited_once()
+
+    async def test_meta_reply_replays_previous_compound_session_answer_semantically(self):
+        case = TriageCase(case_id="strict-meta-session-replay", visit_type=VisitType.INITIAL)
+        successful_reply = json.dumps(
+            {
+                "extractions": [
+                    {
+                        "field": "preferred_sessions",
+                        "normalized_value": ["下午"],
+                        "semantic_status": "partial",
+                        "confidence": 0.9,
+                        "source_text": "我不要上午和晚上",
+                        "needs_clarification": False,
+                        "follow_up_reason": None,
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+        provider = AsyncMock(side_effect=[RuntimeError("timeout"), successful_reply])
+
+        with patch.object(
+            batch_extraction_service,
+            "runtime_ai_available",
+            return_value=True,
+        ), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            first_outcome = await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_sessions", answer="我不要上午和晚上")],
+            )
+            self.assertEqual(case.availability.preferred_sessions, [])
+            self.assertTrue(first_outcome.ai_attempted)
+
+            # The repeated question has been displayed, but the meta reply
+            # must not consume that second clinical-answer opportunity.
+            case.conversation_state.question_attempts["preferred_sessions"] = 2
+            with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
+                replay_outcome = await extract_batch_answers(
+                    case,
+                    [BatchAnswer(key="preferred_sessions", answer="我剛剛說過了")],
+                )
+
+        self.assertEqual(provider.await_count, 2)
+        self.assertTrue(replay_outcome.ai_attempted)
+        self.assertEqual(case.availability.preferred_sessions, ["下午"])
+        self.assertNotIn("preferred_sessions", missing_checklist_fields(case))
+        self.assertEqual(case.conversation_state.question_attempts["preferred_sessions"], 1)
+        user_history = [item.content for item in case.history_records if item.role == "user"]
+        self.assertEqual(user_history.count("[preferred_sessions] 我不要上午和晚上"), 1)
+        self.assertEqual(user_history.count("[preferred_sessions] 我剛剛說過了"), 1)
+        log_output = "\n".join(logs.output)
+        self.assertIn("[SEMANTIC_META_REPLAY]", log_output)
+        self.assertIn("previous_answer_found=true", log_output)
+        self.assertIn("already_satisfied=false", log_output)
+        self.assertIn("semantic_replay=true", log_output)
+
+    async def test_meta_reply_preserves_an_already_accepted_value_without_ai(self):
+        case = TriageCase(case_id="strict-meta-already-satisfied", visit_type=VisitType.INITIAL)
+        provider = AsyncMock(side_effect=AssertionError("accepted meta reply must not call Cerebras"))
+
+        with patch.object(
+            batch_extraction_service,
+            "runtime_ai_available",
+            return_value=True,
+        ), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_sessions", answer="下午")],
+            )
+            outcome = await extract_batch_answers(
+                case,
+                [BatchAnswer(key="preferred_sessions", answer="我剛剛說過了")],
+            )
+
+        self.assertEqual(case.availability.preferred_sessions, ["下午"])
+        self.assertIn("preferred_sessions", outcome.accepted_fields)
+        self.assertNotIn("preferred_sessions", missing_checklist_fields(case))
         provider.assert_not_awaited()
+
+    async def test_meta_reply_without_previous_answer_stays_unresolved(self):
+        case = TriageCase(case_id="strict-meta-no-previous", visit_type=VisitType.INITIAL)
+        case.conversation_state.question_attempts["preferred_sessions"] = 2
+        provider = AsyncMock(side_effect=AssertionError("meta text itself must not call Cerebras"))
+
+        with patch.object(
+            batch_extraction_service,
+            "runtime_ai_available",
+            return_value=True,
+        ), patch.object(
+            batch_extraction_service,
+            "complete_prompt",
+            new=provider,
+        ):
+            with self.assertLogs(batch_extraction_service.logger, level="INFO") as logs:
+                await extract_batch_answers(
+                    case,
+                    [BatchAnswer(key="preferred_sessions", answer="我剛剛說過了")],
+                )
+
+        self.assertEqual(case.availability.preferred_sessions, [])
+        self.assertIn("preferred_sessions", missing_checklist_fields(case))
+        self.assertNotIn("preferred_sessions", case.conversation_state.consumed_fields)
+        self.assertEqual(case.conversation_state.question_attempts["preferred_sessions"], 1)
+        provider.assert_not_awaited()
+        log_output = "\n".join(logs.output)
+        self.assertIn("previous_answer_found=false", log_output)
+        self.assertIn("semantic_replay=false", log_output)
+
+    def test_meta_reply_variants_are_recognized(self):
+        variants = (
+            "我剛剛說過了",
+            "我剛才說過了",
+            "我已經說過了",
+            "我前面說過了",
+            "剛剛不是說了嗎",
+        )
+        for text in variants:
+            with self.subTest(text=text):
+                self.assertTrue(batch_extraction_service._is_meta_reply(text))
 
     async def test_valid_symptom_is_accepted(self):
         case, provider = await self._extract("symptom", "手臂一直很癢")
