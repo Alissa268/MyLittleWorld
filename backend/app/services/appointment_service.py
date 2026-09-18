@@ -459,7 +459,7 @@ def _build_recommendations(
             specialty_tags=str(slot.get("specialty_tags") or ""),
             specialty_score=round(specialty.score, 2),
             time_score=round(time_score, 2),
-            match_reason=specialty.reason,
+            match_reason=specialty.reason if specialty.source == "ai" else None,
             score=score,
             reasons=reasons,
             rank=len(items) + 1,

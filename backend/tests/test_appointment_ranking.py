@@ -231,6 +231,68 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ranked[1].score, 78.9)
         self.assertEqual(weighted_score(0.40, 1.0, False), 82.0)
 
+    def test_ai_specialty_reason_is_exposed_as_match_reason(self):
+        case = _complete_case()
+        row = _row("doctor-ai", "AI 醫師", "2026-07-20", "上午", "膝關節")
+        ai_reason = "膝部不適與此醫師的膝關節診療專長直接相關。"
+        scores = {
+            "doctor-ai": SpecialtyScore(
+                "doctor-ai",
+                "AI 醫師",
+                "一般骨科",
+                0.88,
+                ai_reason,
+                source="ai",
+            )
+        }
+
+        item = _build_recommendations(case, case.case_id, [row], "specialty", True, scores)[0]
+
+        self.assertEqual(item.match_reason, ai_reason)
+        self.assertEqual(item.specialty_score, 0.88)
+
+    def test_deterministic_specialty_reason_is_not_exposed_as_match_reason(self):
+        case = _complete_case()
+        row = _row("doctor-rule", "規則醫師", "2026-07-20", "上午", "膝關節")
+        technical_reason = "未找到明確專長關鍵字，不列為主要依據；專長分數使用中性值 0.50"
+        scores = {
+            "doctor-rule": SpecialtyScore(
+                "doctor-rule",
+                "規則醫師",
+                "一般骨科",
+                0.50,
+                technical_reason,
+                source="deterministic",
+            )
+        }
+
+        item = _build_recommendations(case, case.case_id, [row], "specialty", True, scores)[0]
+
+        self.assertIsNone(item.match_reason)
+        self.assertEqual(item.specialty_score, 0.50)
+        self.assertIn(technical_reason, "\n".join(item.reasons))
+
+    async def test_ai_timeout_keeps_deterministic_score_without_match_reason(self):
+        class AiSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        provider = AsyncMock(side_effect=TimeoutError("doctor scoring timeout"))
+        appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _ranking_rows()
+
+        with patch.object(specialty_scoring, "get_settings", return_value=AiSettings()), patch.object(
+            specialty_scoring,
+            "complete_prompt",
+            new=provider,
+        ):
+            result = await recommend_appointments(_complete_case())
+
+        provider.assert_awaited_once()
+        item = result.recommendations.specialty_first[0]
+        self.assertGreater(item.specialty_score, 0.0)
+        self.assertIsNone(item.match_reason)
+        self.assertTrue(any(reason.startswith("專長依據：") for reason in item.reasons))
+
     def test_head_symptom_can_distinguish_neurology_specialty(self):
         case = _case_for_message("頭部不舒服")
         case.department_result = DepartmentResult(parentDept="內科系", childDept="神經內科")

@@ -257,7 +257,7 @@ class RecommendationIntegrationUnitTest {
     }
 
     @Test
-    fun specialtyReasonFallsBackWhenBackendMatchReasonIsBlank() {
+    fun specialtyReasonFallsBackWhenBackendMatchReasonIsNull() {
         val recommendation = RecommendationItemDto(
             recommendationId = "rec_reason_fallback",
             parentDept = "五官科",
@@ -267,7 +267,6 @@ class RecommendationIntegrationUnitTest {
             session = "上午",
             score = 0.8,
             specialtyTags = listOf("過敏性鼻炎診斷與治療"),
-            matchReason = "   ",
             reasons = listOf(
                 "推薦理由：既有卡片 fallback",
                 "科別依據：使用者症狀「鼻塞」對應到鼻科",
