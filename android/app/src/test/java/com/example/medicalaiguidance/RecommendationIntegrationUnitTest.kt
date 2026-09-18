@@ -221,7 +221,7 @@ class RecommendationIntegrationUnitTest {
         assertEquals("症狀與專長相符", SPECIALTY_MATCH_TITLE)
         assertEquals("看診時間符合", TIME_MATCH_TITLE)
         assertEquals(
-            "您先前提到「膝蓋怪怪的」，目前建議科別為一般骨科。這位醫師的專長包含「骨科復健」、「膝關節診療」，與目前需要由一般骨科評估的症狀方向相關，因此專長匹配度較高。",
+            "症狀與膝、膝關節/骨科或復健相關；醫師專長包含骨科復健",
             specialty,
         )
         assertEquals(
@@ -234,6 +234,66 @@ class RecommendationIntegrationUnitTest {
             assertFalse(text.contains("90.20"))
             assertFalse(text.contains("1.00"))
         }
+    }
+
+    @Test
+    fun specialtyReasonPrefersBackendMatchReason() {
+        val backendReason = "飯後胃痛與反胃屬消化道不適方向；此醫師具胃鏡相關診療專長，與目前就診需求較相符。"
+        val recommendation = RecommendationItemDto(
+            recommendationId = "rec_backend_reason",
+            parentDept = "內科系",
+            childDept = "胃腸肝膽科",
+            doctor = "測試醫師",
+            date = "2026-09-20",
+            session = "下午",
+            score = 0.9,
+            specialtyTags = listOf("胃鏡、大腸鏡診斷及治療"),
+            matchReason = backendReason,
+            reasons = listOf("推薦理由：Android 舊版固定理由"),
+        )
+
+        assertEquals(backendReason, recommendation.specialtyDescription())
+        assertEquals(backendReason.take(55), recommendation.compactCardReason())
+    }
+
+    @Test
+    fun specialtyReasonFallsBackWhenBackendMatchReasonIsBlank() {
+        val recommendation = RecommendationItemDto(
+            recommendationId = "rec_reason_fallback",
+            parentDept = "五官科",
+            childDept = "鼻科",
+            doctor = "測試醫師",
+            date = "2026-09-20",
+            session = "上午",
+            score = 0.8,
+            specialtyTags = listOf("過敏性鼻炎診斷與治療"),
+            matchReason = "   ",
+            reasons = listOf(
+                "推薦理由：既有卡片 fallback",
+                "科別依據：使用者症狀「鼻塞」對應到鼻科",
+            ),
+        )
+
+        assertEquals("既有卡片 fallback", recommendation.compactCardReason())
+        assertTrue(recommendation.specialtyDescription().contains("過敏性鼻炎"))
+    }
+
+    @Test
+    fun backendReasonIsBoundedForCompactCardAndDetail() {
+        val longReason = "長".repeat(100)
+        val recommendation = RecommendationItemDto(
+            recommendationId = "rec_long_reason",
+            parentDept = "內科系",
+            childDept = "胃腸肝膽科",
+            doctor = "測試醫師",
+            date = "2026-09-20",
+            session = "下午",
+            score = 0.9,
+            matchReason = longReason,
+        )
+
+        assertEquals(55, recommendation.compactCardReason()?.length)
+        assertEquals(68, recommendation.specialtyDescription().length)
     }
 
     @Test

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import unittest
+from unittest.mock import AsyncMock
 
 from app.schemas import DepartmentResult, TriageCase
 from app.services import specialty_scoring
@@ -47,6 +49,140 @@ class SpecialtyScoringTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(scores["doc-1"].source, "ai")
         self.assertEqual(scores["doc-1"].score, 0.91)
+
+    async def test_five_doctors_use_one_batch_ai_call_and_receive_distinct_results(self):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        rows = [
+            _row(
+                doctor_id=f"doc-{index}",
+                doctor=f"醫師{index}",
+                specialty_tags=f"專長{index}",
+            )
+            for index in range(1, 6)
+        ]
+        response = {
+            "scores": [
+                {
+                    "doctor_id": f"doc-{index}",
+                    "score": 0.5 + index * 0.05,
+                    "reason": f"症狀方向與醫師{index}的專長{index}相關程度不同，依實際專長提供評估。",
+                }
+                for index in range(1, 6)
+            ]
+        }
+        provider = AsyncMock(return_value=json.dumps(response, ensure_ascii=False))
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(_case("飯後胃痛、反胃"), _department(), rows)
+
+        provider.assert_awaited_once()
+        self.assertEqual(set(scores), {f"doc-{index}" for index in range(1, 6)})
+        prompt = provider.await_args.args[0]
+        self.assertIn("同科醫師仍須依實際專長拉開差異", prompt)
+        self.assertIn("不可自行診斷疾病", prompt)
+        self.assertIn("絕對不可超過 64 個中文字", prompt)
+        self.assertIn("最適合", prompt)
+        for index in range(1, 6):
+            result = scores[f"doc-{index}"]
+            self.assertEqual(result.source, "ai")
+            self.assertIn(f"醫師{index}", result.reason)
+
+    async def test_duplicate_schedule_rows_appear_once_in_ai_prompt(self):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        rows = [
+            _row(date="2026-09-18"),
+            _row(date="2026-09-22"),
+            _row(date="2026-09-25"),
+        ]
+        provider = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "scores": [
+                        {
+                            "doctor_id": "doc-1",
+                            "score": 0.88,
+                            "reason": "目前症狀與膝關節不適相關，此醫師具膝關節與運動傷害專長。",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(_case("膝蓋走路疼痛"), _department(), rows)
+
+        provider.assert_awaited_once()
+        prompt = provider.await_args.args[0]
+        self.assertEqual(prompt.count('"doctor_id": "doc-1"'), 1)
+        self.assertEqual(list(scores), ["doc-1"])
+
+    async def test_ai_reason_is_hard_limited_to_64_characters(self):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        provider = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "scores": [
+                        {
+                            "doctor_id": "doc-1",
+                            "score": 0.9,
+                            "reason": "長" * 150,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(_case("膝蓋走路疼痛"), _department(), [_row()])
+
+        self.assertEqual(len(scores["doc-1"].reason), 64)
+        self.assertEqual(scores["doc-1"].source, "ai")
+
+    async def test_missing_ai_doctor_result_keeps_deterministic_fallback(self):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        rows = [
+            _row(doctor_id="doc-1", doctor="醫師一"),
+            _row(doctor_id="doc-2", doctor="醫師二"),
+        ]
+        provider = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "scores": [
+                        {
+                            "doctor_id": "doc-1",
+                            "score": 0.9,
+                            "reason": "目前膝部不適與此醫師的膝關節及運動傷害專長直接相關。",
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(_case("膝蓋走路疼痛"), _department(), rows)
+
+        provider.assert_awaited_once()
+        self.assertEqual(scores["doc-1"].source, "ai")
+        self.assertEqual(scores["doc-2"].source, "deterministic")
 
     async def test_ai_exception_fallback(self):
         class FakeSettings:
@@ -167,6 +303,7 @@ def _row(**override):
         "doctor": "測試醫師",
         "child_dept": "一般骨科",
         "specialty_tags": "膝關節、運動傷害、骨科",
+        "date": "2026-09-18",
     }
     row.update(override)
     return row

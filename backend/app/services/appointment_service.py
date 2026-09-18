@@ -414,8 +414,8 @@ def _build_recommendations(
 
         specialty = _score_for_slot(slot, specialty_scores)
         time_score = _time_score(slot, case)
+        score = weighted_score(specialty.score, time_score, specialty_first)
         if specialty_first:
-            score = round((specialty.score * 70.0) + (time_score * 30.0), 2)
             reasons = _score_explanation_reasons(
                 case=case,
                 slot=slot,
@@ -425,7 +425,6 @@ def _build_recommendations(
                 specialty_first=True,
             )
         else:
-            score = round((time_score * 70.0) + (specialty.score * 30.0), 2)
             reasons = _score_explanation_reasons(
                 case=case,
                 slot=slot,
@@ -483,12 +482,40 @@ def _ranking_key(
 ) -> tuple:
     specialty = _score_for_slot(slot, specialty_scores)
     time_score = _time_score(slot, case)
+    total_score = weighted_score(specialty.score, time_score, specialty_first)
     date_key = _date_sort_key(slot.get("date"))
     session_key = _session_rank(slot.get("session", ""))
     doctor_key = str(slot.get("doctor") or "")
     if specialty_first:
-        return (-specialty.score, -time_score, date_key, session_key, doctor_key)
-    return (-time_score, date_key, session_key, -specialty.score, doctor_key)
+        return (
+            -total_score,
+            -specialty.score,
+            -time_score,
+            date_key,
+            session_key,
+            doctor_key,
+        )
+    return (
+        -total_score,
+        -time_score,
+        -specialty.score,
+        date_key,
+        session_key,
+        doctor_key,
+    )
+
+
+def weighted_score(
+    specialty_score: float,
+    time_score: float,
+    specialty_first: bool,
+) -> float:
+    """Return the displayed and ranked 0-100 weighted score."""
+    if specialty_first:
+        total = (specialty_score * 0.70) + (time_score * 0.30)
+    else:
+        total = (time_score * 0.70) + (specialty_score * 0.30)
+    return round(total * 100.0, 2)
 
 
 def _score_for_slot(slot: dict, specialty_scores: dict[str, SpecialtyScore]) -> SpecialtyScore:

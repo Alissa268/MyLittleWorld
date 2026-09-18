@@ -19,6 +19,7 @@ async def complete_prompt(prompt: str) -> str:
 
 TAG_NEUTRAL_SCORE = 0.5
 MAX_AI_SCORE_CANDIDATES = 10
+MAX_AI_REASON_LENGTH = 64
 
 SPECIALTY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "頭": ("神經", "腦", "腦血管", "頭痛", "眩暈", "暈眩"),
@@ -52,7 +53,9 @@ async def score_doctor_specialties(
     rows: Iterable[dict[str, Any]],
     max_ai_candidates: int = MAX_AI_SCORE_CANDIDATES,
 ) -> dict[str, SpecialtyScore]:
-    normalized_rows = [row for row in rows if _row_department(row) == department.childDept]
+    normalized_rows = _unique_doctor_rows(
+        row for row in rows if _row_department(row) == department.childDept
+    )
     deterministic = {
         _row_key(row): score_doctor_deterministically(case, department, row)
         for row in normalized_rows
@@ -103,8 +106,11 @@ async def score_doctor_specialties(
         if _row_department(row) != department.childDept:
             logger.warning("specialty_scoring rejected wrong department doctor=%s", key)
             continue
-        score = clamp_score(item.get("score"))
-        reason = str(item.get("reason") or "AI specialty match").strip()
+        score = _valid_ai_score(item.get("score"))
+        reason = _truncate_ai_reason(item.get("reason"))
+        if score is None or not reason:
+            logger.warning("specialty_scoring rejected incomplete result doctor=%s", key)
+            continue
         results[key] = SpecialtyScore(
             doctor_id=_row_doctor_id(row),
             doctor=str(row.get("doctor") or row.get("doctor_name") or ""),
@@ -177,12 +183,34 @@ def clamp_score(value: Any) -> float:
     return max(0.0, min(score, 1.0))
 
 
+def _valid_ai_score(value: Any) -> float | None:
+    try:
+        score = float(value)
+    except (TypeError, ValueError):
+        return None
+    return score if 0.0 <= score <= 1.0 else None
+
+
+def _truncate_ai_reason(value: Any) -> str:
+    return str(value or "").strip()[:MAX_AI_REASON_LENGTH]
+
+
 def _ai_available() -> bool:
     return runtime_ai_available(get_settings())
 
 
 def _has_specialty(value: Any) -> bool:
     return bool(str(value or "").strip())
+
+
+def _unique_doctor_rows(rows: Iterable[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Keep one representative schedule row per doctor for specialty scoring."""
+    unique: dict[str, dict[str, Any]] = {}
+    for row in rows:
+        key = _row_key(row)
+        if key and key not in unique:
+            unique[key] = row
+    return list(unique.values())
 
 
 def _build_scoring_prompt(case: TriageCase, department: DepartmentResult, rows: list[dict[str, Any]]) -> str:
@@ -195,7 +223,7 @@ def _build_scoring_prompt(case: TriageCase, department: DepartmentResult, rows: 
         }
         for row in rows
     ]
-    return f"""你是醫療分診助理。請針對指定科別內的候選醫師專長做批次評分。
+    return f"""你是醫療分診助理。請用一次批次回應，針對指定科別內每位候選醫師的實際專長做評分與簡短推薦理由。
 
 推薦科別：{department.childDept}
 病患症狀資料：
@@ -204,8 +232,16 @@ def _build_scoring_prompt(case: TriageCase, department: DepartmentResult, rows: 
 候選醫師：
 {json.dumps(candidates, ensure_ascii=False, indent=2)}
 
-請先從症狀推測可能疾病或就診方向，再比對醫師 specialty_tags。
-reason 請清楚說明：症狀依據、醫師專長依據、以及為何適合此科別。
+評分與理由規則：
+1. 每位候選醫師都輸出一筆，score 必須是 0.0 到 1.0。
+2. 只能評估目前症狀方向與該醫師 specialty_tags 的相關程度；同科醫師仍須依實際專長拉開差異，不可因同科就全部給高分。
+3. 不參考醫師名氣、學歷、職稱或年資，不可新增 specialty_tags 未包含的專長。
+4. 不可自行診斷疾病，不可把普通症狀描述成癌症或其他特定重大疾病。
+5. 專長只有廣泛相關時分數要保守，專長與目前症狀方向非常直接相關時才給高分。
+6. reason 使用自然繁體中文，說明使用者症狀方向、醫師實際專長，以及兩者為何相關或關聯有限。
+7. reason 建議 30 到 55 個中文字，絕對不可超過 64 個中文字；不要輸出分數公式。
+8. reason 不得出現「最適合」、「保證」、「一定」、「確診」。
+9. doctor_id 必須完全照抄候選資料，不可虛構醫師。
 
 請只輸出 JSON，不要輸出其他文字：
 {{

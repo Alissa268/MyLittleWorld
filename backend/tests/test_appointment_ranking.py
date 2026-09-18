@@ -10,7 +10,11 @@ from app.main import app
 from app.schemas import ConversationStage, DepartmentResult, TriageCase, VisitType
 from app.services import appointment_service, project_smart_department_adapter, specialty_scoring
 from app.services.appointment_service import recommend_appointments
-from app.services.appointment_service import _build_recommendations, _compact_recommendation_reason
+from app.services.appointment_service import (
+    _build_recommendations,
+    _compact_recommendation_reason,
+    weighted_score,
+)
 from app.services.case_store import get_case, save_case, save_recommendation_result
 from app.services.rule_engine import apply_user_message, evaluate_urgency
 from app.services.specialty_scoring import SpecialtyScore, score_doctor_deterministically
@@ -40,16 +44,16 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.recommendations.specialty_first[0].doctor, "專長高醫師")
         self.assertGreaterEqual(result.recommendations.specialty_first[0].specialty_score, 0.7)
 
-    async def test_time_first_sorting_differs_from_specialty_first(self):
+    async def test_time_first_uses_weighted_total_before_earlier_date(self):
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _ranking_rows()
         case = _complete_case()
 
         result = await recommend_appointments(case)
 
-        self.assertEqual(result.recommendations.time_first[0].doctor, "時間優先醫師")
-        self.assertNotEqual(
+        self.assertEqual(result.recommendations.time_first[0].doctor, "專長高醫師")
+        self.assertEqual(
             result.recommendations.specialty_first[0].recommendation_id,
-            result.recommendations.time_first[0].recommendation_id,
+            result.recommendations.time_first[0].recommendation_id.replace("rec_t_", "rec_s_"),
         )
 
     async def test_time_first_prefers_monday_morning(self):
@@ -59,8 +63,8 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
         result = await recommend_appointments(case)
         first = result.recommendations.time_first[0]
 
-        self.assertEqual(first.doctor, "時間優先醫師")
-        self.assertEqual(first.date, "2026-07-20")
+        self.assertEqual(first.doctor, "專長高醫師")
+        self.assertEqual(first.date, "2026-07-27")
         self.assertEqual(first.session, "上午")
         self.assertEqual(first.time_score, 1.0)
         self.assertIn("time_score*70 + specialty_score*30", "\n".join(first.reasons))
@@ -87,7 +91,7 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_time_first_with_any_time_orders_by_earliest_date_and_session(self):
         rows = [
-            _row("doc-late", "較晚醫師", "2026-07-22", "上午", "膝關節、運動傷害"),
+            _row("doc-late", "較晚醫師", "2026-07-22", "上午", ""),
             _row("doc-earliest-pm", "最早下午醫師", "2026-07-20", "下午", ""),
             _row("doc-earliest-am", "最早上午醫師", "2026-07-20", "上午", ""),
         ]
@@ -190,6 +194,42 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual([item.doctor for item in specialty_order], ["Doctor A", "Doctor B", "Doctor C"])
         self.assertEqual([item.doctor for item in time_order], ["Doctor B", "Doctor A", "Doctor C"])
+
+    def test_specialty_first_ranking_uses_weighted_total_as_primary_key(self):
+        case = _complete_case()
+        rows = [
+            _row("doctor-a", "Doctor A", "2026-07-20", "上午"),
+            _row("doctor-b", "Doctor B", "2026-07-21", "下午"),
+        ]
+        scores = {
+            "doctor-a": SpecialtyScore("doctor-a", "Doctor A", "一般骨科", 0.78, "A"),
+            "doctor-b": SpecialtyScore("doctor-b", "Doctor B", "一般骨科", 0.79, "B"),
+        }
+
+        ranked = _build_recommendations(case, case.case_id, rows, "specialty", True, scores)
+
+        self.assertEqual([item.doctor for item in ranked], ["Doctor A", "Doctor B"])
+        self.assertEqual(ranked[0].score, 84.6)
+        self.assertEqual(ranked[1].score, 65.8)
+        self.assertEqual(weighted_score(0.78, 1.0, True), 84.6)
+
+    def test_time_first_ranking_uses_weighted_total_as_primary_key(self):
+        case = _complete_case()
+        rows = [
+            _row("doctor-a", "Doctor A", "2026-07-20", "上午"),
+            _row("doctor-b", "Doctor B", "2026-07-20", "下午"),
+        ]
+        scores = {
+            "doctor-a": SpecialtyScore("doctor-a", "Doctor A", "一般骨科", 0.40, "A"),
+            "doctor-b": SpecialtyScore("doctor-b", "Doctor B", "一般骨科", 0.95, "B"),
+        }
+
+        ranked = _build_recommendations(case, case.case_id, rows, "time", False, scores)
+
+        self.assertEqual([item.doctor for item in ranked], ["Doctor A", "Doctor B"])
+        self.assertEqual(ranked[0].score, 82.0)
+        self.assertEqual(ranked[1].score, 78.9)
+        self.assertEqual(weighted_score(0.40, 1.0, False), 82.0)
 
     def test_head_symptom_can_distinguish_neurology_specialty(self):
         case = _case_for_message("頭部不舒服")
@@ -370,8 +410,8 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("specialty_first", data)
         self.assertIn("time_first", data)
         self.assertEqual(data["specialty_first"][0]["doctor"], "專長高醫師")
-        self.assertEqual(data["time_first"][0]["doctor"], "時間優先醫師")
-        self.assertNotEqual(
+        self.assertEqual(data["time_first"][0]["doctor"], "專長高醫師")
+        self.assertEqual(
             data["specialty_first"][0]["schedule_id"],
             data["time_first"][0]["schedule_id"],
         )
@@ -480,6 +520,7 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
 
 class _NoAiSettings:
     google_api_key = ""
+    ai_doctor_scoring_enabled = False
 
 
 def _complete_case() -> TriageCase:
@@ -492,7 +533,12 @@ def _complete_case() -> TriageCase:
     case.conversation_state.confirmed = True
     case.availability.preferred_days = ["週一"]
     case.availability.preferred_sessions = ["上午"]
-    case.department_result = DepartmentResult(parentDept="外科系", childDept="一般骨科", confidence=0.8)
+    case.department_result = DepartmentResult(
+        dept_id=1298,
+        parentDept="外科系",
+        childDept="一般骨科",
+        confidence=0.8,
+    )
     return case
 
 
@@ -504,7 +550,12 @@ def _case_for_message(message: str) -> TriageCase:
     case.conversation_state.stage = ConversationStage.RECOMMENDING
     case.confirmed = True
     case.conversation_state.confirmed = True
-    case.department_result = DepartmentResult(parentDept="外科系", childDept="一般骨科", confidence=0.8)
+    case.department_result = DepartmentResult(
+        dept_id=1298,
+        parentDept="外科系",
+        childDept="一般骨科",
+        confidence=0.8,
+    )
     return case
 
 

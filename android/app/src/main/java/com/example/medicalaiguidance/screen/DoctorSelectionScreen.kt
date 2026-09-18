@@ -713,11 +713,19 @@ private fun RecommendationDoctorCard(
     }
 }
 
-internal fun RecommendationItemDto.compactCardReason(): String? = reasons
-    .firstOrNull { it.startsWith("推薦理由：") }
-    ?.removePrefix("推薦理由：")
+private const val COMPACT_REASON_MAX_LENGTH = 55
+private const val DETAIL_REASON_MAX_LENGTH = 68
+
+internal fun RecommendationItemDto.compactCardReason(): String? = matchReason
     ?.trim()
     ?.takeIf { it.isNotBlank() }
+    ?.take(COMPACT_REASON_MAX_LENGTH)
+    ?: reasons
+        .firstOrNull { it.startsWith("推薦理由：") }
+        ?.removePrefix("推薦理由：")
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.take(COMPACT_REASON_MAX_LENGTH)
 
 @Composable
 private fun DoctorSpecialtyContent(
@@ -1101,6 +1109,10 @@ internal const val SPECIALTY_MATCH_TITLE = "症狀與專長相符"
 internal const val TIME_MATCH_TITLE = "看診時間符合"
 
 internal fun RecommendationItemDto.specialtyDescription(): String {
+    matchReason
+        ?.trim()
+        ?.takeIf { it.isNotBlank() }
+        ?.let { return it.take(DETAIL_REASON_MAX_LENGTH) }
     val symptom = departmentBasisReason()?.let(::extractUserSymptom)
     val department = childDept.ifBlank { parentDept }.ifBlank { "目前科別" }
     val opening = symptom
