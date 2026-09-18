@@ -148,7 +148,7 @@ async def recommend_appointments(
     primary_slots = fetch_available_slots(
         department.childDept,
         search_days=21,
-        max_slots=30,
+        max_slots=None,
         schedule_visit_type=schedule_visit_type,
         department_id=department.dept_id,
     )

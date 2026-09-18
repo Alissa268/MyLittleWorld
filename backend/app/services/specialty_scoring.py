@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import dataclass
 from typing import Any, Iterable
 
@@ -20,6 +21,19 @@ async def complete_prompt(prompt: str) -> str:
 TAG_NEUTRAL_SCORE = 0.5
 MAX_AI_SCORE_CANDIDATES = 10
 MAX_AI_REASON_LENGTH = 64
+PROHIBITED_AI_REASON_TERMS = (
+    "確診",
+    "診斷為",
+    "患有",
+    "罹患",
+    "保證",
+    "一定",
+    "最適合",
+    "最佳選擇",
+    "肯定是",
+    "必須看這位",
+    "一定要看",
+)
 
 SPECIALTY_KEYWORDS: dict[str, tuple[str, ...]] = {
     "頭": ("神經", "腦", "腦血管", "頭痛", "眩暈", "暈眩"),
@@ -107,8 +121,8 @@ async def score_doctor_specialties(
             logger.warning("specialty_scoring rejected wrong department doctor=%s", key)
             continue
         score = _valid_ai_score(item.get("score"))
-        reason = _truncate_ai_reason(item.get("reason"))
-        if score is None or not reason:
+        reason = _validate_ai_reason(item.get("reason"))
+        if score is None or reason is None:
             logger.warning("specialty_scoring rejected incomplete result doctor=%s", key)
             continue
         results[key] = SpecialtyScore(
@@ -191,8 +205,21 @@ def _valid_ai_score(value: Any) -> float | None:
     return score if 0.0 <= score <= 1.0 else None
 
 
+def _normalize_ai_reason(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
+
+
 def _truncate_ai_reason(value: Any) -> str:
-    return str(value or "").strip()[:MAX_AI_REASON_LENGTH]
+    return _normalize_ai_reason(value)[:MAX_AI_REASON_LENGTH]
+
+
+def _validate_ai_reason(value: Any) -> str | None:
+    reason = _normalize_ai_reason(value)
+    if not reason:
+        return None
+    if any(term in reason for term in PROHIBITED_AI_REASON_TERMS):
+        return None
+    return _truncate_ai_reason(reason)
 
 
 def _ai_available() -> bool:

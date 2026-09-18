@@ -128,6 +128,40 @@ class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(result.recommendations.specialty_first), 1)
 
+    async def test_availability_filter_sees_matching_slot_after_first_thirty_rows(self):
+        today = date.today()
+
+        def next_weekday(index: int) -> date:
+            return today + timedelta(days=(index - today.weekday()) % 7 or 7)
+
+        non_matching_date = next_weekday(0).isoformat()
+        matching_date = next_weekday(4).isoformat()
+        rows = [
+            _row(f"doc-{index}", f"不符醫師{index}", non_matching_date, "上午")
+            for index in range(30)
+        ]
+        rows.append(_row("doc-match", "週五下午醫師", matching_date, "下午"))
+        calls = []
+
+        def slots(*_args, **kwargs):
+            calls.append(kwargs)
+            max_slots = kwargs.get("max_slots")
+            return rows if max_slots is None else rows[:max_slots]
+
+        appointment_service.fetch_available_slots = slots
+        case = _complete_case()
+        case.availability.preferred_days = ["週五"]
+        case.availability.preferred_sessions = ["下午"]
+
+        result = await recommend_appointments(case)
+
+        self.assertIsNone(calls[0]["max_slots"])
+        self.assertEqual(calls[0]["search_days"], 21)
+        self.assertEqual(
+            [item.doctor for item in result.recommendations.specialty_first],
+            ["週五下午醫師"],
+        )
+
     async def test_recommendation_reasons_explain_score_bases(self):
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _ranking_rows()
         case = _complete_case()

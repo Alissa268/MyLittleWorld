@@ -91,6 +91,44 @@ class SpecialtyScoringTest(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(result.source, "ai")
             self.assertIn(f"醫師{index}", result.reason)
 
+    async def test_more_than_thirty_rows_still_limit_ai_to_ten_unique_doctors(self):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        rows = [
+            _row(
+                doctor_id=f"doc-{index:02d}",
+                doctor=f"醫師{index:02d}",
+                specialty_tags=f"專長{index:02d}",
+            )
+            for index in range(35)
+        ]
+        response = {
+            "scores": [
+                {
+                    "doctor_id": f"doc-{index:02d}",
+                    "score": 0.8,
+                    "reason": f"症狀方向與醫師{index:02d}的實際專長相關，依目前資料提供保守評估。",
+                }
+                for index in range(specialty_scoring.MAX_AI_SCORE_CANDIDATES)
+            ]
+        }
+        provider = AsyncMock(return_value=json.dumps(response, ensure_ascii=False))
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(_case("飯後胃痛、反胃"), _department(), rows)
+
+        provider.assert_awaited_once()
+        prompt = provider.await_args.args[0]
+        self.assertEqual(prompt.count('"doctor_id": "doc-'), specialty_scoring.MAX_AI_SCORE_CANDIDATES)
+        self.assertEqual(
+            sum(result.source == "ai" for result in scores.values()),
+            specialty_scoring.MAX_AI_SCORE_CANDIDATES,
+        )
+        self.assertEqual(len(scores), 35)
+
     async def test_duplicate_schedule_rows_appear_once_in_ai_prompt(self):
         class FakeSettings:
             cerebras_api_key = "test-key"
@@ -151,6 +189,48 @@ class SpecialtyScoringTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(scores["doc-1"].reason), 64)
         self.assertEqual(scores["doc-1"].source, "ai")
+
+    async def test_normal_ai_reason_is_accepted(self):
+        reason = "飯後胃痛與反胃屬消化道不適方向；此醫師具胃鏡相關診療專長，與目前需求較相符。"
+        scores = await self._score_with_ai_reason(reason, specialty_tags="胃鏡、大腸鏡診斷及治療")
+
+        self.assertEqual(scores["doc-1"].source, "ai")
+        self.assertEqual(scores["doc-1"].reason, reason)
+
+    async def test_diagnostic_ai_reason_uses_deterministic_fallback(self):
+        scores = await self._score_with_ai_reason("您已確診胃癌，這位醫師一定最適合您。")
+
+        self.assertEqual(scores["doc-1"].source, "deterministic")
+
+    async def test_guarantee_or_best_choice_ai_reason_uses_deterministic_fallback(self):
+        for reason in (
+            "您患有胃部疾病，這是最佳選擇。",
+            "保證有效，您一定要看這位醫師。",
+        ):
+            with self.subTest(reason=reason):
+                scores = await self._score_with_ai_reason(reason)
+                self.assertEqual(scores["doc-1"].source, "deterministic")
+
+    async def test_tumor_specialty_wording_without_patient_diagnosis_is_accepted(self):
+        reason = "此醫師專長較偏壺腹與十二指腸腫瘤，與目前一般消化道症狀的直接關聯較有限。"
+        scores = await self._score_with_ai_reason(
+            reason,
+            specialty_tags="壺腹及十二指腸癌",
+        )
+
+        self.assertEqual(scores["doc-1"].source, "ai")
+        self.assertEqual(scores["doc-1"].reason, reason)
+
+    async def test_ai_reason_whitespace_is_normalized_before_length_limit(self):
+        reason = "  飯後胃痛與反胃屬   消化道不適方向；\r\n此醫師具胃鏡相關診療專長，與目前需求較相符。  " + "補充" * 30
+        scores = await self._score_with_ai_reason(reason, specialty_tags="胃鏡診療")
+        normalized = scores["doc-1"].reason
+
+        self.assertEqual(scores["doc-1"].source, "ai")
+        self.assertNotIn("\r", normalized)
+        self.assertNotIn("\n", normalized)
+        self.assertNotIn("  ", normalized)
+        self.assertLessEqual(len(normalized), 64)
 
     async def test_missing_ai_doctor_result_keeps_deterministic_fallback(self):
         class FakeSettings:
@@ -285,6 +365,36 @@ class SpecialtyScoringTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(score.score, 0.0)
         self.assertIn("科別不符", score.reason)
+
+    async def _score_with_ai_reason(self, reason: str, *, specialty_tags: str = "胃鏡診療"):
+        class FakeSettings:
+            cerebras_api_key = "test-key"
+            ai_doctor_scoring_enabled = True
+
+        provider = AsyncMock(
+            return_value=json.dumps(
+                {
+                    "scores": [
+                        {
+                            "doctor_id": "doc-1",
+                            "score": 0.9,
+                            "reason": reason,
+                        }
+                    ]
+                },
+                ensure_ascii=False,
+            )
+        )
+        specialty_scoring.get_settings = lambda: FakeSettings()
+        specialty_scoring.complete_prompt = provider
+
+        scores = await score_doctor_specialties(
+            _case("飯後胃痛、反胃"),
+            _department(),
+            [_row(specialty_tags=specialty_tags)],
+        )
+        provider.assert_awaited_once()
+        return scores
 
 
 def _case(message: str) -> TriageCase:
