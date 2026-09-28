@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import re
 from dataclasses import dataclass
 
@@ -39,6 +40,8 @@ class ClarificationSuggestion:
     reason: str
     answered_intent: str | None = None
     answer_source_text: str | None = None
+    answer_status: str | None = None
+    answer_confidence: float | None = None
 
 
 async def request_clarification(case: TriageCase, user_sources: list[str]) -> ClarificationSuggestion | None:
@@ -59,11 +62,15 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
         "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
         "已經有可靠回答的資訊不要重問；若本輪回答了 pending intent，"
-        "用 answered_intent 與逐字來自 current_user_text 的 answer_source_text 表示。"
+        "若本輪回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
+        "answer_source_text、answer_status (answered、partial 或 unclear) 與 0 到 1 的 "
+        "answer_confidence 表示；即使回答無法映射到既有症狀欄位，也要標示。"
+        "partial 或 unclear 時可針對相同 intent 提出一個更精確且不重複的追問。"
         "如果症狀資訊足夠，可建議 status=sufficient，但最終完成與否由 Backend 決定。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
         "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, intent, reason, "
-        "answered_intent, answer_source_text。intent 用簡短英文 snake_case。\n"
+        "answered_intent, answer_source_text, answer_status, answer_confidence。"
+        "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
     try:
@@ -91,16 +98,21 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             intent = None
         answered_intent = data.get("answered_intent")
         answer_source = data.get("answer_source_text")
-        if not (
-            isinstance(answered_intent, str)
-            and answered_intent == state.pending_clarification_intent
-            and isinstance(answer_source, str)
-            and answer_source.strip()
-            and any(answer_source.strip() in source for source in user_sources)
+        answer_status = data.get("answer_status")
+        answer_confidence = data.get("answer_confidence")
+        if not _grounded_clarification_answer(
+            answered_intent, answer_source, answer_status, answer_confidence,
+            state.pending_clarification_intent, user_sources,
         ):
             answered_intent = None
             answer_source = None
-        return ClarificationSuggestion(status, question, intent, reason, answered_intent, answer_source)
+            answer_status = None
+            answer_confidence = None
+        return ClarificationSuggestion(
+            status, question, intent, reason, answered_intent,
+            answer_source.strip() if answer_source else None,
+            answer_status, answer_confidence,
+        )
     except Exception as exc:
         logger.warning("clarification provider failed case_id=%s error=%s", case.case_id, exc)
         return None
@@ -121,13 +133,12 @@ def advance_conversation(
     if state.clarification_status != "safety_check":
         state.turn_count += len(user_sources)
 
-    answer_has_accepted_evidence = bool(suggestion and suggestion.answer_source_text) and any(
-        item in case.semantic_extractions
-        and item.source_text in (suggestion.answer_source_text or "")
-        and item.confidence >= ACCEPT_THRESHOLD
-        for item in current_extractions
+    grounded_answer = bool(suggestion) and _grounded_clarification_answer(
+        suggestion.answered_intent, suggestion.answer_source_text,
+        suggestion.answer_status, suggestion.answer_confidence,
+        state.pending_clarification_intent, user_sources,
     )
-    if suggestion and suggestion.answered_intent == state.pending_clarification_intent and answer_has_accepted_evidence:
+    if grounded_answer and suggestion.answer_status == "answered" and suggestion.answer_confidence >= ACCEPT_THRESHOLD:
         state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
         state.pending_clarification_intent = None
 
@@ -186,18 +197,26 @@ def advance_conversation(
         _unresolved(case)
         return
 
+    pending_follow_up = bool(
+        grounded_answer
+        and suggestion.answer_status in {"partial", "unclear"}
+        and suggestion.intent == state.pending_clarification_intent
+    )
     valid_question = (
         suggestion is not None
         and suggestion.status == "clarification_needed"
-        and suggestion.intent not in state.asked_clarification_intents
+        and (pending_follow_up or (
+            state.pending_clarification_intent is None
+            and suggestion.intent not in state.asked_clarification_intents
+        ))
         and not any(item.role == "assistant" and item.content == suggestion.question for item in case.history_records)
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
-        and state.pending_clarification_intent is None
     )
     if valid_question:
         question = suggestion.question or ""
-        state.pending_clarification_intent = suggestion.intent
-        state.asked_clarification_intents.append(suggestion.intent or "")
+        if not pending_follow_up:
+            state.pending_clarification_intent = suggestion.intent
+            state.asked_clarification_intents.append(suggestion.intent or "")
         reason = suggestion.reason
     elif state.pending_clarification_intent:
         question = "可以先補充上一個追問的答案，或描述目前症狀有什麼新的變化嗎？"
@@ -231,6 +250,24 @@ def _asks_filled_duration(case: TriageCase, intent: str | None, question: str | 
     return bool(
         case.patient_input.duration
         and ((intent and "duration" in intent) or (question and _DURATION_QUESTION.search(question)))
+    )
+
+
+def _grounded_clarification_answer(
+    intent: object, source_text: object, status: object, confidence: object,
+    pending_intent: str | None, user_sources: list[str],
+) -> bool:
+    return bool(
+        pending_intent
+        and intent == pending_intent
+        and isinstance(source_text, str)
+        and source_text.strip()
+        and any(source_text.strip() in source for source in user_sources)
+        and status in {"answered", "partial", "unclear"}
+        and isinstance(confidence, (int, float))
+        and not isinstance(confidence, bool)
+        and math.isfinite(confidence)
+        and 0 <= confidence <= 1
     )
 
 

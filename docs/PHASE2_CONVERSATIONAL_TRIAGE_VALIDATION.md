@@ -25,7 +25,7 @@
 
 自然文字 `/chat` 且 AI key 可用時：使用者原文 → Phase 1 AI-first semantic extraction 與 `source_text` grounding → Backend 保存患者原文及 AI normalized concept → 既有 red-flag/urgency safety 計算（不選 checklist 下一題）→ 專責 AI clarification call 根據 history、已知 evidence、未釐清項目和已問 intent 提議一個問題或 `sufficient` → Backend 驗證並決定狀態。助理追問記入 `history_records`，供下一輪理解「像房子在轉」等上下文回答。
 
-Backend 只接受非空、長度合理、有新 intent、未重複且不包含診斷斷言／科別／醫師／掛號建議的問題；已保存 duration 時拒絕再次詢問持續時間。AI 回答 `sufficient` 仍須有 grounded symptom、至少一項已驗證的症狀細節或已驗證澄清回答、無 unresolved low-confidence medical extraction、無 pending clarification。`answered_intent` 只有在本輪 `answer_source_text` 出現在使用者原文，且對應已接受的 extraction 時才可清除 pending。AI 回應中的 `stage`、`is_complete`、`confirmed` 等 workflow 欄位不解析。日期／時段偏好不屬於症狀完成門檻。
+Backend 只接受非空、長度合理、有新 intent、未重複且不包含診斷斷言／科別／醫師／掛號建議的問題；已保存 duration 時拒絕再次詢問持續時間。AI 回答 `sufficient` 仍須有 grounded symptom、至少一項已驗證的症狀細節或已驗證澄清回答、無 unresolved low-confidence medical extraction、無 pending clarification。Phase 2.3 起，`answered_intent` 清除 pending 改依本輪逐字 grounded 的 `answer_source_text`、`answer_status=answered` 與達標信心驗證，不再要求能映射到已接受的 structured extraction；詳見下節。AI 回應中的 `stage`、`is_complete`、`confirmed` 等 workflow 欄位不解析。日期／時段偏好不屬於症狀完成門檻。
 
 Provider timeout、quota、error、malformed JSON 或不合格問題時，使用不填造病情的泛化追問。第 8 個自然文字 turn 仍不足時進入 `clarification_status=unresolved`，不補未知欄位、不硬選科；之後不再自動呼叫 AI，除非使用者啟動 revision。現有 red-flag 陽性即時路徑保持原樣。Phase 2.1 起，症狀資訊足夠但 safety screen 未完成時仍須先問既有受控安全問題，不得直接完成或選科。
 
@@ -98,3 +98,21 @@ $env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
 | `docs/PHASE2_CONVERSATIONAL_TRIAGE_VALIDATION.md` | 記錄 Phase 2.2 修正與測試結果。 |
 
 在 `New_Android_Backend/backend` 使用上節相同環境設定執行 `pytest -q`，最終結果：`411 passed, 8 warnings, 277 subtests passed in 6.32s`。Phase 1 AI-first、原文 evidence／normalized concept 分離、自然多輪澄清、pending intent、低信心與 provider failure、真正未釐清時的 hard cap、Phase 2.1 safety gate、`/recommend` 防線及 urgent positive red flag 回歸均通過。未修改 API schema 或 Android source，未重跑 Android；仍無可用 `.git` metadata 可獨立核對指定 commit，沒有 commit 或 push。
+
+## Phase 2.3 - Free-form Clarification Evidence
+
+使用者指定基準 commit：`3218026d4e78fdb96b2a01153ccc4cb8301581d4`。真實 Cerebras smoke test 顯示：腳傷的承重能力回答可能不對應任何既有 `SemanticExtraction` 欄位；舊條件要求本輪必須有已接受的 extraction，導致 pending intent 無法解除，連續回泛化提示。本次只修自然澄清的回答證據與同 intent 追問，未開始 Phase 3。
+
+| 修改檔案 | 目的 |
+| --- | --- |
+| `backend/app/services/conversation_service.py` | planner JSON 加入 `answer_status`、`answer_confidence`；驗證 intent、逐字 source、有限 0–1 信心值。`answered` 且信心達既有 `ACCEPT_THRESHOLD` 時保存 `clarification_evidence[intent]` 並清除 pending，不依賴 PatientInput 新欄位或 accepted semantic extraction。`partial`／`unclear` 保留 pending，允許合法、非重複、同 intent 的精確追問。 |
+| `backend/tests/test_phase2_conversation.py` | 加入無 structured extraction 仍可清除 pending、虛構 source、partial／unclear、低信心／非有限值、錯 intent、重複與不安全問題的 API 測試；保留「像房子在轉」同時具 semantic extraction 的既有路徑。 |
+| `docs/PHASE2_CONVERSATIONAL_TRIAGE_VALIDATION.md` | 更新資料流、smoke 問題與驗證結果。 |
+
+新資料流：本輪 user 原文 → 原有 AI-first structured extraction（若有）→ AI clarification planner 提議 answer metadata 與下一步 → Backend 僅在 `answered_intent == pending_clarification_intent`、`answer_source_text` 非空且逐字存在本輪 user 原文、`answer_status=answered`、`answer_confidence` 為有限 0–1 且 `>= ACCEPT_THRESHOLD` 時保存 free-form evidence 並清除 pending。`partial`／`unclear` 不保存完成證據、不清除 pending；若同 intent 問題通過既有長度、診斷／科別／醫師／掛號字樣、已問時長及 exact-duplicate 檢查，則可續問。AI 仍不能控制 workflow、red flag 或直接選科；safety gate、hard cap 與後續科別邏輯未變。未新增醫療 field、keyword 或 synonym dictionary。
+
+驗證：在 `New_Android_Backend/backend` 執行 `pytest -q`（測試程序內暫時清空 `CEREBRAS_API_KEY`，不改 `.env`），結果 `416 passed, 8 warnings, 285 subtests passed in 13.74s`。警告仍是既有 FastAPI/Starlette deprecation 與 pytest cache 權限。Android DTO／UI／network contract 未修改，故未重跑 Android。
+
+另外以本機 `.env` 真實 Cerebras `gpt-oss-120b`、in-memory `/chat` 再驗證腳傷多輪（僅在測試程序內替換科別偵測，避免 DB 呼叫）。一次第二輪回傳合法 JSON、`partial`、grounded source、信心 `0.92`，Backend 保留 pending 並使用更具體的同 intent 追問，而非泛化提示。另一次三輪驗證中，第二輪 provider 未標示 answer metadata，因此仍回泛化提示；第三輪明確說明能站立承重後，provider 回 `answered`、grounded source、信心 `0.96`，Backend 保存 `clarification_evidence[functional_impact]`、清除 pending，進入受控 `safety_check`。這顯示 Backend 已能接受 free-form evidence，但 provider 對簡短回答是否標示為 answered 仍有變異；未為此加醫療硬編碼。測試未顯示、記錄或回報 API key。
+
+Phase 3/4 的官方 KB 與科別收斂、Phase 5 TTAS、Phase 6 doctor scoring、Android、DB schema 與 SQL data 均未修改。此副本仍無法透過 Git metadata 獨立核對指定 commit；沒有 commit 或 push。

@@ -203,7 +203,8 @@ class Phase2ConversationTest(unittest.TestCase):
             "像房子在轉", [extraction("accompanying_symptoms", ["像房子在轉"], "像房子在轉")],
             {"status": "sufficient", "question": None, "intent": None,
              "reason": "頭暈型態已釐清", "answered_intent": "clarify_dizziness_type",
-             "answer_source_text": "像房子在轉"},
+             "answer_source_text": "像房子在轉", "answer_status": "answered",
+             "answer_confidence": 0.95},
             triage_case=first["triage_case"],
         )
         prompt = clarification.await_args.args[0]
@@ -279,7 +280,8 @@ class Phase2ConversationTest(unittest.TestCase):
             "大概是吧", [extraction("severity", "mild", "大概是吧", confidence=0.2)],
             {"status": "sufficient", "question": None, "intent": None,
              "reason": "足夠", "answered_intent": "clarify_dizziness_type",
-             "answer_source_text": "不在原文"},
+             "answer_source_text": "不在原文", "answer_status": "answered",
+             "answer_confidence": 0.95},
             triage_case=first["triage_case"],
         )
         self.assertTrue(second["needMoreInfo"])
@@ -287,21 +289,133 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertFalse(second["conversation_state"]["is_complete"])
         department.assert_not_awaited()
 
-    def test_grounded_answer_without_accepted_extraction_does_not_clear_pending(self):
+    def test_free_form_answer_clears_pending_without_structured_extraction(self):
         first, _, _, _ = self.post(
-            "最近一直頭暈", [extraction("symptom", "頭暈", "頭暈")],
-            {"status": "clarification_needed", "question": "是旋轉感還是快昏倒？",
-             "intent": "clarify_dizziness_type", "reason": "型態未明"},
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
         )
+        answer = "還能走路，但是踩地會痛"
         second, _, _, department = self.post(
-            "像房子在轉", [],
+            answer, [],
             {"status": "sufficient", "question": None, "intent": None,
-             "reason": "已回答", "answered_intent": "clarify_dizziness_type",
-             "answer_source_text": "像房子在轉"},
+             "reason": "已回答", "answered_intent": "fracture_assessment",
+             "answer_source_text": answer, "answer_status": "answered",
+             "answer_confidence": 0.95},
             triage_case=first["triage_case"],
         )
         self.assertTrue(second["needMoreInfo"])
-        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "clarify_dizziness_type")
+        self.assertIsNone(second["conversation_state"]["pending_clarification_intent"])
+        self.assertEqual(second["conversation_state"]["clarification_evidence"]["fracture_assessment"], answer)
+        self.assertEqual(second["conversation_state"]["clarification_status"], "safety_check")
+        self.assertEqual(second["triage_case"]["patient_input"]["symptom"], "腳背腫痛")
+        self.assertEqual(len(second["triage_case"]["semantic_extractions"]), 1)
+        department.assert_not_awaited()
+
+    def test_ungrounded_free_form_answer_cannot_clear_pending(self):
+        first, _, _, _ = self.post(
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
+        )
+        second, _, _, department = self.post(
+            "還能走路，但是踩地會痛", [],
+            {"status": "sufficient", "question": None, "intent": None,
+             "reason": "已回答", "answered_intent": "fracture_assessment",
+             "answer_source_text": "完全不能走路", "answer_status": "answered",
+             "answer_confidence": 0.95},
+            triage_case=first["triage_case"],
+        )
+        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+        self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
+        department.assert_not_awaited()
+
+    def test_partial_answer_keeps_pending_but_allows_targeted_follow_up(self):
+        first, _, _, _ = self.post(
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
+        )
+        follow_up = "走路時能把重量放在右腳上，還是只能用左腳支撐？"
+        second, _, _, department = self.post(
+            "還能走路", [],
+            {"status": "clarification_needed", "question": follow_up,
+             "intent": "fracture_assessment", "reason": "承重程度仍不清楚",
+             "answered_intent": "fracture_assessment", "answer_source_text": "還能走路",
+             "answer_status": "partial", "answer_confidence": 0.91},
+            triage_case=first["triage_case"],
+        )
+        self.assertEqual(second["next_question"], follow_up)
+        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+        self.assertEqual(second["conversation_state"]["asked_clarification_intents"], ["fracture_assessment"])
+        self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
+        department.assert_not_awaited()
+
+    def test_unclear_answer_allows_safe_follow_up_but_rejects_duplicate_or_unsafe_question(self):
+        first, _, _, _ = self.post(
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
+        )
+        answer = {
+            "status": "clarification_needed", "intent": "fracture_assessment",
+            "reason": "承重情況仍不清楚", "answered_intent": "fracture_assessment",
+            "answer_source_text": "不太確定", "answer_status": "unclear",
+            "answer_confidence": 0.8,
+        }
+        follow_up = "試著站立時，右腳可以承受身體重量嗎？"
+        second, _, _, _ = self.post(
+            "不太確定", [], {**answer, "question": follow_up},
+            triage_case=first["triage_case"],
+        )
+        self.assertEqual(second["next_question"], follow_up)
+        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+
+        for question in ("現在還能承重走路嗎？", "你確診骨折了嗎？", "要掛哪個科別？"):
+            with self.subTest(question=question):
+                rejected, _, _, _ = self.post(
+                    "不太確定", [], {**answer, "question": question},
+                    triage_case=first["triage_case"],
+                )
+                self.assertNotEqual(rejected["next_question"], question)
+                self.assertEqual(rejected["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+                self.assertEqual(rejected["conversation_state"]["clarification_evidence"], {})
+
+    def test_low_confidence_free_form_answer_keeps_pending(self):
+        first, _, _, _ = self.post(
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
+        )
+        for confidence in (0.54, float("nan"), float("inf"), 1.1, True):
+            with self.subTest(confidence=confidence):
+                second, _, _, department = self.post(
+                    "還能走路，但是踩地會痛", [],
+                    {"status": "sufficient", "question": None, "intent": None,
+                     "reason": "已回答", "answered_intent": "fracture_assessment",
+                     "answer_source_text": "還能走路，但是踩地會痛",
+                     "answer_status": "answered", "answer_confidence": confidence},
+                    triage_case=first["triage_case"],
+                )
+                self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+                self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
+                department.assert_not_awaited()
+
+    def test_wrong_answered_intent_cannot_clear_pending(self):
+        first, _, _, _ = self.post(
+            "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
+            {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
+             "intent": "fracture_assessment", "reason": "承重情況未明"},
+        )
+        second, _, _, department = self.post(
+            "還能走路，但是踩地會痛", [],
+            {"status": "sufficient", "question": None, "intent": None,
+             "reason": "已回答", "answered_intent": "clarify_dizziness_type",
+             "answer_source_text": "還能走路，但是踩地會痛",
+             "answer_status": "answered", "answer_confidence": 0.95},
+            triage_case=first["triage_case"],
+        )
+        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
         self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
         department.assert_not_awaited()
 
