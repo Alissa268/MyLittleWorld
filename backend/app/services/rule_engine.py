@@ -688,6 +688,8 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
 
     if extraction.field in {"symptom", "body_part", "duration"}:
         text = str(extraction.normalized_value or "").strip()
+        if extraction.field == "symptom" and extraction.extractor.startswith("ai"):
+            text = extraction.source_text.strip()
         if extraction.field == "body_part" and any(
             term in text for term in ("胃部", "腸胃", "胃")
         ):

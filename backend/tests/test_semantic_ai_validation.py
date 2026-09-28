@@ -239,7 +239,8 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         )
 
         provider.assert_awaited_once()
-        self.assertEqual(case.patient_input.symptom, "灼熱感")
+        self.assertEqual(case.patient_input.symptom, "燒灼的感覺")
+        self.assertEqual(case.semantic_extractions[0].normalized_value, "灼熱感")
 
     async def test_indirect_weak_severity_answers_use_ai_and_land_as_mild(self):
         for answer in ("不影響吧", "應該還好吧"):

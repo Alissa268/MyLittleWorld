@@ -50,6 +50,34 @@ pytest -q
 
 API contract：以 `TestClient(app).get('/openapi.json')` 檢查 `/chat` POST 仍回 `TriageResult`，`ChatRequest` 與 `TriageResult` 欄位集合未變。Android source/DTO 未改，因此未執行 Android unit tests、`assembleDebug` 或實機測試。
 
+## Phase 1.1 - 症狀原文與 AI 解讀分離
+
+使用者指定本次基準 HEAD：`678b38eddff91393d9c0832b455ea677454062ca`。本次僅修正 AI 症狀套用及相關測試，未開始 Phase 2。
+
+| 修改檔案 | 目的 |
+| --- | --- |
+| `backend/app/services/rule_engine.py` | AI 的 `symptom` 寫入 `patient_input.symptom` 時使用已通過 grounding 的 `source_text`；`normalized_value` 不再直接改寫患者主訴。其他欄位與 deterministic 路徑未改。 |
+| `backend/tests/test_phase1_ai_first.py` | 補強「我頭暈」卻被 AI 解讀為「胸痛」的回歸測試，並新增「砰砰跳很快」保留患者原文、同時保存 AI「心悸」概念的測試。 |
+| `backend/tests/test_semantic_ai_validation.py` | 將既有 batch AI 症狀測試的預期值改為 grounded 原文，並確認 normalized 概念仍在 `SemanticExtraction`。 |
+| `.gitignore` | 移除 Phase 1 額外重複規則，恢復與 Phase 0 基準資料夾 `Android_Backend/.gitignore` 完全相同的內容。 |
+| `docs/PHASE1_AI_FIRST_VALIDATION.md` | 記錄 Phase 1.1 修正和驗證。 |
+
+修正前：通過 `source_text` grounding 與欄位驗證的 AI symptom extraction，仍會將 `normalized_value` 直接存入 `patient_input.symptom`；「頭暈」可因此被偽寫為「胸痛」。修正後：自由文字仍走 AI-first extraction → 既有 grounding／白名單／schema／confidence validation → apply；對 AI symptom，患者主訴欄位保存 `source_text`，AI 概念保存在 `case.semantic_extractions[].normalized_value`。因此「心臟有時候突然砰砰跳很快」仍可攜帶「心悸」的語意解讀，但不會冒充患者逐字陳述。Backend 仍掌控 workflow 與 red-flag 狀態；未新增症狀字典、修改推薦或 Android contract。
+
+新增／補強測試：`test_ai_normalized_symptom_cannot_indirectly_complete_red_flag_screen` 現在也斷言 `patient_input.symptom == "頭暈"` 且絕非「胸痛」；新增 `test_ai_symptom_concept_keeps_grounded_patient_wording`；既有 `test_ai_symptom_is_not_limited_to_symptom_terms` 驗證 batch 路徑保留原文和 AI 概念。既有 workflow/red-flag、provider failure、malformed JSON、low confidence 測試均隨完整 Backend suite 通過。
+
+在 `New_Android_Backend/backend` 執行：
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+$env:PYTHONPATH=(Get-Location).Path
+$env:Path=(Resolve-Path '.\.venv\Scripts').Path + ';' + $env:Path
+pytest -q tests/test_phase1_ai_first.py tests/test_semantic_ai_validation.py
+pytest -q
+```
+
+聚焦測試：`36 passed, 8 warnings, 29 subtests passed in 1.10s`。完整 Backend：`396 passed, 8 warnings, 275 subtests passed in 6.14s`。警告仍為 FastAPI/Starlette deprecation 與 pytest cache 寫入權限，無測試失敗。`.gitignore` 與 `Android_Backend/.gitignore` 的 SHA-256 均為 `F4FE472F8277A3BCCCAD83385F62D3EB6FA002AF37D1C2065C454B6C534DDA77`。目前工作副本沒有可用 `.git` metadata，故無法以 `git show` 獨立核對指定 commit；此處依計畫所列 Phase 0 基準資料夾逐位元組比對。未修改 Android 或 API contract，未執行 Android build/測試。
+
 ## 留待後續 Phase
 
 - Phase 2：固定 7 題、重試與下一題策略仍在；未改為真正多輪自然釐清。

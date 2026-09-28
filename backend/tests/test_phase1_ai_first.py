@@ -198,9 +198,25 @@ class Phase1AiFirstTest(unittest.TestCase):
             "我頭暈", {"semantic_extractions": [extraction("symptom", "胸痛", "頭暈")]},
         )
         patient = result["triage_case"]["patient_input"]
+        self.assertEqual(patient["symptom"], "頭暈")
+        self.assertNotEqual(patient["symptom"], "胸痛")
+        self.assertEqual(
+            result["triage_case"]["semantic_extractions"][0]["normalized_value"], "胸痛",
+        )
         self.assertFalse(patient["red_flags_checked"])
         self.assertEqual(patient["red_flags"], [])
         self.assertTrue(result["needMoreInfo"])
+
+    def test_ai_symptom_concept_keeps_grounded_patient_wording(self):
+        wording = "心臟有時候突然砰砰跳很快"
+        result, provider = self.post_text(
+            wording, {"semantic_extractions": [extraction("symptom", "心悸", wording)]},
+        )
+        provider.assert_awaited_once()
+        case = result["triage_case"]
+        self.assertEqual(case["patient_input"]["symptom"], wording)
+        self.assertEqual(case["semantic_extractions"][0]["source_text"], wording)
+        self.assertEqual(case["semantic_extractions"][0]["normalized_value"], "心悸")
 
     def test_keyed_free_text_calls_ai_but_explicit_choice_remains_structured(self):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
