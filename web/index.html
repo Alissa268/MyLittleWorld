@@ -1,0 +1,1105 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>導底看哪科 — 智慧看診指南</title>
+<style>
+  :root {
+    --brand:      #0f6e8c;
+    --brand-dark: #0a5570;
+    --brand-tint: #e7f2f6;
+    --brand-line: #b6d6e2;
+    --ink:   #1b2a33;
+    --ink-2: #4a5c68;
+    --ink-3: #82929c;
+    --paper: #e9eef2;
+    --card:  #ffffff;
+    --line:  #dbe4ea;
+    --soft:  #f2f6f8;
+    --good:      #1e6b3a;
+    --good-bg:   #e8f5ec;
+    --good-line: #c2e3cf;
+    --crit:      #8c2f22;
+    --crit-bg:   #fdecea;
+    --crit-line: #f5c2bd;
+  }
+
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: "Noto Sans TC", "Microsoft JhengHei", "PingFang TC", system-ui, sans-serif;
+    background: var(--paper);
+    color: var(--ink);
+    font-size: 15px;
+    line-height: 1.7;
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  header {
+    background: var(--brand); color: #fff;
+    padding: 13px 22px; display: flex; align-items: center;
+    justify-content: space-between; gap: 14px; flex-shrink: 0;
+    box-shadow: 0 2px 8px rgba(0,0,0,.13);
+  }
+  .brand { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
+  .brand b { font-size: 18px; font-weight: 700; letter-spacing: .5px; }
+  .brand span { font-size: 12.5px; opacity: .82; }
+  .hright { display: flex; align-items: center; gap: 10px; }
+  .badge {
+    background: rgba(255,255,255,.18); border: 1px solid rgba(255,255,255,.42);
+    padding: 3px 11px; border-radius: 20px; font-size: 12.5px; font-weight: 700;
+  }
+  .hbtn {
+    background: transparent; border: 1px solid rgba(255,255,255,.42); color: #fff;
+    padding: 5px 12px; border-radius: 7px; cursor: pointer;
+    font-size: 12.5px; font-family: inherit;
+  }
+  .hbtn:hover { background: rgba(255,255,255,.16); }
+
+  .body { flex: 1; display: flex; overflow: hidden; }
+  main { flex: 1; overflow-y: auto; }
+  .shell { max-width: 880px; margin: 0 auto; padding: 22px 18px 60px; }
+  .shell:has(#s0:not([hidden])) { max-width: 1100px; }
+
+  .app {
+    background: var(--card); border: 1px solid var(--line);
+    border-radius: 12px; overflow: hidden;
+    box-shadow: 0 1px 2px rgba(19,45,58,.05), 0 4px 14px rgba(19,45,58,.06);
+  }
+
+  .steps {
+    display: flex; background: var(--soft); border-bottom: 1px solid var(--line);
+    padding: 0 6px; overflow-x: auto; overflow-y: hidden;
+  }
+  .steps[hidden] { display: none; }
+  .steps > div {
+    flex: 1 1 0; min-width: 92px; text-align: center; padding: 11px 6px 9px;
+    font-size: 12.5px; color: var(--ink-3); position: relative; white-space: nowrap;
+  }
+  .steps > div .n {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 19px; height: 19px; border-radius: 50%; margin-right: 6px;
+    background: #d5dee4; color: #fff; font-size: 11.5px; font-weight: 700;
+    vertical-align: 1px;
+  }
+  .steps > div.on { color: var(--brand); font-weight: 700; }
+  .steps > div.on .n { background: var(--brand); }
+  .steps > div.done { color: var(--ink-2); }
+  .steps > div.done .n { background: var(--good); }
+  .steps > div.on::after {
+    content: ""; position: absolute; left: 12%; right: 12%; bottom: 0;
+    height: 2px; background: var(--brand); border-radius: 2px;
+  }
+
+  .stage { padding: 26px 24px 28px; }
+  @media (max-width: 560px) { .stage { padding: 20px 15px 24px; } }
+
+  h2.q { font-size: 20px; font-weight: 700; margin-bottom: 4px; letter-spacing: .3px; }
+  p.sub { color: var(--ink-2); font-size: 14px; margin-bottom: 22px; }
+
+  .field { margin-bottom: 20px; }
+  .field > label {
+    display: block; font-size: 13.5px; font-weight: 700; color: var(--ink-2);
+    margin-bottom: 7px;
+  }
+  .field .hint { font-weight: 400; color: var(--ink-3); font-size: 12.5px; margin-left: 6px; }
+  .field .hint.blk { display: block; margin: 1px 0 0; line-height: 1.55; }
+  .field .assist { font-size: 12.5px; color: var(--ink-3); margin: 9px 0 7px; }
+  .field.invalid > label { color: var(--crit); }
+  .field.invalid input { border-color: var(--crit); box-shadow: 0 0 0 3px rgba(180, 35, 24, .12); }
+  .field.invalid .opts { outline: 1px solid var(--crit); outline-offset: 5px; border-radius: 8px; }
+  .field-error { display: none; color: var(--crit); font-size: 12.5px; margin: 7px 0 0; }
+  .field.invalid .field-error { display: block; }
+
+  input[type=text], input[type=number], select, textarea {
+    width: 100%; font-family: inherit; font-size: 15px; color: var(--ink);
+    padding: 10px 13px; border: 1px solid #c9d5dd; border-radius: 8px; background: #fff;
+  }
+  textarea { resize: none; height: 78px; line-height: 1.6; }
+  input:focus, select:focus, textarea:focus {
+    outline: none; border-color: var(--brand); box-shadow: 0 0 0 3px var(--brand-tint);
+  }
+  input::placeholder, textarea::placeholder { color: #a9b6bf; }
+  select:disabled { background: var(--soft); color: var(--ink-3); }
+
+  .opts { display: flex; flex-wrap: wrap; gap: 8px; }
+  .opt {
+    font-family: inherit; font-size: 14px; color: var(--ink-2);
+    background: #fff; border: 1px solid #c9d5dd; border-radius: 8px;
+    padding: 8px 16px; cursor: pointer; transition: .12s;
+  }
+  .opt:hover { border-color: var(--brand); color: var(--brand); }
+  .opt[aria-pressed="true"] {
+    background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 700;
+  }
+  .opt.sm { padding: 5px 11px; font-size: 13px; border-radius: 20px; }
+  .opt.sm[aria-pressed="true"] {
+    background: var(--brand-tint); color: var(--brand); border-color: var(--brand);
+  }
+
+  .row2 { display: grid; grid-template-columns: 1fr; gap: 18px; }
+  @media (min-width: 560px) { .row2 { grid-template-columns: 1fr 1fr; } }
+
+  .actions { display: flex; gap: 10px; align-items: center; margin-top: 26px; flex-wrap: wrap; }
+  .primary {
+    font-family: inherit; font-size: 15.5px; font-weight: 700;
+    background: var(--brand); color: #fff; border: none; border-radius: 8px;
+    padding: 11px 30px; cursor: pointer;
+  }
+  .primary:hover:not(:disabled) { background: var(--brand-dark); }
+  .primary:disabled { background: #c3d0d8; cursor: not-allowed; }
+  .secondary {
+    font-family: inherit; font-size: 15.5px; font-weight: 500;
+    background: #fff; color: var(--ink-2); border: 1px solid #c9d5dd;
+    border-radius: 8px; padding: 11px 22px; cursor: pointer;
+  }
+  .secondary:hover:not(:disabled) { border-color: var(--brand); color: var(--brand); }
+  .secondary:disabled { color: var(--ink-3); cursor: not-allowed; }
+
+  .modes { display: grid; grid-template-columns: 1fr; gap: 12px; margin-top: 6px; }
+  @media (min-width: 560px) { .modes { grid-template-columns: repeat(3, 1fr); } }
+  .mode {
+    font-family: inherit; background: #fff; border: 2px solid var(--brand-line);
+    border-radius: 12px; padding: 24px 18px 20px; cursor: pointer; transition: .14s;
+    text-align: center; display: flex; flex-direction: column; justify-content: flex-start;
+  }
+  .mode .t {
+    display: block; color: var(--brand);
+    font-size: 26px; font-weight: 700; letter-spacing: 4px;
+  }
+  .mode .d {
+    display: block; color: var(--ink-2); text-align: left;
+    font-size: 12.5px; font-weight: 400; letter-spacing: 0;
+    line-height: 1.65; margin-top: 12px;
+  }
+  .mode:hover { background: var(--brand-tint); border-color: var(--brand); transform: translateY(-2px); }
+
+  .visit-notice {
+    margin-bottom: 22px; padding: 18px 20px;
+    background: var(--brand-tint); border: 1px solid var(--brand-line); border-radius: 10px;
+  }
+  .visit-notice h3 { color: var(--brand-dark); font-size: 16px; margin-bottom: 10px; }
+  .visit-notice dl { display: grid; grid-template-columns: auto 1fr; gap: 10px 14px; font-size: 14px; }
+  .visit-notice dt { font-weight: 700; color: var(--brand-dark); }
+  .visit-notice dd { margin: 0; color: var(--ink-2); }
+  .visit-notice strong { color: var(--ink); }
+  .visit-notice .note {
+    margin-top: 14px; padding-top: 12px; border-top: 1px solid var(--brand-line);
+    font-size: 13px; color: var(--ink-2);
+  }
+  @media (max-width: 560px) {
+    .visit-notice { padding: 15px; }
+    .visit-notice dl { grid-template-columns: 1fr; gap: 4px; }
+    .visit-notice dt:not(:first-child) { margin-top: 8px; }
+  }
+
+  .gridwrap { overflow-x: auto; padding-bottom: 4px; }
+  table.slots { border-collapse: separate; border-spacing: 5px; min-width: 480px; }
+  table.slots th { font-size: 13px; font-weight: 700; color: var(--ink-2); padding: 2px 0 4px; }
+  table.slots th.rowh { text-align: right; padding-right: 9px; white-space: nowrap; }
+  table.slots th.rowh small { display: block; font-weight: 400; color: var(--ink-3); font-size: 11px; }
+  .slot {
+    width: 100%; min-width: 54px; height: 40px; border-radius: 7px; cursor: pointer;
+    background: #fff; border: 1px solid #ccd8df; font-family: inherit;
+    font-size: 12px; color: #b3c0c8; transition: .1s;
+  }
+  .slot:hover { border-color: var(--brand); background: var(--brand-tint); }
+  .slot[aria-pressed="true"] {
+    background: var(--brand); border-color: var(--brand); color: #fff; font-weight: 700;
+  }
+  .slot[aria-pressed="true"]::after { content: "✓"; font-size: 14px; }
+  .picked {
+    font-size: 13px; color: var(--ink-2); margin-top: 12px;
+    background: var(--soft); border-radius: 8px; padding: 9px 13px; border: 1px solid var(--line);
+  }
+  .picked b { color: var(--brand); }
+
+  .summary {
+    font-size: 13.5px; color: var(--ink-2); background: var(--soft);
+    border: 1px solid var(--line); border-left: 3px solid var(--brand);
+    border-radius: 0 8px 8px 0; padding: 10px 14px; margin-bottom: 20px;
+  }
+  .summary b { color: var(--brand); }
+
+  .chat { display: flex; flex-direction: column; gap: 12px; margin-bottom: 18px; }
+  .bub {
+    max-width: 84%; padding: 12px 16px; border-radius: 13px;
+    font-size: 14.5px; white-space: pre-wrap;
+  }
+  .bub.bot {
+    background: var(--soft); border: 1px solid var(--line);
+    align-self: flex-start; border-bottom-left-radius: 4px;
+  }
+  .bub.me {
+    background: var(--brand); color: #fff;
+    align-self: flex-end; border-bottom-right-radius: 4px;
+  }
+
+  .alert {
+    border: 1px solid var(--crit-line); background: var(--crit-bg); color: var(--crit);
+    border-radius: 10px; padding: 16px 18px; font-size: 15px;
+  }
+  .alert b { display: block; font-size: 17px; margin-bottom: 4px; }
+  .err {
+    border: 1px solid var(--crit-line); background: var(--crit-bg); color: var(--crit);
+    border-radius: 8px; padding: 11px 15px; font-size: 14px; margin-bottom: 16px;
+  }
+
+  .dept {
+    border: 1px solid var(--line); border-left: 4px solid var(--brand);
+    border-radius: 10px; padding: 16px 18px; margin-bottom: 22px; background: #fff;
+  }
+  .dept .lbl { font-size: 11.5px; letter-spacing: .12em; color: var(--ink-3); font-weight: 700; }
+  .dept .name { font-size: 23px; font-weight: 700; color: var(--brand); margin-top: 2px; }
+  .dept .name small { font-size: 13.5px; font-weight: 400; color: var(--ink-3); margin-left: 9px; }
+  .dept ul { margin: 10px 0 0; padding-left: 1.15em; font-size: 13.5px; color: var(--ink-2); }
+  .dept li { margin-bottom: 3px; }
+  .dept li::marker { color: var(--brand-line); }
+  .confbar { display: flex; align-items: center; gap: 10px; margin-top: 12px; }
+  .confbar .track {
+    flex: 1; height: 6px; background: #e3eaee; border-radius: 4px;
+    overflow: hidden; max-width: 200px;
+  }
+  .confbar .fill { height: 100%; background: var(--brand); border-radius: 4px; }
+  .confbar .txt { font-size: 12.5px; color: var(--ink-3); }
+  .confbar .txt b { color: var(--ink-2); }
+
+  .listhead {
+    display: flex; align-items: baseline; justify-content: space-between;
+    margin-bottom: 11px; flex-wrap: wrap; gap: 8px;
+  }
+  .listhead h3 { font-size: 16px; font-weight: 700; }
+  .listhead span { font-size: 12.5px; color: var(--ink-3); }
+
+  .cards { display: flex; flex-direction: column; gap: 10px; }
+  .dcard {
+    background: #fff; border: 1px solid var(--line); border-radius: 10px;
+    padding: 14px 17px; display: flex; gap: 15px; align-items: flex-start;
+  }
+  .dcard.top {
+    border-color: var(--brand);
+    background: linear-gradient(180deg, var(--brand-tint), #fff 62%);
+  }
+  .rank {
+    width: 27px; height: 27px; border-radius: 50%; background: #b9c7cf; color: #fff;
+    display: flex; align-items: center; justify-content: center; flex-shrink: 0;
+    font-weight: 700; font-size: 13px; margin-top: 3px;
+  }
+  .dcard.top .rank { background: var(--brand); }
+  .dinfo { flex: 1; min-width: 0; }
+  .dname {
+    font-size: 17px; font-weight: 700; display: flex;
+    align-items: center; gap: 9px; flex-wrap: wrap;
+  }
+  .dname .sub2 { font-size: 13px; font-weight: 400; color: var(--ink-3); }
+  .dname .pill {
+    font-size: 11px; font-weight: 700; letter-spacing: .06em;
+    background: var(--brand); color: #fff; padding: 2px 9px; border-radius: 20px;
+  }
+  .dwhen { font-size: 14px; color: var(--ink-2); margin-top: 4px; font-variant-numeric: tabular-nums; }
+  .dwhen .sep { color: #c3ced5; margin: 0 7px; }
+  .dwhen .rm { color: var(--ink-3); font-size: 13px; }
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; margin-top: 9px; }
+  .tag {
+    font-size: 12.5px; padding: 3px 9px; border-radius: 5px;
+    background: var(--soft); border: 1px solid var(--line); color: var(--ink-2);
+  }
+  .tag.hit { background: var(--good-bg); border-color: var(--good-line); color: var(--good); }
+  .sc { flex-shrink: 0; width: 62px; text-align: center; }
+  .sc .n2 { font-size: 19px; font-weight: 700; color: var(--brand); }
+  .sc.dim .n2 { color: var(--ink-3); }
+  .sc .t { font-size: 10.5px; color: var(--ink-3); }
+  .sc .track { height: 4px; background: #e3eaee; border-radius: 3px; margin-top: 5px; overflow: hidden; }
+  .sc .fill { height: 100%; background: var(--brand); }
+  .sc.dim .fill { background: #bcc8d0; }
+  .footnote { font-size: 12.5px; color: var(--ink-3); margin-top: 18px; }
+
+  #debug {
+    width: 440px; background: #1e2732; color: #cfd8e3; overflow-y: auto;
+    padding: 18px; font-size: 12.5px; flex-shrink: 0; display: none;
+    font-family: Consolas, "Courier New", monospace;
+  }
+  #debug.open { display: block; }
+  #debug h2 { font-size: 13px; color: #7fd1e8; margin: 18px 0 8px; letter-spacing: 1px; }
+  #debug h2:first-child { margin-top: 0; }
+  #debug pre {
+    background: #131a23; border: 1px solid #2c3846; border-radius: 6px;
+    padding: 10px; white-space: pre-wrap; word-break: break-all; line-height: 1.6;
+  }
+  #debug .kv {
+    display: flex; justify-content: space-between; padding: 3px 0;
+    border-bottom: 1px solid #2c3846;
+  }
+  #debug .kv span:last-child { color: #a8e6b8; }
+  #debug .empty { color: #6b7a86; font-style: italic; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="brand"><b>導底看哪科</b><span>智慧看診指南</span></div>
+  <div class="hright">
+    <span class="badge" id="badge" hidden></span>
+    <button class="hbtn" id="debugToggle" hidden>除錯</button>
+    <button class="hbtn" id="restartBtn" hidden>重新開始</button>
+  </div>
+</header>
+
+<div class="body">
+<main>
+<div class="shell">
+<div class="app">
+
+  <div class="steps" id="steps" hidden></div>
+
+  <div class="stage">
+    <div class="err" id="err" hidden></div>
+
+    <section id="s0">
+      <h2 class="q">請問您這次的就診類別？</h2>
+      <p class="sub">請先閱讀就診類別說明，再選擇適合您的服務。</p>
+      <aside class="visit-notice" aria-labelledby="visitNoticeTitle">
+        <h3 id="visitNoticeTitle">就診前注意事項｜初診、複診、快速查詢怎麼選？</h3>
+        <dl>
+          <dt>初診</dt>
+          <dd><strong>第一次到本院就醫。</strong>可使用系統評估症狀，了解適合掛號的科別與醫師。</dd>
+          <dt>複診</dt>
+          <dd><strong>曾在本院就醫且有病歷號，即使第一次看某科仍屬複診。</strong>可使用系統評估症狀，了解適合掛號的科別與醫師。</dd>
+          <dt>快速查詢</dt>
+          <dd><strong>只需了解門診班表，</strong>可依方便時段查詢指定科別的可掛號門診，並可指定醫師篩選；不額外提供科別或醫師推薦。</dd>
+        </dl>
+        <div class="note">
+          <ol style="padding-left: 1.5em;">
+            <li>同一門診的初診與複診掛號名額不同。</li>
+            <li>初診不包含大我門診；大我門診僅限複診。</li>
+          </ol>
+        </div>
+      </aside>
+      <div class="modes">
+        <button class="mode" data-mode="初診">
+          <span class="t">初診</span>
+          <span class="d">首次到本院就醫<br>填寫症狀，取得科別與醫師時段建議。</span>
+        </button>
+        <button class="mode" data-mode="複診">
+          <span class="t">複診</span>
+          <span class="d">曾在本院就醫，已有病歷號<br>填寫症狀，取得科別與醫師時段建議。</span>
+        </button>
+        <button class="mode" data-mode="查詢門診">
+          <span class="t">快速查詢</span>
+          <span class="d">只需了解門診班表<br>依方便時段查詢指定科別的可掛號門診，<br>並可指定醫師篩選。不額外提供推薦。</span>
+        </button>
+      </div>
+      <p class="footnote">掛號請至臺北榮總行動就醫服務APP，本網站僅提供就診科別與醫師門診時段的建議。</p>
+    </section>
+
+    <section id="sDept" hidden>
+      <h2 class="q">請問您想查詢哪一科的門診？</h2>
+      <p class="sub">請先選科別分類，再選想查詢的科別。</p>
+      <div class="row2">
+        <div class="field">
+          <label for="parentSel">科別分類</label>
+          <select id="parentSel"><option value="">載入中…</option></select>
+        </div>
+        <div class="field">
+          <label for="childSel">想查詢的科別</label>
+          <select id="childSel" disabled><option value="">請先選左邊</option></select>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="secondary" data-go="0">上一步</button>
+        <button class="primary" id="deptOk" disabled>下一步</button>
+      </div>
+    </section>
+
+    <section id="s1" hidden>
+      <h2 class="q">請提供病患基本資料</h2>
+      <p class="sub">年齡會影響科別的判斷，未滿 18 歲會優先推薦兒童相關科別。</p>
+      <div class="row2">
+        <div class="field">
+          <label for="age">年齡</label>
+          <input type="number" id="age" min="0" max="120" placeholder="例如：45">
+        </div>
+        <div class="field">
+          <label>性別</label>
+          <div class="opts" id="sex">
+            <button class="opt" aria-pressed="false">男</button>
+            <button class="opt" aria-pressed="false">女</button>
+          </div>
+        </div>
+      </div>
+      <div class="actions">
+        <button class="secondary" data-go="0">上一步</button>
+        <button class="primary" id="b1" disabled>下一步</button>
+      </div>
+    </section>
+
+    <section id="s2" hidden>
+      <h2 class="q">請描述您的症狀</h2>
+      <p class="sub">填寫越完整，推薦的醫師越準確。</p>
+
+      <div class="field" id="symField">
+        <label for="sym">主要症狀</label>
+        <input type="text" id="sym" placeholder="例如：肚子痛">
+        <p class="field-error">請填寫主要症狀。</p>
+      </div>
+
+      <div class="row2">
+        <div class="field">
+          <label for="part">部位<span class="hint">不清楚部位可留空</span></label>
+          <input type="text" id="part" placeholder="例如：右下腹">
+        </div>
+        <div class="field" id="durField">
+          <label for="dur">持續多久</label>
+          <input type="text" id="dur" placeholder="例如：2天、一個禮拜">
+          <p class="field-error">請填寫症狀持續多久。</p>
+        </div>
+      </div>
+
+      <div class="row2">
+        <div class="field" id="sevField">
+          <label>嚴重程度</label>
+          <div class="opts" id="sev">
+            <button class="opt" aria-pressed="false">輕微</button>
+            <button class="opt" aria-pressed="false">中等</button>
+            <button class="opt" aria-pressed="false">劇烈</button>
+          </div>
+          <p class="field-error">請選擇嚴重程度。</p>
+        </div>
+        <div class="field" id="onsetField">
+          <label>怎麼開始的</label>
+          <div class="opts" id="onset">
+            <button class="opt" aria-pressed="false">突然開始</button>
+            <button class="opt" aria-pressed="false">慢慢變嚴重</button>
+          </div>
+          <p class="field-error">請選擇症狀怎麼開始。</p>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="accText">伴隨症狀<span class="hint">無其他症狀可留空，多症狀請用頓號分隔</span></label>
+        <input type="text" id="accText" placeholder="例如：發燒、拉肚子">
+        <p class="assist">常被忘記的，點一下加進上面：</p>
+        <div class="opts" id="acc">
+          <button class="opt sm" aria-pressed="false">發燒</button>
+          <button class="opt sm" aria-pressed="false">拉肚子</button>
+          <button class="opt sm" aria-pressed="false">想吐</button>
+          <button class="opt sm" aria-pressed="false">體重減輕</button>
+          <button class="opt sm" aria-pressed="false">冒冷汗</button>
+          <button class="opt sm" aria-pressed="false">咳血</button>
+          <button class="opt sm" aria-pressed="false">血尿</button>
+          <button class="opt sm" aria-pressed="false">視力模糊</button>
+        </div>
+      </div>
+
+      <div class="actions">
+        <button class="secondary" data-go="1">上一步</button>
+        <button class="primary" id="b2">下一步</button>
+      </div>
+    </section>
+
+    <section id="s2q" hidden>
+      <h2 class="q">補充一個問題</h2>
+      <p class="sub">還缺一點資料，請直接回答下面的問題。</p>
+      <div class="chat" id="askChat"></div>
+      <div class="field">
+        <label for="askText">您的回答</label>
+        <textarea id="askText" placeholder="請輸入您的回答…"></textarea>
+      </div>
+      <div class="actions">
+        <button class="secondary" data-go="2">回上一步修改症狀</button>
+        <button class="primary" id="bAsk">送出</button>
+      </div>
+    </section>
+
+    <section id="s3" hidden>
+      <div class="summary" id="symSummary" hidden></div>
+      <h2 class="q">您方便看診的時段</h2>
+      <p class="sub">點選格子即可，可以複選。</p>
+
+      <div class="gridwrap"><table class="slots" id="grid"></table></div>
+      <div class="picked" id="picked">尚未選擇時段</div>
+
+      <div class="field" style="margin-top:22px" id="prefField">
+        <label>看診考量
+          <span class="hint blk">專長優先＝最對症的醫師排前面</span>
+          <span class="hint blk">時間優先＝最快看得到的門診排前面</span>
+        </label>
+        <div class="opts" id="pref">
+          <button class="opt" aria-pressed="true">醫師專長優先</button>
+          <button class="opt" aria-pressed="false">時間優先</button>
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="doc">指定醫師<span class="hint">無指定醫師可留空</span></label>
+        <input type="text" id="doc" placeholder="不限">
+      </div>
+
+      <div class="actions">
+        <button class="secondary" id="b3back">上一步</button>
+        <button class="primary" id="b3">送出，開始推薦</button>
+      </div>
+    </section>
+
+    <section id="s4" hidden>
+      <div id="result"></div>
+      <div class="actions">
+        <button class="secondary" id="b4back">回上一步修改條件</button>
+        <button class="primary" id="b4">重新查詢</button>
+      </div>
+    </section>
+
+    <section id="s9" hidden>
+      <div class="alert" id="alertBox"></div>
+      <div class="actions">
+        <button class="primary" id="b9">重新查詢</button>
+      </div>
+    </section>
+  </div>
+
+</div>
+</div>
+</main>
+<aside id="debug"></aside>
+</div>
+
+<script>
+const $ = id => document.getElementById(id);
+const SEP = "　";
+const DAYS = ["週一", "週二", "週三", "週四", "週五", "週六"];
+const WEEKDAY_NAMES = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"];
+const SESS = [["早上", "08:30–12:00"], ["下午", "13:30–17:00"], ["夜診", "18:00–21:00"]];
+const SEC = { 0: "s0", D: "sDept", 1: "s1", 2: "s2", Q: "s2q", 3: "s3", 4: "s4", 9: "s9" };
+
+const FLOW_CHAT = [["1", "基本資料"], ["2", "症狀描述"], ["3", "就診時段"], ["4", "推薦結果"]];
+const FLOW_BACK = [["1", "選擇科別"], ["2", "就診時段"], ["3", "推薦結果"]];
+const STEP_OF = { D: 1, 1: 1, 2: 2, Q: 2, 3: 3, 4: 4 };
+const CLARIFICATION_QUESTIONS = {
+  symptom: "【主要症狀】您哪裡不舒服？（例如：肚子痛、頭暈、咳嗽）",
+  body_part: "【部位】不舒服的部位在哪裡？（例如：右下腹、後腦杓、胸口；說不出來或沒有特定部位請填「無」）",
+  duration: "【持續多久】這個症狀持續多久了？（例如：2天、一週）",
+  accompanying_symptoms: "【伴隨症狀】還有沒有其他不舒服？（例如：發燒、拉肚子、想吐；沒有請填「無」）"
+};
+
+let mode = "初診";
+let triageCase = null;
+let followupDept = null;
+let history = [];
+let lastDebug = null;
+
+function el(tag, cls, text) {
+  const n = document.createElement(tag);
+  if (cls) n.className = cls;
+  if (text !== undefined) n.textContent = text;
+  return n;
+}
+const val = id => ($(id).value || "").trim();
+const pick = g => {
+  const b = $(g).querySelector('[aria-pressed="true"]');
+  return b ? b.textContent.trim() : "";
+};
+
+function show(k) {
+  Object.values(SEC).forEach(id => { $(id).hidden = true; });
+  $(SEC[k]).hidden = false;
+  $("err").hidden = true;
+
+  const back = mode === "查詢門診";
+  const flow = back ? FLOW_BACK : FLOW_CHAT;
+  let step = STEP_OF[k];
+  if (back && step) step = step === 1 ? 1 : step - 1;
+
+  $("steps").hidden = !step;
+  if (step) {
+    $("steps").innerHTML = "";
+    flow.forEach(([n, label], i) => {
+      const d = el("div");
+      d.appendChild(el("span", "n", n));
+      d.appendChild(document.createTextNode(label));
+      if (i + 1 === step) d.className = "on";
+      else if (i + 1 < step) d.className = "done";
+      $("steps").appendChild(d);
+    });
+  } else {
+    $("steps").innerHTML = "";
+  }
+  window.scrollTo({ top: 0, behavior: "smooth" });
+}
+
+function fail(text) {
+  $("err").textContent = text;
+  $("err").hidden = false;
+}
+
+function busy(on, btn, label) {
+  document.querySelectorAll(".primary, .secondary").forEach(b => { b.disabled = on; });
+  if (btn) btn.textContent = on ? "查詢中…" : label;
+  if (!on) { checkBasic(); $("deptOk").disabled = !$("childSel").value; }
+}
+
+async function post(url, body) {
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  const data = await res.json();
+  if (!res.ok) throw new Error(data.error || "發生錯誤，請再試一次。");
+  return data;
+}
+
+async function sendChat(idx, text) {
+  if (idx < history.length) {
+    const replay = history.slice(0, idx);
+    history = replay;
+    triageCase = null;
+    for (const m of replay) {
+      const r = await post("/api/chat", { message: m, triage_case: triageCase, visit_type: mode });
+      triageCase = r.triage_case;
+    }
+  }
+  history.push(text);
+  const data = await post("/api/chat", { message: text, triage_case: triageCase, visit_type: mode });
+  triageCase = data.triage_case;
+  lastDebug = data.debug;
+  if (lastDebug) $("debugToggle").hidden = false;
+  if ($("debug").classList.contains("open")) renderDebug();
+  return data;
+}
+
+document.querySelectorAll(".mode").forEach(b => {
+  b.onclick = () => {
+    mode = b.dataset.mode;
+    $("badge").textContent = b.querySelector(".t").textContent;
+    $("badge").hidden = false;
+    $("restartBtn").hidden = false;
+    $("prefField").hidden = mode === "查詢門診";
+    if (mode === "查詢門診") { loadDepartments(); show("D"); }
+    else show(1);
+  };
+});
+
+document.querySelectorAll("[data-go]").forEach(b => {
+  b.onclick = () => show(b.dataset.go === "0" ? 0 : Number(b.dataset.go));
+});
+
+function one(group, btn) {
+  $(group).querySelectorAll(".opt").forEach(b => b.setAttribute("aria-pressed", "false"));
+  btn.setAttribute("aria-pressed", "true");
+}
+["sex", "sev", "onset", "pref"].forEach(g => {
+  $(g).querySelectorAll(".opt").forEach(b => {
+    b.onclick = () => {
+      one(g, b);
+      if (g === "sex") checkBasic();
+      if (g === "sev") setFieldInvalid("sevField", false);
+      if (g === "onset") setFieldInvalid("onsetField", false);
+    };
+  });
+});
+
+$("acc").querySelectorAll(".opt").forEach(b => {
+  b.onclick = () => {
+    const inp = $("accText");
+    const word = b.textContent.trim();
+    const parts = inp.value.split(/[、,，;；\s]+/).filter(Boolean);
+    const i = parts.indexOf(word);
+    if (i >= 0) { parts.splice(i, 1); b.setAttribute("aria-pressed", "false"); }
+    else { parts.push(word); b.setAttribute("aria-pressed", "true"); }
+    inp.value = parts.join("、");
+  };
+});
+
+function checkBasic() {
+  const ok = $("age").value !== "" && !!$("sex").querySelector('[aria-pressed="true"]');
+  $("b1").disabled = !ok;
+}
+$("age").oninput = checkBasic;
+
+function setFieldInvalid(fieldId, invalid) {
+  $(fieldId).classList.toggle("invalid", invalid);
+}
+
+function validateSymptomForm() {
+  const missing = {
+    symField: !val("sym"),
+    durField: !val("dur"),
+    sevField: !pick("sev"),
+    onsetField: !pick("onset"),
+  };
+  Object.entries(missing).forEach(([fieldId, invalid]) => setFieldInvalid(fieldId, invalid));
+  return !Object.values(missing).some(Boolean);
+}
+
+$("sym").oninput = () => setFieldInvalid("symField", !val("sym"));
+$("dur").oninput = () => setFieldInvalid("durField", !val("dur"));
+
+(function buildGrid() {
+  let h = "<tr><th></th>" + DAYS.map(d => "<th>" + d + "</th>").join("") + "</tr>";
+  SESS.forEach(([s, t]) => {
+    h += '<tr><th class="rowh">' + s + "<small>" + t + "</small></th>";
+    DAYS.forEach(d => {
+      h += '<td><button class="slot" aria-pressed="false" aria-label="' + d + s +
+           '" data-d="' + d + '" data-s="' + s + '"></button></td>';
+    });
+    h += "</tr>";
+  });
+  $("grid").innerHTML = h;
+  $("grid").querySelectorAll(".slot").forEach(b => {
+    b.onclick = () => {
+      b.setAttribute("aria-pressed", b.getAttribute("aria-pressed") === "true" ? "false" : "true");
+      paintPicked();
+    };
+  });
+})();
+
+function chosenSlots() {
+  const di = d => DAYS.indexOf(d);
+  const si = x => SESS.findIndex(e => e[0] === x);
+  return [...$("grid").querySelectorAll('.slot[aria-pressed="true"]')]
+    .sort((a, b) => di(a.dataset.d) - di(b.dataset.d) || si(a.dataset.s) - si(b.dataset.s))
+    .map(b => b.dataset.d + b.dataset.s);
+}
+function paintPicked() {
+  const on = chosenSlots();
+  $("picked").innerHTML = on.length
+    ? "已選 <b>" + on.length + "</b> 個時段：" + on.join("、")
+    : "尚未選擇時段";
+}
+
+async function loadDepartments() {
+  try {
+    const data = await (await fetch("/api/departments")).json();
+    const grouped = data.grouped || {};
+    const parents = Object.keys(grouped).sort();
+    if (!parents.length) {
+      fail("科別清單是空的——資料庫目前連不上，請先確認 .env 的 DB_PASSWORD。");
+      return;
+    }
+    $("parentSel").innerHTML = '<option value="">請選擇…</option>';
+    parents.forEach(p => {
+      const o = el("option", null, p + "（" + grouped[p].length + " 科）");
+      o.value = p;
+      $("parentSel").appendChild(o);
+    });
+    $("parentSel").onchange = () => {
+      const kids = (grouped[$("parentSel").value] || []).slice().sort();
+      $("childSel").innerHTML = '<option value="">請選擇…</option>';
+      kids.forEach(c => {
+        const o = el("option", null, c);
+        o.value = c;
+        $("childSel").appendChild(o);
+      });
+      $("childSel").disabled = !kids.length;
+      $("deptOk").disabled = true;
+    };
+    $("childSel").onchange = () => { $("deptOk").disabled = !$("childSel").value; };
+  } catch (e) {
+    fail("無法取得科別清單，請確認伺服器與資料庫。");
+  }
+}
+
+$("deptOk").onclick = () => {
+  followupDept = $("childSel").value;
+  if (!followupDept) return;
+  show(3);
+};
+
+$("b1").onclick = async () => {
+  const text = "1." + val("age") + SEP + "2." + pick("sex");
+  busy(true, $("b1"), "下一步");
+  try {
+    await sendChat(0, text);
+    show(2);
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    busy(false, $("b1"), "下一步");
+  }
+};
+
+$("b2").onclick = async () => {
+  if (!validateSymptomForm()) {
+    fail("請完成紅框標示的必填欄位。");
+    return;
+  }
+  const text = [
+    "1." + val("sym"),
+    "2." + (val("part") || "無"),
+    "3." + (val("dur") || "無"),
+    "4." + (pick("sev") || "無"),
+    "5." + (pick("onset") || "無"),
+    "6." + (val("accText") || "無"),
+  ].join(SEP);
+  busy(true, $("b2"), "下一步");
+  try {
+    $("askChat").innerHTML = "";
+    afterSymptoms(await sendChat(1, text));
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    busy(false, $("b2"), "下一步");
+  }
+};
+
+$("bAsk").onclick = async () => {
+  const text = val("askText");
+  if (!text) return;
+  busy(true, $("bAsk"), "送出");
+  try {
+    $("askChat").appendChild(el("div", "bub me", text));
+    $("askText").value = "";
+    afterSymptoms(await sendChat(history.length, text));
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    busy(false, $("bAsk"), "送出");
+  }
+};
+
+function afterSymptoms(data) {
+  if (triageCase.triage.urgency_level === "high") {
+    $("alertBox").innerHTML = "";
+    $("alertBox").appendChild(el("b", null, "請立即前往急診"));
+    $("alertBox").appendChild(document.createTextNode(data.reply || ""));
+    show(9);
+    return;
+  }
+
+  if (triageCase.conversation_state.stage === "collecting_availability") {
+    const summary = (data.reply || "").split("\n\n")[0].trim();
+    if (summary) {
+      $("symSummary").innerHTML = "";
+      $("symSummary").appendChild(el("b", null, "症狀摘要　"));
+      $("symSummary").appendChild(document.createTextNode(summary));
+      $("symSummary").hidden = false;
+    }
+    show(3);
+    return;
+  }
+
+  const field = triageCase.triage.next_question;
+  const ask = CLARIFICATION_QUESTIONS[field] || "請回上一步確認症狀資料。";
+  $("askChat").appendChild(el("div", "bub bot", ask));
+  show("Q");
+  $("askText").focus();
+}
+
+$("b3back").onclick = () => show(mode === "查詢門診" ? "D" : (history.length > 2 ? "Q" : 2));
+
+$("b3").onclick = async () => {
+  const slots = chosenSlots();
+  const doc = val("doc") || "不限";
+  busy(true, $("b3"), "送出，開始推薦");
+  try {
+    if (mode === "查詢門診") {
+      const text = "1." + (slots.join("、") || "不限") + SEP + "2." + doc;
+      const data = await post("/api/followup", { dept: followupDept, preference_answer: text });
+      lastDebug = data.debug;
+      if (lastDebug) $("debugToggle").hidden = false;
+      renderRecommendation(data.recommendation);
+    } else {
+      const text = [
+        "1." + (slots.join("、") || "不限"),
+        "2." + pick("pref"),
+        "3." + doc,
+      ].join(SEP);
+      const data = await sendChat(history.length, text);
+      renderRecommendation(data.recommendation);
+    }
+    if ($("debug").classList.contains("open")) renderDebug();
+    show(4);
+  } catch (e) {
+    fail(e.message);
+  } finally {
+    busy(false, $("b3"), "送出，開始推薦");
+  }
+};
+
+$("b4back").onclick = () => show(3);
+$("b4").onclick = restart;
+$("b9").onclick = restart;
+$("restartBtn").onclick = restart;
+
+function restart() {
+  mode = "初診";
+  triageCase = null;
+  followupDept = null;
+  history = [];
+  lastDebug = null;
+  document.querySelectorAll("input, textarea").forEach(i => { i.value = ""; });
+  document.querySelectorAll("[aria-pressed]").forEach(b => b.setAttribute("aria-pressed", "false"));
+  document.querySelectorAll(".field.invalid").forEach(f => f.classList.remove("invalid"));
+  $("pref").querySelector(".opt").setAttribute("aria-pressed", "true");
+  $("childSel").innerHTML = '<option value="">請先選左邊</option>';
+  $("childSel").disabled = true;
+  $("deptOk").disabled = true;
+  $("b1").disabled = true;
+  $("symSummary").hidden = true;
+  $("askChat").innerHTML = "";
+  $("prefField").hidden = false;
+  $("badge").hidden = true;
+  $("restartBtn").hidden = true;
+  $("debugToggle").hidden = true;
+  $("debug").classList.remove("open");
+  paintPicked();
+  show(0);
+}
+
+function weekdayOf(dateStr) {
+  const d = new Date(dateStr + "T00:00:00");
+  return isNaN(d) ? "" : WEEKDAY_NAMES[(d.getDay() + 6) % 7];
+}
+function sessionRange(name) {
+  const hit = SESS.find(e => e[0] === name);
+  return hit ? hit[1] : "";
+}
+
+function renderRecommendation(rec) {
+  const box = $("result");
+  box.innerHTML = "";
+  if (!rec) { box.appendChild(el("p", null, "沒有取得推薦結果。")); return; }
+
+  if (rec.department) {
+    const d = rec.department;
+    const card = el("div", "dept");
+    card.appendChild(el("div", "lbl", mode === "查詢門診" ? "查詢科別" : "建議科別"));
+    const name = el("div", "name", d.childDept);
+    name.appendChild(el("small", null, d.parentDept));
+    card.appendChild(name);
+
+    if (d.confidence > 0) {
+      const bar = el("div", "confbar");
+      const track = el("div", "track");
+      const fill = el("div", "fill");
+      fill.style.width = Math.round(d.confidence * 100) + "%";
+      track.appendChild(fill);
+      bar.appendChild(track);
+      const txt = el("div", "txt");
+      txt.appendChild(document.createTextNode("信心分 "));
+      txt.appendChild(el("b", null, String(Math.round(d.confidence * 100))));
+      bar.appendChild(txt);
+      card.appendChild(bar);
+    }
+    if (d.reason && d.reason.length) {
+      const ul = el("ul");
+      d.reason.forEach(r => ul.appendChild(el("li", null, r)));
+      card.appendChild(ul);
+    }
+    box.appendChild(card);
+  }
+
+  const items = rec.recommendations || [];
+  if (!items.length) {
+    const tried = (rec.fallback_departments || []).map(f => f.childDept).join("、");
+    box.appendChild(el("p", null,
+      "很抱歉，近期查無可掛號的門診" + (tried ? "（已嘗試：" + tried + "）" : "") + "。"));
+    return;
+  }
+
+  const showScore = mode !== "查詢門診";
+  const isTimePriority = showScore && pick("pref") === "時間優先";
+  const head = el("div", "listhead");
+  head.appendChild(el("h3", null, "為您找到 " + items.length + " 個可掛號的門診"));
+  head.appendChild(el("span", null,
+    !showScore ? "依日期排序"
+      : pick("pref") === "時間優先" ? "依時間排序" : "依醫師專長排序"));
+  box.appendChild(head);
+
+  const cards = el("div", "cards");
+  items.forEach((it, i) => {
+    const card = el("div", i === 0 && showScore ? "dcard top" : "dcard");
+    card.appendChild(el("div", "rank", String(i + 1)));
+
+    const info = el("div", "dinfo");
+    const name = el("div", "dname", it.doctor);
+    name.appendChild(el("span", "sub2", it.childDept));
+    if (i === 0 && showScore && (isTimePriority || it.score >= 0.7)) {
+      name.appendChild(el("span", "pill", isTimePriority ? "最早門診" : "最對症"));
+    }
+    info.appendChild(name);
+
+    const when = el("div", "dwhen");
+    when.appendChild(document.createTextNode(it.date + "（" + weekdayOf(it.date) + "）"));
+    when.appendChild(el("span", "sep", "·"));
+    when.appendChild(document.createTextNode(
+      it.session + " " + (it.session_time || sessionRange(it.session))));
+    when.appendChild(el("span", "sep", "·"));
+    when.appendChild(el("span", "rm", it.room + " 診間"));
+    info.appendChild(when);
+
+    const tags = el("div", "tags");
+    (it.reasons || []).forEach(r =>
+      tags.appendChild(el("span", r.indexOf("專長相符") >= 0 ? "tag hit" : "tag", r)));
+    info.appendChild(tags);
+    card.appendChild(info);
+
+    if (showScore) {
+      const sc = el("div", it.score >= 0.7 ? "sc" : "sc dim");
+      sc.appendChild(el("div", "n2", String(Math.round(it.score * 100))));
+      sc.appendChild(el("div", "t", "專長分"));
+      const track = el("div", "track");
+      const fill = el("div", "fill");
+      fill.style.width = Math.round(it.score * 100) + "%";
+      track.appendChild(fill);
+      sc.appendChild(track);
+      card.appendChild(sc);
+    }
+    cards.appendChild(card);
+  });
+  box.appendChild(cards);
+
+  box.appendChild(el("p", "footnote",
+    (showScore ? "專長分70以上才會標示「專長相符」。" : "") +
+    "掛號請至臺北榮總行動就醫服務APP，本頁僅提供就診科別與醫師門診時段的建議。"));
+}
+
+function renderDebug() {
+  const panel = $("debug");
+  panel.innerHTML = "";
+  if (!lastDebug) { panel.appendChild(el("div", "empty", "尚未有資料")); return; }
+
+  panel.appendChild(el("h2", null, "AI 呼叫（這一輪）"));
+  const kv = el("div");
+  (lastDebug.ai_calls || []).forEach(c => {
+    const row = el("div", "kv");
+    row.appendChild(el("span", null, c.label));
+    row.appendChild(el("span", null, c.elapsed + " 秒"));
+    kv.appendChild(row);
+  });
+  const total = el("div", "kv");
+  total.appendChild(el("span", null, "合計 " + lastDebug.ai_call_count + " 次"));
+  total.appendChild(el("span", null, lastDebug.total_ai_seconds + " 秒"));
+  kv.appendChild(total);
+  panel.appendChild(kv);
+
+  const notes = lastDebug.notes || {};
+  Object.keys(notes).forEach(k => {
+    panel.appendChild(el("h2", null, k));
+    panel.appendChild(el("pre", null, JSON.stringify(notes[k], null, 2)));
+  });
+
+  if (triageCase) {
+    panel.appendChild(el("h2", null, "TRIAGE_CASE（完整病歷）"));
+    panel.appendChild(el("pre", null, JSON.stringify(triageCase, null, 2)));
+  }
+}
+
+$("debugToggle").onclick = () => {
+  $("debug").classList.toggle("open");
+  if ($("debug").classList.contains("open")) renderDebug();
+};
+
+$("askText").addEventListener("keydown", e => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); $("bAsk").click(); }
+});
+
+paintPicked();
+show(0);
+</script>
+</body>
+</html>

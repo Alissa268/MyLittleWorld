@@ -1,0 +1,9 @@
+pydantic==2.12.5
+pyodbc==5.3.0
+python-dotenv==1.2.2
+
+fastapi==0.121.2
+uvicorn[standard]==0.41.0
+
+llama-index-core==0.14.20
+llama-index-llms-cerebras==0.4.1
