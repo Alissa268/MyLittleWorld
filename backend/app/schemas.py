@@ -152,6 +152,13 @@ class ConversationState(BaseModel):
     field_statuses: Dict[str, str] = Field(default_factory=dict)
     field_confidence: Dict[str, float] = Field(default_factory=dict)
     clarification_reasons: Dict[str, str] = Field(default_factory=dict)
+    turn_count: int = 0
+    clarification_status: str = "collecting"
+    uncertainty_reasons: List[str] = Field(default_factory=list)
+    next_information_needed: List[str] = Field(default_factory=list)
+    asked_clarification_intents: List[str] = Field(default_factory=list)
+    pending_clarification_intent: Optional[str] = None
+    clarification_evidence: Dict[str, str] = Field(default_factory=dict)
 
 
 class UrgencyResult(BaseModel):

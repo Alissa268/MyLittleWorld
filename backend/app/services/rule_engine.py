@@ -263,7 +263,7 @@ def _apply_free_text_safety(case: TriageCase, text: str) -> None:
     _refresh_collected_fields(case)
 
 
-def evaluate_urgency(case: TriageCase, *, mark_next_question: bool = True) -> UrgencyResult:
+def evaluate_urgency(case: TriageCase, *, mark_next_question: bool | None = True) -> UrgencyResult:
     patient = case.patient_input
     _refresh_collected_fields(case)
     combined = " ".join(
@@ -359,19 +359,22 @@ def evaluate_urgency(case: TriageCase, *, mark_next_question: bool = True) -> Ur
 
     score = max(0, min(score, 100))
 
-    if mark_next_question:
+    if mark_next_question is None:
+        next_question = None
+    elif mark_next_question:
         next_question = next_question_for(case)
     else:
         missing = missing_checklist_fields(case)
         next_question = question_text_for_field(case, missing[0]) if missing else None
-    need_more_info = next_question is not None
+    need_more_info = next_question is not None or mark_next_question is None
     level = urgency_level(score)
     safety_uncertain = patient.red_flags_status == "uncertain"
     warning_required = level == "high" or safety_uncertain
-    if need_more_info:
-        reasons.append(f"資訊尚未完整，下一題：{next_question}")
-    else:
-        reasons.append("問診必要資訊已完整，可進入使用者確認階段。")
+    if mark_next_question is not None:
+        if need_more_info:
+            reasons.append(f"資訊尚未完整，下一題：{next_question}")
+        else:
+            reasons.append("問診必要資訊已完整，可進入使用者確認階段。")
     if safety_uncertain:
         reasons.append("急迫症狀篩檢已詢問，但使用者仍無法確認；不得視為已確認陰性。")
 

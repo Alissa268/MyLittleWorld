@@ -249,11 +249,11 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["reply"], response.json()["next_question"])
-        self.assertEqual(models.call_count, 1)
+        self.assertEqual(models.call_count, 2)
         self.assertEqual(len(summaries), 1)
         self.assertTrue(summaries[0]["semantic_ai_called"])
         self.assertFalse(summaries[0]["ai_reply_ai_called"])
-        self.assertEqual(summaries[0]["ai_call_count"], 1)
+        self.assertEqual(summaries[0]["ai_call_count"], 2)
         self.assertEqual(summaries[0]["gemini_call_count"], 0)
 
     async def test_semantic_failure_keeps_deterministic_chat_flow(self):

@@ -349,7 +349,7 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
     current_input = case.patient_input.model_dump()
 
     return f"""你是醫療問診的語意抽取器。你只能做 extraction、normalization、confidence estimation。
-不要決定 next_question、stage、waiting_confirmation 或流程轉移，這些一律由 backend deterministic state machine 控制。
+不要在這個 extraction 回應中決定 next_question、stage、waiting_confirmation 或流程轉移；追問由獨立 clarification call 提議，狀態由 Backend 控制。
 
 目前對話紀錄：
 {history}

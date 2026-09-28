@@ -3,7 +3,7 @@ import logging
 from fastapi import APIRouter, HTTPException
 
 from app.config import get_settings
-from app.schemas import ChatRequest, ConversationStage, QuestionItem, TriageCase, TriageResult, VisitType
+from app.schemas import ChatRequest, ConversationStage, Message, QuestionItem, TriageCase, TriageResult, VisitType
 from app.services.ai_reply_generator import build_department_confirmation_reply, generate_triage_reply
 from app.services.appointment_service import DepartmentResolutionError, detect_department_result
 from app.services.batch_extraction_service import extract_batch_answers
@@ -15,6 +15,11 @@ from app.services.chat_perf import (
     finish_chat_perf,
     record_chat_response_trace,
     record_chat_route_trace,
+)
+from app.services.conversation_service import (
+    UNRESOLVED_REPLY,
+    advance_conversation,
+    request_clarification,
 )
 from app.services.department_preference_service import capture_department_preference
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
@@ -129,6 +134,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         before_patient = case.patient_input.model_dump()
         before_availability = case.availability.model_dump()
         semantic_first = runtime_ai_available(settings)
+        conversational_mode = semantic_first and not batch_mode
         user_text_parts: list[str] = []
         messages = req.messages or []
         should_auto_revision = _should_treat_user_input_as_revision(case, req)
@@ -181,7 +187,7 @@ async def chat(req: ChatRequest) -> TriageResult:
 
         _sync_confirmation_flags(case)
     if has_user_input and not req.answers:
-        if semantic_first:
+        if semantic_first and case.conversation_state.clarification_status != "unresolved":
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
                 ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
             case.conversation_state.revision_mode = False
@@ -191,9 +197,34 @@ async def chat(req: ChatRequest) -> TriageResult:
                 department_preference_name = preference.name
 
     with perf.measure("rule_engine"):
-        case.triage = evaluate_urgency(case, mark_next_question=not batch_mode)
-        ai_attempted_override = merge_ai_next_question(case, ai_suggestion)
-        case.conversation_state.is_complete = not case.triage.need_more_info
+        case.triage = evaluate_urgency(
+            case, mark_next_question=None if conversational_mode else not batch_mode,
+        )
+        ai_attempted_override = (
+            False if conversational_mode else merge_ai_next_question(case, ai_suggestion)
+        )
+        if conversational_mode:
+            if case.patient_input.red_flags:
+                case.conversation_state.turn_count += len(user_text_parts)
+                case.conversation_state.clarification_status = "urgent"
+                case.conversation_state.is_complete = True
+            else:
+                with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
+                    suggestion = (
+                        await request_clarification(case, user_text_parts)
+                        if has_user_input and case.conversation_state.clarification_status != "unresolved"
+                        else None
+                    )
+                advance_conversation(
+                    case,
+                    suggestion,
+                    user_sources=user_text_parts,
+                    current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
+                )
+                if case.triage.next_question:
+                    case.history_records.append(Message(role="assistant", content=case.triage.next_question))
+        else:
+            case.conversation_state.is_complete = not case.triage.need_more_info
         question_batch = []
         if batch_mode and case.triage.need_more_info:
             question_batch = build_question_batch(
@@ -313,6 +344,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         )
     if case.conversation_state.field_statuses.get("department") == "unresolved_final":
         reply = DEPARTMENT_UNRESOLVED_REPLY
+    elif conversational_mode and case.conversation_state.clarification_status == "unresolved":
+        reply = UNRESOLVED_REPLY
     elif reply is None and case.conversation_state.awaiting_confirmation and case.department_result:
         reply = build_department_confirmation_reply(case)
     elif reply is None and case.conversation_state.confirmed:
@@ -458,6 +491,13 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.confirmed = False
     case.conversation_state.revision_mode = True
     case.conversation_state.last_question_key = "revision"
+    case.conversation_state.turn_count = 0
+    case.conversation_state.clarification_status = "collecting"
+    case.conversation_state.uncertainty_reasons = []
+    case.conversation_state.next_information_needed = []
+    case.conversation_state.asked_clarification_intents = []
+    case.conversation_state.pending_clarification_intent = None
+    case.conversation_state.clarification_evidence = {}
     case.conversation_state.field_statuses.pop("department", None)
     case.conversation_state.clarification_reasons.pop("department", None)
     case.conversation_state.question_attempts.pop(DEPARTMENT_CLARIFICATION_KEY, None)

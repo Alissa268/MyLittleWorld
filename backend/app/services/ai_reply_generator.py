@@ -137,8 +137,8 @@ async def generate_triage_reply(
     """Generate presentation text without changing deterministic triage state."""
     target = _reply_target(case, next_question)
 
-    # Checklist wording is selected from reviewed local variants. It must never
-    # add latency, cost, or generative control to the state-machine question.
+    # The question is already chosen by the checklist or conversation service.
+    # Presentation must not generate a second, competing question.
     if next_question is not None:
         record_ai_reply_outcome(
             fallback=True,
