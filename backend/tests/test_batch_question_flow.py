@@ -69,7 +69,7 @@ def _department() -> DepartmentResult:
 
 class BatchQuestionFlowTest(unittest.TestCase):
     def setUp(self):
-        self.settings = _settings()
+        self.settings = _settings(cerebras_key="")
         self.settings_patch = patch("app.routes.chat.get_settings", return_value=self.settings)
         self.batch_settings_patch = patch.object(
             batch_extraction_service,
@@ -809,7 +809,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
     ]
 
     def setUp(self):
-        self.settings = _settings()
+        self.settings = _settings(cerebras_key="")
         self.patches = [
             patch.object(chat_route, "get_settings", return_value=self.settings),
             patch.object(batch_extraction_service, "get_settings", return_value=self.settings),
@@ -1083,7 +1083,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
 
 class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
-        self.settings = _settings()
+        self.settings = _settings(cerebras_key="")
         self.settings_patches = [
             patch.object(chat_route, "get_settings", return_value=self.settings),
             patch.object(batch_extraction_service, "get_settings", return_value=self.settings),

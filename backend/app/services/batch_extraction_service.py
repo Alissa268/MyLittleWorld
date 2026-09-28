@@ -89,6 +89,8 @@ class BatchExtractionOutcome:
 async def extract_batch_answers(
     case: TriageCase,
     answers: list[BatchAnswer],
+    *,
+    semantic_first: bool = False,
 ) -> BatchExtractionOutcome:
     """Consume a keyed batch, calling at most one AI provider for ambiguity."""
     outcome = BatchExtractionOutcome()
@@ -159,6 +161,17 @@ async def extract_batch_answers(
         preference = capture_department_preference(case, text)
         if preference and preference.resolved and "requested_department" not in outcome.accepted_fields:
             outcome.accepted_fields.append("requested_department")
+        if (
+            semantic_first
+            and runtime_ai_available(settings)
+            and key in _ALLOWED_FIELDS
+            and key != "red_flags"
+            and not _is_structured_choice(key, text)
+        ):
+            # The key names a question; the answer is still free text.
+            apply_user_message(case, text, semantic_first=True, record_history=False)
+            semantic_refinement_sources[key] = text
+            continue
         if key == "duration" and _looks_ambiguous(text):
             fallback_case = TriageCase(case_id=case.case_id)
             fallback = _deterministic_extraction_for_answer(
@@ -244,7 +257,7 @@ async def extract_batch_answers(
     semantic_sources = {
         field_name: source_text
         for field_name, source_text in semantic_refinement_sources.items()
-        if field_name in current_missing and field_name != "red_flags"
+        if (semantic_first or field_name in current_missing) and field_name != "red_flags"
     }
     semantic_sources.update({
         field_name: answered_text[field_name]
@@ -337,6 +350,15 @@ async def extract_batch_answers(
     ]
     _log_extraction_outcome(answered_text, outcome, provider, settings)
     return outcome
+
+
+def _is_structured_choice(key: str, text: str) -> bool:
+    choices = {
+        "preferred_days": {"週一", "週二", "週三", "週四", "週五", "週六", "週日"},
+        "preferred_sessions": {"上午", "下午", "夜間"},
+        "severity": {"mild", "moderate", "severe"},
+    }
+    return text in choices.get(key, set())
 
 
 def _log_extraction_outcome(

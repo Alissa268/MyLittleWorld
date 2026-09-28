@@ -23,6 +23,7 @@ from app.services.semantic_normalizer import (
     NormalizationResult,
     is_ambiguous_red_flag_answer,
     normalize_message,
+    normalize_urgency,
 )
 
 logger = logging.getLogger(__name__)
@@ -90,7 +91,9 @@ RED_FLAG_UNCERTAINTY_WARNING = (
 )
 
 
-def apply_user_message(case: TriageCase, message: str) -> TriageCase:
+def apply_user_message(
+    case: TriageCase, message: str, *, semantic_first: bool = False, record_history: bool = True,
+) -> TriageCase:
     text = message.strip()
     if not text:
         return case
@@ -98,7 +101,19 @@ def apply_user_message(case: TriageCase, message: str) -> TriageCase:
     revision_mode = case.conversation_state.revision_mode
     before_patient = case.patient_input.model_dump()
     before_availability = case.availability.model_dump()
-    case.history_records.append(Message(role="user", content=text))
+    if record_history:
+        case.history_records.append(Message(role="user", content=text))
+    if semantic_first:
+        if revision_mode and _looks_like_symptom_revision(text):
+            _reset_symptom_dependent_fields(case)
+            case.patient_input.symptom = ""
+            case.patient_input.body_part = None
+            case.department_result = None
+            for field in ("symptom", "body_part"):
+                if field in case.conversation_state.consumed_fields:
+                    case.conversation_state.consumed_fields.remove(field)
+        _apply_free_text_safety(case, text)
+        return case
     patient = case.patient_input
     previous_red_flag_status = patient.red_flags_status
     symptom_value = text if has_symptom_semantics(text) else None
@@ -217,6 +232,37 @@ def apply_user_message(case: TriageCase, message: str) -> TriageCase:
     return case
 
 
+def _apply_free_text_safety(case: TriageCase, text: str) -> None:
+    """Keep the existing red-flag screen independent of semantic extraction."""
+    patient = case.patient_input
+    previous_status = patient.red_flags_status
+    urgency = normalize_urgency(text, case.conversation_state.last_question_key)
+    _apply_semantic_result(case, NormalizationResult(urgency=urgency))
+    if (
+        case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
+        and previous_status == "ambiguous"
+        and is_ambiguous_red_flag_answer(urgency)
+    ):
+        _complete_uncertain_red_flag_screen(case, text)
+
+    if urgency and urgency.semantic_status == "unavailable":
+        positive_red_flags = []
+    elif urgency and urgency.matched_red_flags:
+        positive_red_flags = urgency.matched_red_flags
+    else:
+        positive_red_flags = detect_red_flags(text)
+    classification = urgency.answer_classification if urgency else None
+    if _is_red_flag_screen_answer(case, text, positive_red_flags, classification):
+        patient.red_flags_checked = True
+        _consume_field(case, RED_FLAG_QUESTION_KEY, "available" if positive_red_flags else "unavailable", 0.9)
+        if not positive_red_flags and _is_negative_red_flag_answer(case, text, classification):
+            patient.red_flags = []
+    for red_flag in positive_red_flags:
+        if red_flag not in patient.red_flags:
+            patient.red_flags.append(red_flag)
+    _refresh_collected_fields(case)
+
+
 def evaluate_urgency(case: TriageCase, *, mark_next_question: bool = True) -> UrgencyResult:
     patient = case.patient_input
     _refresh_collected_fields(case)
@@ -236,6 +282,10 @@ def evaluate_urgency(case: TriageCase, *, mark_next_question: bool = True) -> Ur
         detected_from_combined = []
     elif patient.urgency_normalized.matched_red_flags:
         detected_from_combined = patient.urgency_normalized.matched_red_flags
+    elif any(item.extractor.startswith("ai") for item in case.semantic_extractions):
+        # AI-normalized clinical text cannot create a red flag; the raw-text
+        # safety screen has already run independently for this turn.
+        detected_from_combined = []
     else:
         detected_from_combined = detect_red_flags(combined)
     if patient.red_flags_checked and not patient.red_flags:
@@ -381,11 +431,18 @@ def missing_checklist_fields(
 ) -> list[str]:
     """Return deterministic checklist gaps without letting AI control flow."""
     _sync_consumed_fields(case)
+    state = case.conversation_state
     missing: list[str] = []
     for field in CHECKLIST_FIELD_ORDER:
         if _field_satisfied(case, field):
             continue
         if field != RED_FLAG_QUESTION_KEY and _question_attempts(case, field) >= MAX_QUESTION_ATTEMPTS:
+            if (
+                state.clarification_reasons.get(field) == "AI extraction confidence below threshold"
+                and state.field_confidence.get(field, 1.0) < ACCEPT_THRESHOLD
+            ):
+                missing.append(field)
+                continue
             if apply_attempt_fallback:
                 _fallback_field(case, field)
                 continue
@@ -507,7 +564,9 @@ def apply_semantic_extractions(
     accepted_extractions: list[SemanticExtraction] = []
     for extraction in extractions:
         is_ai_extraction = extraction.extractor.startswith("ai")
-        if extraction.field not in {*CHECKLIST_FIELD_ORDER, PREFERRED_DATES_KEY}:
+        if extraction.field not in {
+            *CHECKLIST_FIELD_ORDER, PREFERRED_DATES_KEY, "onset", "accompanying_symptoms",
+        }:
             if is_ai_extraction:
                 _log_ai_apply_decision(case, extraction, False, "invalid_field")
             continue
@@ -519,6 +578,7 @@ def apply_semantic_extractions(
             is_ai_extraction
             and not case.conversation_state.revision_mode
             and extraction.semantic_status in {"available", "partial"}
+            and extraction.field != "accompanying_symptoms"
             and _field_has_value(case, extraction.field)
         ):
             _log_ai_apply_decision(case, extraction, False, "duplicate_existing_value")
@@ -555,7 +615,13 @@ def apply_semantic_extractions(
                 if extraction.semantic_status not in {"unknown", "ambiguous"}
                 else "status_requires_clarification"
             )
-            _record_semantic_extraction(case, extraction)
+            if not _field_has_value(case, extraction.field):
+                _record_semantic_extraction(case, extraction)
+                case.conversation_state.clarification_reasons[extraction.field] = (
+                    "AI extraction confidence below threshold"
+                    if reason == "confidence_too_low"
+                    else "AI extraction requires clarification"
+                )
             _log_ai_apply_decision(case, extraction, False, reason)
             continue
         _record_semantic_extraction(case, extraction)
@@ -570,7 +636,7 @@ def apply_semantic_extractions(
 
 
 def _field_has_value(case: TriageCase, field_name: str) -> bool:
-    if field_name in {"symptom", "body_part", "duration", "severity"}:
+    if field_name in {"symptom", "body_part", "duration", "severity", "onset"}:
         return bool(getattr(case.patient_input, field_name))
     if field_name == "preferred_dates":
         return bool(case.availability.preferred_dates)
@@ -639,6 +705,12 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
         ):
             setattr(case.patient_input, extraction.field, text)
             _consume_field(case, extraction.field, extraction.semantic_status, extraction.confidence)
+    elif extraction.field == "onset":
+        text = str(extraction.normalized_value or "").strip()
+        if text and (case.conversation_state.revision_mode or not case.patient_input.onset):
+            case.patient_input.onset = text
+    elif extraction.field == "accompanying_symptoms":
+        _merge_list(case.patient_input.accompanying_symptoms, _as_string_list(extraction.normalized_value))
     elif extraction.field == "preferred_dates":
         values = [
             value

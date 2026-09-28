@@ -332,6 +332,12 @@ def normalized_value_valid(field: str, value: Any, status: str) -> bool:
         return isinstance(value, list)
     if field == "symptom":
         return isinstance(value, str) and has_symptom_semantics(value)
+    if field == "onset":
+        return isinstance(value, str) and 0 < len(value.strip()) <= 30
+    if field == "accompanying_symptoms":
+        return isinstance(value, list) and 0 < len(value) <= 10 and all(
+            isinstance(item, str) and 0 < len(item.strip()) <= 30 for item in value
+        )
     if field == "body_part":
         return isinstance(value, str) and has_body_part_semantics(value)
     if field == "duration":
@@ -359,6 +365,13 @@ def ai_normalized_value_rejection_reason(
 ) -> str | None:
     """Validate AI output shape without requiring free-text values to be in rule dictionaries."""
     if status in {"unknown", "ambiguous"}:
+        return None
+    if field in {"onset", "accompanying_symptoms"}:
+        if not normalized_value_valid(field, value, status):
+            return "invalid_normalized_value"
+        values = [value] if field == "onset" else value
+        if any(item.strip() not in source_text for item in values):
+            return "normalized_value_not_supported_by_source"
         return None
     if field not in {"symptom", "body_part"}:
         return None if normalized_value_valid(field, value, status) else "invalid_canonical_value"

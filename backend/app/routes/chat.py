@@ -19,10 +19,7 @@ from app.services.chat_perf import (
 from app.services.department_preference_service import capture_department_preference
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
-from app.services.semantic_refinement_gate import (
-    capture_deterministic_parse_snapshot,
-    decide_semantic_refinement,
-)
+from app.services.ai_service import runtime_ai_available
 
 router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
@@ -131,7 +128,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         has_user_input = False
         before_patient = case.patient_input.model_dump()
         before_availability = case.availability.model_dump()
-        parse_snapshot = capture_deterministic_parse_snapshot(case)
+        semantic_first = runtime_ai_available(settings)
         user_text_parts: list[str] = []
         messages = req.messages or []
         should_auto_revision = _should_treat_user_input_as_revision(case, req)
@@ -144,7 +141,9 @@ async def chat(req: ChatRequest) -> TriageResult:
                 len(case.history_records),
             )
         if req.answers:
-            batch_outcome = await extract_batch_answers(case, req.answers)
+            batch_outcome = await extract_batch_answers(
+                case, req.answers, semantic_first=semantic_first,
+            )
             if "requested_department" in batch_outcome.accepted_fields:
                 department_preference_name = case.patient_input.requested_department_name
             user_text_parts.extend(answer.answer for answer in req.answers if answer.answer.strip())
@@ -158,20 +157,14 @@ async def chat(req: ChatRequest) -> TriageResult:
                 batch_outcome.ai_attempted,
                 batch_outcome.fallback_reason,
             )
-        elif req.message:
-            apply_user_message(case, req.message)
-            preference = capture_department_preference(case, req.message)
-            if preference and preference.resolved:
-                department_preference_name = preference.name
+        elif req.message and req.message.strip():
+            apply_user_message(case, req.message, semantic_first=semantic_first)
             user_text_parts.append(req.message)
             has_user_input = True
         elif messages:
             for message in messages:
-                if message.role == "user":
-                    apply_user_message(case, message.content)
-                    preference = capture_department_preference(case, message.content)
-                    if preference and preference.resolved:
-                        department_preference_name = preference.name
+                if message.role == "user" and message.content.strip():
+                    apply_user_message(case, message.content, semantic_first=semantic_first)
                     user_text_parts.append(message.content)
                     has_user_input = True
         if has_user_input:
@@ -188,30 +181,14 @@ async def chat(req: ChatRequest) -> TriageResult:
 
         _sync_confirmation_flags(case)
     if has_user_input and not req.answers:
-        semantic_decision = decide_semantic_refinement(
-            before=parse_snapshot,
-            after=case,
-            user_text="\n".join(user_text_parts),
-            request_confirmed=req.confirmed,
-        )
-        logger.info(
-            "chat semantic refinement decision case_id=%s should_call=%s reason=%s target_field=%s reliable_fields=%s",
-            case.case_id,
-            semantic_decision.should_call,
-            semantic_decision.reason,
-            semantic_decision.target_field,
-            semantic_decision.reliable_fields,
-        )
-        if semantic_decision.reason == "off_topic_for_requested_field" and semantic_decision.target_field:
-            target = semantic_decision.target_field
-            case.conversation_state.field_statuses[target] = "unknown"
-            case.conversation_state.field_confidence[target] = 0.0
-            case.conversation_state.clarification_reasons[target] = (
-                "answer did not pass strict field validation"
-            )
-        if semantic_decision.should_call:
+        if semantic_first:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
-                ai_suggestion = await refine_case_with_ai(case)
+                ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
+            case.conversation_state.revision_mode = False
+        for user_text in user_text_parts:
+            preference = capture_department_preference(case, user_text)
+            if preference and preference.resolved:
+                department_preference_name = preference.name
 
     with perf.measure("rule_engine"):
         case.triage = evaluate_urgency(case, mark_next_question=not batch_mode)

@@ -16,7 +16,7 @@ chat_route = importlib.import_module("app.routes.chat")
 
 
 class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
-    def _post_with_mocked_ai(self, payload: dict):
+    def _post_with_mocked_ai(self, payload: dict, *, ai_available: bool = False):
         semantic = AsyncMock(return_value=None)
 
         async def deterministic_reply(**kwargs) -> str:
@@ -27,6 +27,13 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             chat_route,
             "generate_triage_reply",
             new=contextual,
+        ), patch.object(
+            chat_route,
+            "get_settings",
+            return_value=SimpleNamespace(
+                cerebras_api_key="test-key" if ai_available else "",
+                batch_triage_enabled=False,
+            ),
         ), patch.object(
             chat_route,
             "detect_department_result",
@@ -66,7 +73,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             {
                 "triage_case": case.model_dump(mode="json"),
                 "message": "沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
-            }
+            },
         )
 
         self.assertEqual(response.status_code, 200)
@@ -134,7 +141,8 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             {
                 "triage_case": case.model_dump(mode="json"),
                 "message": "我想直接掛皮膚科",
-            }
+            },
+            ai_available=True,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -148,7 +156,8 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             {
                 "triage_case": case.model_dump(mode="json"),
                 "message": "白天還好，可是晚上常常痛醒",
-            }
+            },
+            ai_available=True,
         )
 
         self.assertEqual(response.status_code, 200)
@@ -196,6 +205,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             ai_timeout_seconds=8,
             cerebras_api_key="test-key",
             cerebras_model="gpt-oss-120b",
+            batch_triage_enabled=False,
         )
         original_finish = chat_route.finish_chat_perf
 
@@ -205,6 +215,10 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(
             rag_triage_adapter,
+            "get_settings",
+            return_value=settings,
+        ), patch.object(
+            chat_route,
             "get_settings",
             return_value=settings,
         ), patch.object(
@@ -252,6 +266,10 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             rag_triage_adapter,
             "get_settings",
             return_value=SimpleNamespace(cerebras_api_key="test-key"),
+        ), patch.object(
+            chat_route,
+            "get_settings",
+            return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
         ), patch.object(
             rag_triage_adapter,
             "complete_prompt",

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, HTTPException
 
+from app.config import get_settings
 from app.schemas import ConversationStage, RecommendRequest, RecommendationResult, VisitType
 from app.services.appointment_service import (
     DepartmentResolutionError,
@@ -9,6 +10,8 @@ from app.services.appointment_service import (
 )
 from app.services.ai_reply_generator import build_no_schedule_message
 from app.services.case_store import create_case, get_case, save_case, save_recommendation_result
+from app.services.ai_service import runtime_ai_available
+from app.services.rag_triage_adapter import refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
 
 router = APIRouter(prefix="/recommend", tags=["recommend"])
@@ -29,9 +32,12 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
         if supplied_case.visit_type is None:
             supplied_case.visit_type = stored_case.visit_type
     case = supplied_case or stored_case
-    if case is None and req.userQuery:
+    if case is None and req.userQuery and req.userQuery.strip():
         case = create_case(req.case_id)
-        apply_user_message(case, req.userQuery)
+        semantic_first = runtime_ai_available(get_settings())
+        apply_user_message(case, req.userQuery, semantic_first=semantic_first)
+        if semantic_first:
+            await refine_case_with_ai(case, user_sources=[req.userQuery])
         case.triage = evaluate_urgency(case)
         case.conversation_state.is_complete = not case.triage.need_more_info
 
