@@ -10,9 +10,11 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.services import conversation_service, rag_triage_adapter
+from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 
 
 chat_route = importlib.import_module("app.routes.chat")
+recommend_route = importlib.import_module("app.routes.recommend")
 
 
 def extraction(field, value, source, confidence=0.95):
@@ -26,7 +28,7 @@ def extraction(field, value, source, confidence=0.95):
 
 
 class Phase2ConversationTest(unittest.TestCase):
-    def post(self, message, extractions, plan, *, triage_case=None):
+    def post(self, message, extractions, plan, *, triage_case=None, confirmed=False):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
         semantic = AsyncMock(return_value=json.dumps(
             {"semantic_extractions": extractions}, ensure_ascii=False,
@@ -46,10 +48,28 @@ class Phase2ConversationTest(unittest.TestCase):
         ):
             response = TestClient(app).post("/chat", json={
                 "message": message,
+                "confirmed": confirmed,
                 **({"triage_case": triage_case} if triage_case else {}),
             })
         self.assertEqual(response.status_code, 200)
         return response.json(), semantic, clarification, department
+
+    def rich_first_turn(self, *, confirmed=False):
+        message = "我上禮拜從樓梯踩空，右腳腳背腫起來，最近走路越來越痛，晚上也會痛醒。"
+        return self.post(
+            message,
+            [
+                extraction("symptom", "腳背腫痛", "右腳腳背腫起來"),
+                extraction("body_part", "右腳腳背", "右腳腳背"),
+                extraction("duration", "1週", "上禮拜"),
+                extraction("severity", "severe", "晚上也會痛醒"),
+                extraction("onset", "從樓梯踩空", "從樓梯踩空"),
+                extraction("accompanying_symptoms", ["走路越來越痛"], "走路越來越痛"),
+            ],
+            {"status": "sufficient", "question": None, "intent": None,
+             "reason": "症狀、起因與影響已足夠"},
+            confirmed=confirmed,
+        )
 
     def test_dizziness_gets_contextual_question_not_checklist_body_part(self):
         question = "你說的頭暈比較像周圍在旋轉，還是快昏倒、眼前發黑？"
@@ -68,29 +88,73 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(result["triage_case"]["history_records"][-1]["content"], question)
 
     def test_rich_description_can_be_sufficient_without_preferences(self):
-        message = "我上禮拜從樓梯踩空，右腳腳背腫起來，最近走路越來越痛，晚上也會痛醒。"
-        result, _, clarification, department = self.post(
-            message,
-            [
-                extraction("symptom", "腳背腫痛", "右腳腳背腫起來"),
-                extraction("body_part", "右腳腳背", "右腳腳背"),
-                extraction("duration", "1週", "上禮拜"),
-                extraction("severity", "severe", "晚上也會痛醒"),
-                extraction("onset", "從樓梯踩空", "從樓梯踩空"),
-                extraction("accompanying_symptoms", ["走路越來越痛"], "走路越來越痛"),
-            ],
-            {"status": "sufficient", "question": None, "intent": None,
-             "reason": "症狀、起因與影響已足夠"},
-        )
+        result, _, clarification, department = self.rich_first_turn()
         clarification.assert_awaited_once()
-        department.assert_awaited_once()
-        self.assertFalse(result["needMoreInfo"])
-        self.assertIsNone(result["next_question"])
+        department.assert_not_awaited()
+        self.assertTrue(result["needMoreInfo"])
+        self.assertFalse(result["conversation_state"]["is_complete"])
+        self.assertEqual(result["conversation_state"]["stage"], "collecting")
+        self.assertEqual(result["conversation_state"]["clarification_status"], "safety_check")
+        self.assertEqual(result["conversation_state"]["last_question_key"], "red_flags")
+        self.assertEqual(result["conversation_state"]["question_attempts"]["red_flags"], 1)
+        self.assertEqual(result["conversation_state"]["asked_clarification_intents"], [])
+        self.assertEqual(result["next_question"], QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
         self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertFalse(result["triage"]["is_final"])
-        self.assertEqual(result["conversation_state"]["clarification_status"], "sufficient")
         self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "右腳腳背腫起來")
         self.assertEqual(result["triage_case"]["availability"]["preferred_days"], [])
+
+    def test_negative_safety_answer_completes_before_department_detection(self):
+        first, _, _, _ = self.rich_first_turn()
+        second, _, clarification, department = self.post(
+            "沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
+            [], None, triage_case=first["triage_case"],
+        )
+        clarification.assert_not_awaited()
+        department.assert_awaited_once()
+        self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
+        self.assertTrue(second["conversation_state"]["is_complete"])
+        self.assertFalse(second["needMoreInfo"])
+        self.assertEqual(second["conversation_state"]["stage"], "waiting_confirmation")
+
+    def test_confirmation_cannot_skip_safety_question(self):
+        result, _, _, department = self.rich_first_turn(confirmed=True)
+        department.assert_not_awaited()
+        self.assertEqual(result["conversation_state"]["stage"], "collecting")
+        self.assertFalse(result["conversation_state"]["confirmed"])
+        self.assertFalse(result["conversation_state"]["is_complete"])
+        self.assertTrue(result["needMoreInfo"])
+
+    def test_recommend_rejects_forged_completion_without_safety(self):
+        first, _, _, _ = self.rich_first_turn()
+        forged = first["triage_case"]
+        forged["conversation_state"]["is_complete"] = True
+        forged["conversation_state"]["confirmed"] = True
+        forged["triage"]["need_more_info"] = False
+        forged["confirmed"] = True
+        with patch.object(recommend_route, "detect_department_result", new=AsyncMock()) as detector, patch.object(
+            recommend_route, "recommend_appointments", new=AsyncMock(),
+        ) as recommender:
+            response = TestClient(app).post("/recommend", json={
+                "triage_case": forged, "visit_type": "initial", "confirmed": True,
+            })
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("急迫症狀篩檢尚未完成", response.json()["detail"])
+        detector.assert_not_awaited()
+        recommender.assert_not_awaited()
+
+    def test_positive_red_flag_keeps_urgent_path(self):
+        result, _, clarification, department = self.post(
+            "我突然胸痛", [extraction("symptom", "胸痛", "胸痛")], None,
+        )
+        clarification.assert_not_awaited()
+        department.assert_awaited_once()
+        self.assertTrue(result["triage_case"]["patient_input"]["red_flags"])
+        self.assertTrue(result["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(result["conversation_state"]["clarification_status"], "urgent")
+        self.assertFalse(result["needMoreInfo"])
+        self.assertIsNone(result["next_question"])
 
     def test_follow_up_answer_uses_history_and_does_not_repeat_intent(self):
         first, _, _, _ = self.post(
@@ -112,8 +176,10 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(second["conversation_state"]["asked_clarification_intents"], ["clarify_dizziness_type"])
         self.assertIsNone(second["conversation_state"]["pending_clarification_intent"])
         self.assertEqual(second["conversation_state"]["turn_count"], 2)
-        self.assertFalse(second["needMoreInfo"])
-        department.assert_awaited_once()
+        self.assertTrue(second["needMoreInfo"])
+        self.assertEqual(second["conversation_state"]["clarification_status"], "safety_check")
+        self.assertIn("突發胸痛", second["next_question"])
+        department.assert_not_awaited()
 
     def test_filled_duration_is_not_reasked(self):
         result, _, _, _ = self.post(

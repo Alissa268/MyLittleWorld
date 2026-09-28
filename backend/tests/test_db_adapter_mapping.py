@@ -353,6 +353,7 @@ def _return_visit_row():
 def _complete_case() -> TriageCase:
     case = TriageCase(case_id="case_db_adapter_route", visit_type=VisitType.INITIAL)
     case.patient_input.symptom = "頭暈"
+    case.patient_input.red_flags_checked = True
     case.triage.need_more_info = False
     case.triage.is_final = True
     case.conversation_state.is_complete = True

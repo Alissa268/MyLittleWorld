@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from app.schemas import SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
+from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark_questions_asked
 
 logger = logging.getLogger(__name__)
 HARD_TURN_CAP = 8
@@ -24,6 +25,10 @@ _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科別|醫�
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
+
+
+def safety_screen_resolved(case: TriageCase) -> bool:
+    return case.patient_input.red_flags_checked or bool(case.patient_input.red_flags)
 
 
 @dataclass(frozen=True)
@@ -147,14 +152,13 @@ def advance_conversation(
         for field, reason in state.clarification_reasons.items()
     )
     sufficient = (
-        suggestion is not None
-        and suggestion.status == "sufficient"
+        (state.clarification_status == "safety_check" or (suggestion is not None and suggestion.status == "sufficient"))
         and grounded_symptom
         and grounded_detail
         and not low_confidence
         and state.pending_clarification_intent is None
     )
-    if sufficient:
+    if sufficient and safety_screen_resolved(case):
         state.clarification_status = "sufficient"
         state.uncertainty_reasons = []
         state.next_information_needed = []
@@ -162,12 +166,24 @@ def advance_conversation(
         state.is_complete = True
         case.triage.need_more_info = False
         case.triage.next_question = None
-        case.triage.is_final = case.patient_input.red_flags_checked
+        case.triage.is_final = True
         case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
         return
 
     if state.turn_count >= HARD_TURN_CAP:
         _unresolved(case)
+        return
+
+    if sufficient:
+        state.clarification_status = "safety_check"
+        state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
+        state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
+        state.is_complete = False
+        mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
+        case.triage.need_more_info = True
+        case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+        case.triage.is_final = False
+        case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
         return
 
     valid_question = (

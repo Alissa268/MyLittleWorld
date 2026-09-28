@@ -20,6 +20,7 @@ from app.services.conversation_service import (
     UNRESOLVED_REPLY,
     advance_conversation,
     request_clarification,
+    safety_screen_resolved,
 )
 from app.services.department_preference_service import capture_department_preference
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
@@ -212,7 +213,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
                     suggestion = (
                         await request_clarification(case, user_text_parts)
-                        if has_user_input and case.conversation_state.clarification_status != "unresolved"
+                        if has_user_input and case.conversation_state.clarification_status not in {"unresolved", "safety_check"}
                         else None
                     )
                 advance_conversation(
@@ -265,6 +266,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_status = case.conversation_state.field_statuses.get("department")
         if (
             not case.triage.need_more_info
+            and safety_screen_resolved(case)
             and case.department_result is None
             and department_status != "unresolved_final"
         ):
@@ -284,11 +286,12 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.conversation_state.awaiting_confirmation = False
             case.conversation_state.confirmed = False
             case.conversation_state.is_complete = False
-        elif case.triage.need_more_info:
+        elif case.triage.need_more_info or not safety_screen_resolved(case):
             case.confirmed = False
             case.conversation_state.stage = ConversationStage.COLLECTING
             case.conversation_state.awaiting_confirmation = False
             case.conversation_state.confirmed = False
+            case.conversation_state.is_complete = False
         elif req.confirmed:
             case.confirmed = True
             case.conversation_state.stage = ConversationStage.RECOMMENDING

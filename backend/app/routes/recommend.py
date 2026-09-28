@@ -10,6 +10,7 @@ from app.services.appointment_service import (
 )
 from app.services.ai_reply_generator import build_no_schedule_message
 from app.services.case_store import create_case, get_case, save_case, save_recommendation_result
+from app.services.conversation_service import safety_screen_resolved
 from app.services.ai_service import runtime_ai_available
 from app.services.rag_triage_adapter import refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
@@ -66,6 +67,8 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
 
     if case.conversation_state.is_complete is not True or case.triage.need_more_info is True:
         raise HTTPException(status_code=400, detail="triage_case 尚未完成，請先完成 /chat 多輪問答。")
+    if not safety_screen_resolved(case):
+        raise HTTPException(status_code=400, detail="急迫症狀篩檢尚未完成，請先返回 /chat 確認安全狀況。")
 
     if req.confirmed:
         case.confirmed = True
