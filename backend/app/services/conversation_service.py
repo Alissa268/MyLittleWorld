@@ -118,7 +118,8 @@ def advance_conversation(
     if state.clarification_status == "unresolved":
         _unresolved(case)
         return
-    state.turn_count += len(user_sources)
+    if state.clarification_status != "safety_check":
+        state.turn_count += len(user_sources)
 
     answer_has_accepted_evidence = bool(suggestion and suggestion.answer_source_text) and any(
         item in case.semantic_extractions
@@ -158,23 +159,18 @@ def advance_conversation(
         and not low_confidence
         and state.pending_clarification_intent is None
     )
-    if sufficient and safety_screen_resolved(case):
-        state.clarification_status = "sufficient"
-        state.uncertainty_reasons = []
-        state.next_information_needed = []
-        state.last_question_key = None
-        state.is_complete = True
-        case.triage.need_more_info = False
-        case.triage.next_question = None
-        case.triage.is_final = True
-        case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
-        return
-
-    if state.turn_count >= HARD_TURN_CAP:
-        _unresolved(case)
-        return
-
     if sufficient:
+        if safety_screen_resolved(case):
+            state.clarification_status = "sufficient"
+            state.uncertainty_reasons = []
+            state.next_information_needed = []
+            state.last_question_key = None
+            state.is_complete = True
+            case.triage.need_more_info = False
+            case.triage.next_question = None
+            case.triage.is_final = True
+            case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
+            return
         state.clarification_status = "safety_check"
         state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
         state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
@@ -184,6 +180,10 @@ def advance_conversation(
         case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
         case.triage.is_final = False
         case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
+        return
+
+    if state.turn_count >= HARD_TURN_CAP:
+        _unresolved(case)
         return
 
     valid_question = (

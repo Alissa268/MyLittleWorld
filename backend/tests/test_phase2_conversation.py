@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.schemas import TriageCase
 from app.services import conversation_service, rag_triage_adapter
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 
@@ -54,7 +55,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         return response.json(), semantic, clarification, department
 
-    def rich_first_turn(self, *, confirmed=False):
+    def rich_first_turn(self, *, confirmed=False, triage_case=None):
         message = "我上禮拜從樓梯踩空，右腳腳背腫起來，最近走路越來越痛，晚上也會痛醒。"
         return self.post(
             message,
@@ -69,6 +70,7 @@ class Phase2ConversationTest(unittest.TestCase):
             {"status": "sufficient", "question": None, "intent": None,
              "reason": "症狀、起因與影響已足夠"},
             confirmed=confirmed,
+            triage_case=triage_case,
         )
 
     def test_dizziness_gets_contextual_question_not_checklist_body_part(self):
@@ -106,17 +108,52 @@ class Phase2ConversationTest(unittest.TestCase):
 
     def test_negative_safety_answer_completes_before_department_detection(self):
         first, _, _, _ = self.rich_first_turn()
-        second, _, clarification, department = self.post(
-            "沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
-            [], None, triage_case=first["triage_case"],
+        answer = "沒有胸痛，也沒有呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛"
+        second, semantic, clarification, department = self.post(
+            answer,
+            [extraction("accompanying_symptoms", ["胸痛", "呼吸困難"], answer)],
+            None, triage_case=first["triage_case"],
         )
+        semantic.assert_not_awaited()
         clarification.assert_not_awaited()
         department.assert_awaited_once()
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
+        self.assertEqual(second["triage_case"]["patient_input"]["accompanying_symptoms"], ["走路越來越痛"])
+        self.assertEqual(len(second["triage_case"]["semantic_extractions"]), len(first["triage_case"]["semantic_extractions"]))
+        self.assertEqual(second["triage_case"]["history_records"][-1]["content"], answer)
         self.assertTrue(second["conversation_state"]["is_complete"])
         self.assertFalse(second["needMoreInfo"])
         self.assertEqual(second["conversation_state"]["stage"], "waiting_confirmation")
+
+    def test_eighth_symptom_turn_enters_safety_check_before_hard_cap(self):
+        case = TriageCase(case_id="phase22-eighth-turn")
+        case.conversation_state.turn_count = 7
+        eighth, semantic, clarification, department = self.rich_first_turn(
+            triage_case=case.model_dump(mode="json"),
+        )
+        semantic.assert_awaited_once()
+        clarification.assert_awaited_once()
+        department.assert_not_awaited()
+        state = eighth["conversation_state"]
+        self.assertEqual(state["turn_count"], 8)
+        self.assertEqual(state["clarification_status"], "safety_check")
+        self.assertFalse(state["is_complete"])
+        self.assertEqual(eighth["next_question"], QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
+
+        completed, semantic, clarification, department = self.post(
+            "沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
+            [extraction("symptom", "胸痛", "胸痛")], None,
+            triage_case=eighth["triage_case"],
+        )
+        semantic.assert_not_awaited()
+        clarification.assert_not_awaited()
+        department.assert_awaited_once()
+        self.assertEqual(completed["conversation_state"]["turn_count"], 8)
+        self.assertEqual(completed["conversation_state"]["clarification_status"], "sufficient")
+        self.assertTrue(completed["conversation_state"]["is_complete"])
+        self.assertTrue(completed["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(completed["triage_case"]["patient_input"]["red_flags"], [])
 
     def test_confirmation_cannot_skip_safety_question(self):
         result, _, _, department = self.rich_first_turn(confirmed=True)

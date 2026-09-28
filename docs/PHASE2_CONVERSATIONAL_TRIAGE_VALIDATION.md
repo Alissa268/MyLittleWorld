@@ -85,3 +85,16 @@ $env:ANDROID_SDK_ROOT=$env:ANDROID_HOME
 資料流：自然症狀澄清足夠 → Backend 檢查 `red_flags_checked` 或已命中 `red_flags` → 若兩者皆否，`is_complete=false`、`need_more_info=true`、`stage=collecting`，使用既有 `QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]` 並透過 `mark_questions_asked()` 設定 `last_question_key=red_flags`；此問題不進 `asked_clarification_intents`。下一輪否認由 `_apply_free_text_safety()` 與既有 red-flag parser 判定；negative 解析完成後，若症狀證據仍足夠，才令 `is_complete=true`、`need_more_info=false` 並進行既有科別偵測。positive red flag 仍沿 urgent 路徑，無須 negative 確認。`/recommend` 獨立要求相同 safety-resolved 條件。沒有恢復固定七題，也沒有新增醫療 keyword 規則或修改 API schema。
 
 測試 A–E 均在 API 層覆蓋；另保留 Phase 1/2 與 Backend 全部回歸。在 `New_Android_Backend/backend` 使用上節相同環境設定執行 `pytest -q`，最終結果：`410 passed, 8 warnings, 277 subtests passed in 9.48s`。未修改 Android source、DTO 或 API schema，因此未重跑 Android build；Phase 2 的 Android unit/build 結果仍如上。此副本仍無可用 `.git` metadata，無法獨立驗證指定 commit；沒有 commit 或 push。
+
+## Phase 2.2 - safety 回答隔離與第八輪收尾
+
+使用者指定本次基準 commit：`e027ac162c674f640f1b8cc8424c6abf738f2014`。只修 Phase 2 的兩個 edge cases，未開始 Phase 3。
+
+| 修改檔案 | 目的 |
+| --- | --- |
+| `backend/app/routes/chat.py` | 在處理本輪輸入前鎖定 `safety_check` 狀態；該輪保留 user history，但只用既有 deterministic safety parser，不呼叫一般 semantic extraction 或 AI clarification，也不擷取無關科別偏好。一般自然症狀輪仍 AI-first。 |
+| `backend/app/services/conversation_service.py` | 將 sufficient 分支移到 hard cap 判斷之前。第 8 輪已足夠但 safety 未完成時先進 `safety_check`；safety 回答不增加症狀澄清 `turn_count`。只有症狀仍不 sufficient 才由 hard cap 進 `unresolved`。 |
+| `backend/tests/test_phase2_conversation.py` | Test A 用會污染伴隨症狀的 mock extraction 驗證 safety negative 回答不呼叫兩個 AI provider、不添病情且保存 history；Test B 驗證第 8 輪 sufficient 先問既有安全問題，下一輪 negative 後才完成。 |
+| `docs/PHASE2_CONVERSATIONAL_TRIAGE_VALIDATION.md` | 記錄 Phase 2.2 修正與測試結果。 |
+
+在 `New_Android_Backend/backend` 使用上節相同環境設定執行 `pytest -q`，最終結果：`411 passed, 8 warnings, 277 subtests passed in 6.32s`。Phase 1 AI-first、原文 evidence／normalized concept 分離、自然多輪澄清、pending intent、低信心與 provider failure、真正未釐清時的 hard cap、Phase 2.1 safety gate、`/recommend` 防線及 urgent positive red flag 回歸均通過。未修改 API schema 或 Android source，未重跑 Android；仍無可用 `.git` metadata 可獨立核對指定 commit，沒有 commit 或 push。
