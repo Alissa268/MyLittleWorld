@@ -1,0 +1,32 @@
+{
+  "sources": [
+    {
+      "source_id": "vghtpe_im_department_reference_2022",
+      "source_hospital": "vghtpe",
+      "source_type": "symptom_department_guidance",
+      "source_title": "臺北榮民總醫院內科部｜就診科別參考",
+      "source_url": "https://wd.vghtpe.gov.tw/im/Fpage.action?fid=243&muid=561",
+      "source_priority": 1,
+      "retrieved_at": "2026-09-29",
+      "published_or_updated_at": "2022-09-25"
+    },
+    {
+      "source_id": "vghtpe_doctor_specialty_search_2026",
+      "source_hospital": "vghtpe",
+      "source_type": "doctor_specialty_keywords",
+      "source_title": "臺北榮民總醫院｜醫師及專長查詢",
+      "source_url": "https://www.vghtpe.gov.tw/docsearch.action",
+      "source_priority": 2,
+      "retrieved_at": "2026-09-29"
+    },
+    {
+      "source_id": "vghtc_symptom_query_2026",
+      "source_hospital": "vghtc",
+      "source_type": "symptom_query",
+      "source_title": "臺中榮民總醫院｜症狀查詢",
+      "source_url": "https://www.vghtc.gov.tw/SymptomQuery/605",
+      "source_priority": 3,
+      "retrieved_at": "2026-09-29"
+    }
+  ]
+}
