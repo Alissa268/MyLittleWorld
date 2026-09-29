@@ -26,7 +26,7 @@ async def quick_search_schedules(
     try:
         departments = await asyncio.to_thread(fetch_reference_departments)
     except Exception as exc:
-        logger.error("Quick search department lookup failed: %s: %s", type(exc).__name__, exc)
+        logger.error("Quick search department lookup failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="正式科別資料目前無法載入，請稍後重試。") from exc
 
     department = next(
@@ -47,12 +47,9 @@ async def quick_search_schedules(
         )
     except Exception as exc:
         logger.error(
-            "Quick search schedule query failed dept_id=%s date=%s period=%s: %s: %s",
+            "Quick search schedule query failed dept_id=%s error_type=%s",
             dept_id,
-            date_,
-            period.value,
             type(exc).__name__,
-            exc,
         )
         raise HTTPException(status_code=503, detail="正式班表目前無法查詢，請稍後重試。") from exc
 

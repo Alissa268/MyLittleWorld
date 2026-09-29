@@ -197,11 +197,10 @@ async def extract_batch_answers(
                 )
             logger.info(
                 "[SEMANTIC_FAST_PATH] case_id=%s current_field=%s field=%s "
-                "candidate=%r accepted=%s reason=%s",
+                "accepted=%s reason=%s",
                 case.case_id,
                 key,
                 extraction.field,
-                extraction.normalized_value,
                 str(accepted_fast_path).lower(),
                 fast_path_reason,
             )
@@ -304,11 +303,10 @@ async def extract_batch_answers(
     prompt = _build_batch_prompt(case, semantic_sources, ai_targets)
     for field_name in ai_targets:
         logger.info(
-            "[SEMANTIC_AI_REQUEST] case_id=%s field=%s question=%r answer=%r",
+            "[SEMANTIC_AI_REQUEST] case_id=%s field=%s answer_chars=%s",
             case.case_id,
             field_name,
-            question_spec_for_field(field_name).canonical_text,
-            semantic_sources[field_name],
+            len(semantic_sources[field_name]),
         )
     try:
         raw = await complete_prompt(prompt)
@@ -872,14 +870,12 @@ def _parse_ai_extractions(
         normalized_fields.append(field_name)
         source_text = item.source_text.strip()
         logger.info(
-            "[SEMANTIC_AI_PARSED] case_id=%s field=%s normalized_value=%r status=%s "
-            "confidence=%.3f source_text=%r",
+            "[SEMANTIC_AI_PARSED] case_id=%s field=%s status=%s confidence=%.3f source_chars=%s",
             case_id or "unknown",
             field_name,
-            item.normalized_value,
             item.semantic_status,
             item.confidence,
-            source_text,
+            len(source_text),
         )
         source_required = item.semantic_status in {"available", "partial", "unavailable"}
         if (source_required or source_text) and not _source_text_grounded(

@@ -1342,15 +1342,20 @@ class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
 class VisitTypeRecommendationTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_fetch = appointment_service.fetch_available_slots
+        self.original_fetch_departments = appointment_service.fetch_active_departments
         self.original_score = appointment_service.score_doctor_specialties
 
         async def neutral_score(*_args, **_kwargs):
             return {}
 
         appointment_service.score_doctor_specialties = neutral_score
+        appointment_service.fetch_active_departments = lambda: [
+            {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"}
+        ]
 
     def tearDown(self):
         appointment_service.fetch_available_slots = self.original_fetch
+        appointment_service.fetch_active_departments = self.original_fetch_departments
         appointment_service.score_doctor_specialties = self.original_score
 
     async def test_initial_and_followup_are_exact_and_case_is_source_of_truth(self):
@@ -1526,6 +1531,7 @@ def _slot(doctor: str, visit_type: str) -> dict:
         "status": "open",
         "source": "db",
         "visit_type": visit_type,
+        "dept_id": 7,
     }
 
 

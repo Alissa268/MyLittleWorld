@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import importlib
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
@@ -31,6 +32,9 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         appointment_service.fetch_active_departments = _active_departments
         department_preference_service.fetch_active_departments = _active_departments
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _available_slots()
+        self.generate_script_route = importlib.import_module("app.routes.generate_script")
+        self.original_revalidate = self.generate_script_route.revalidate_schedule
+        self.generate_script_route.revalidate_schedule = lambda recommendation, **_kwargs: recommendation
 
         async def fail_complete(_: str) -> str:
             raise RuntimeError("AI disabled in selective merge tests")
@@ -47,6 +51,7 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         rag_triage_adapter.get_settings = self.original_rag_settings
         rag_triage_adapter.complete_prompt = self.original_rag_complete
         specialty_scoring.get_settings = self.original_specialty_settings
+        self.generate_script_route.revalidate_schedule = self.original_revalidate
 
     async def test_under_18_abdominal_prefers_active_pediatric_department(self):
         case = _case_from_message("12歲腹痛兩天，沒有胸痛呼吸困難，週一上午可以")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 
-from app.db import fetch_return_visit_slots
+from app.db import fetch_active_departments, fetch_reference_doctors, fetch_return_visit_slots
 from app.schemas import (
     DepartmentResult,
     FollowupRecommendRequest,
@@ -16,29 +16,56 @@ from app.services.schedule_filter import normalize_session, row_matches_availabi
 logger = logging.getLogger(__name__)
 
 
-async def recommend_followup(req: FollowupRecommendRequest) -> FollowupRecommendResponse:
-    child = (req.childDept or "").strip()
-    requested_parent = (req.parentDept or "").strip()
-    original_doctor = req.original_doctor.strip()
+class ReturnVisitResolutionError(ValueError):
+    """Return-visit identity is not canonical in the live Department/Doctor data."""
 
+
+async def recommend_followup(req: FollowupRecommendRequest) -> FollowupRecommendResponse:
+    departments = await asyncio.to_thread(fetch_active_departments)
+    matches = [
+        item for item in departments
+        if req.dept_id is not None and str(item.get("dept_id")) == str(req.dept_id)
+    ] if req.dept_id is not None else [
+        item for item in departments
+        if str(item.get("child_dept") or "").strip() == str(req.childDept or "").strip()
+        and (not req.parentDept or str(item.get("parent_dept") or "").strip() == req.parentDept.strip())
+    ]
+    if len(matches) != 1:
+        raise ReturnVisitResolutionError("回診科別無法對應唯一的正式科別。")
+    canonical = matches[0]
+    child = str(canonical.get("child_dept") or "").strip()
+    parent = str(canonical.get("parent_dept") or "").strip()
+    if req.childDept and req.childDept.strip() != child:
+        raise ReturnVisitResolutionError("回診科別名稱與正式科別資料不一致。")
+    if req.parentDept and req.parentDept.strip() != parent:
+        raise ReturnVisitResolutionError("回診科別分類與正式科別資料不一致。")
+
+    doctors = await asyncio.to_thread(fetch_reference_doctors, child)
+    doctor_matches = [
+        item for item in doctors
+        if (req.original_doctor_id is None or str(item.get("doctor_id")) == str(req.original_doctor_id))
+        and str(item.get("name") or "").strip() == req.original_doctor.strip()
+    ]
+    if len(doctor_matches) != 1:
+        raise ReturnVisitResolutionError("原醫師身分或其與科別的關聯無法由正式資料確認。")
+    canonical_doctor = doctor_matches[0]
     try:
-        rows = await asyncio.to_thread(
-            fetch_return_visit_slots,
-            department_name=child,
-            doctor_name=original_doctor,
-            preferred_dates=req.availability.preferred_dates,
-            preferred_sessions=req.availability.preferred_sessions,
-            department_id=req.dept_id,
-            doctor_id=req.original_doctor_id,
-        )
-    except Exception as exc:
-        logger.error(
-            "Follow-up schedule query failed for %s; returning no recommendations: %s: %s",
-            child,
-            type(exc).__name__,
-            exc,
-        )
-        rows = []
+        doctor_id = int(str(canonical_doctor["doctor_id"]))
+    except (TypeError, ValueError) as exc:
+        raise ReturnVisitResolutionError("正式醫師識別碼格式無效。") from exc
+    if doctor_id <= 0:
+        raise ReturnVisitResolutionError("正式醫師識別碼格式無效。")
+    original_doctor = str(canonical_doctor["name"]).strip()
+
+    rows = await asyncio.to_thread(
+        fetch_return_visit_slots,
+        department_name=child,
+        doctor_name=original_doctor,
+        preferred_dates=req.availability.preferred_dates,
+        preferred_sessions=req.availability.preferred_sessions,
+        department_id=int(canonical["dept_id"]),
+        doctor_id=doctor_id,
+    )
 
     rows = [
         row
@@ -51,12 +78,10 @@ async def recommend_followup(req: FollowupRecommendRequest) -> FollowupRecommend
         if str(row.get("doctor") or "").strip() == original_doctor
         and str(row.get("child_dept") or row.get("childDept") or "").strip() == child
         and (
-            req.original_doctor_id is None
-            or str(row.get("doctor_id") or "").strip() == str(req.original_doctor_id)
+            str(row.get("doctor_id") or "").strip() == str(doctor_id)
         )
         and (
-            req.dept_id is None
-            or str(row.get("dept_id") or "").strip() == str(req.dept_id)
+            str(row.get("dept_id") or "").strip() == str(canonical["dept_id"])
         )
     ]
     strict_availability = req.availability.model_copy(update={"can_take_leave": False})
@@ -66,16 +91,12 @@ async def recommend_followup(req: FollowupRecommendRequest) -> FollowupRecommend
         original_doctor,
     )
 
-    parent = requested_parent or next(
-        (str(row.get("parent_dept") or row.get("parentDept") or "").strip() for row in candidates),
-        "",
-    )
     department = DepartmentResult(
-        dept_id=req.dept_id,
+        dept_id=int(canonical["dept_id"]),
         parentDept=parent,
         childDept=child,
         confidence=1.0,
-        reason=["回診科別與原醫師由正式主資料選擇"],
+        reason=["回診科別與原醫師已由正式主資料驗證"],
     )
     recommendations = _build_followup_items(
         req.case_id or "followup",
@@ -125,6 +146,7 @@ def _build_followup_items(
                 doctor=str(row.get("doctor") or ""),
                 doctor_id=str(row.get("doctor_id") or row.get("doctor") or ""),
                 schedule_id=str(row.get("schedule_id") or ""),
+                dept_id=department.dept_id,
                 date=_date_to_text(row.get("date")),
                 session=normalize_session(row.get("session")) or str(row.get("session") or ""),
                 session_time=session_range(row.get("session")),

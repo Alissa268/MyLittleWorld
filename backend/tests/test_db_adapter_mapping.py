@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import unittest
-from datetime import date
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -20,6 +20,8 @@ class DbAdapterMappingTest(unittest.TestCase):
             appointment_service.fetch_available_slots = self.original_fetch_slots
         if hasattr(self, "original_score"):
             appointment_service.score_doctor_specialties = self.original_score
+        if hasattr(self, "original_fetch_active"):
+            appointment_service.fetch_active_departments = self.original_fetch_active
 
     def test_fetch_active_departments_uses_category_schema(self):
         self.original_create_db_connection = db.create_db_connection
@@ -87,9 +89,13 @@ class DbAdapterMappingTest(unittest.TestCase):
         self.assertEqual(conn.cursor_obj.params[:4], ("一般骨科", "原醫師", 7, 101))
         self.assertTrue(conn.closed)
 
-    def test_return_visit_query_without_selected_date_returns_empty_without_db_access(self):
+    def test_return_visit_query_without_selected_date_uses_bounded_future_window(self):
         self.original_create_db_connection = db.create_db_connection
-        db.create_db_connection = lambda: (_ for _ in ()).throw(AssertionError("DB must not be queried"))
+        future = db.datetime.now(db.TAIPEI_ZONE).date() + timedelta(days=10)
+        row = list(_return_visit_row())
+        row[9] = future
+        conn = _FakeConnection([tuple(row)])
+        db.create_db_connection = lambda: conn
 
         slots = db.fetch_return_visit_slots(
             department_name="一般骨科",
@@ -100,7 +106,10 @@ class DbAdapterMappingTest(unittest.TestCase):
             doctor_id=101,
         )
 
-        self.assertEqual(slots, [])
+        self.assertEqual(len(slots), 1)
+        self.assertIn("s.date >= ?", conn.cursor_obj.query)
+        self.assertIn("DATEADD(day, 20, ?)", conn.cursor_obj.query)
+        self.assertNotIn("s.date IN", conn.cursor_obj.query)
 
     def test_reference_doctors_use_exact_department_without_date_window(self):
         self.original_create_db_connection = db.create_db_connection
@@ -233,18 +242,19 @@ class DbAdapterMappingTest(unittest.TestCase):
 
         self.assertEqual(slots, [])
 
-    def test_db_failure_returns_no_mock_schedule(self):
+    def test_db_failure_raises_typed_error_without_mock_schedule(self):
         original_fetch_db = db._fetch_available_slots_from_db
         db._fetch_available_slots_from_db = lambda *_, **__: (_ for _ in ()).throw(RuntimeError("db down"))
         try:
-            slots = db.fetch_available_slots("一般內科", max_slots=1)
+            with self.assertRaises(db.DatabaseUnavailableError):
+                db.fetch_available_slots("一般內科", max_slots=1)
         finally:
             db._fetch_available_slots_from_db = original_fetch_db
 
-        self.assertEqual(slots, [])
 
     def test_recommend_route_accepts_db_slots_without_mock_fallback(self):
         self.original_fetch_slots = appointment_service.fetch_available_slots
+        self.original_fetch_active = appointment_service.fetch_active_departments
         self.original_score = appointment_service.score_doctor_specialties
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: [
             {
@@ -262,6 +272,9 @@ class DbAdapterMappingTest(unittest.TestCase):
                 "source": "db",
                 "visit_type": "初診/複診",
             }
+        ]
+        appointment_service.fetch_active_departments = lambda: [
+            {"dept_id": 123, "parent_dept": "一般內科", "child_dept": "一般內科"}
         ]
 
         async def neutral_score(*_args, **_kwargs):

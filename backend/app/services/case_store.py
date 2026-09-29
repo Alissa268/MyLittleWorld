@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import logging
+import time
 from uuid import uuid4
 
-from app.schemas import RecommendationItem, RecommendationResult, TriageCase
+from app.schemas import ConversationStage, RecommendationItem, RecommendationResult, TriageCase, UrgencyResult
 
 logger = logging.getLogger(__name__)
 
@@ -21,27 +22,76 @@ logger = logging.getLogger(__name__)
 # Redis, or the primary DB before production or multi-worker deployment.
 _CASES: dict[str, TriageCase] = {}
 _RECOMMENDATIONS_BY_CASE: dict[str, dict[str, RecommendationItem]] = {}
+_LAST_TOUCHED: dict[str, float] = {}
+CASE_TTL_SECONDS = 2 * 60 * 60
+_clock = time.monotonic
+
+
+def _prune_expired(now: float | None = None) -> None:
+    current = _clock() if now is None else now
+    expired = [
+        case_id for case_id, touched in _LAST_TOUCHED.items()
+        if current - touched >= CASE_TTL_SECONDS
+    ]
+    for case_id in expired:
+        _CASES.pop(case_id, None)
+        _RECOMMENDATIONS_BY_CASE.pop(case_id, None)
+        _LAST_TOUCHED.pop(case_id, None)
 
 
 def new_case_id() -> str:
     return f"case_{uuid4().hex[:8]}"
 
 
+def sanitize_untrusted_snapshot(snapshot: TriageCase) -> TriageCase:
+    """Keep compatibility data while removing every client-asserted server-owned conclusion."""
+    case = snapshot.model_copy(deep=True)
+    case.confirmed = False
+    case.recommendation_generated = False
+    case.script_generated = False
+    case.selected_recommendation_id = None
+    case.department_result = None
+    case.patient_input.red_flags = []
+    case.patient_input.red_flags_checked = False
+    case.patient_input.red_flags_status = "not_checked"
+    case.triage = UrgencyResult()
+    state = case.conversation_state
+    state.stage = ConversationStage.COLLECTING
+    state.is_complete = False
+    state.awaiting_confirmation = False
+    state.confirmed = False
+    state.clarification_status = "collecting"
+    state.pending_clarification_intent = None
+    state.department_status = "unresolved"
+    state.candidate_departments = []
+    state.department_uncertainty_reason = None
+    state.department_next_information_needed = None
+    state.department_next_question_intent = None
+    return case
+
+
 def create_case(case_id: str | None = None) -> TriageCase:
+    _prune_expired()
     case = TriageCase(case_id=case_id or new_case_id())
     _CASES[case.case_id] = case
+    _LAST_TOUCHED[case.case_id] = _clock()
     logger.info("case_store create_case case_id=%s", case.case_id)
     return case
 
 
 def get_case(case_id: str) -> TriageCase | None:
+    _prune_expired()
     case = _CASES.get(case_id)
+    if case is not None:
+        _LAST_TOUCHED[case_id] = _clock()
     logger.debug("case_store get_case case_id=%s found=%s", case_id, case is not None)
     return case
 
 
 def save_case(case: TriageCase) -> TriageCase:
+    _prune_expired()
     _CASES[case.case_id] = case
+    _LAST_TOUCHED[case.case_id] = _clock()
     logger.debug(
         "case_store save_case case_id=%s history_len=%s stage=%s",
         case.case_id,
@@ -52,6 +102,9 @@ def save_case(case: TriageCase) -> TriageCase:
 
 
 def get_recommendations_for_case(case_id: str) -> dict[str, RecommendationItem]:
+    _prune_expired()
+    if case_id in _CASES:
+        _LAST_TOUCHED[case_id] = _clock()
     return _RECOMMENDATIONS_BY_CASE.get(case_id, {})
 
 
@@ -68,9 +121,12 @@ def save_recommendations(
     case_id: str,
     items: list[RecommendationItem],
 ) -> list[RecommendationItem]:
+    _prune_expired()
     _RECOMMENDATIONS_BY_CASE[case_id] = {
         item.recommendation_id: item for item in items
     }
+    if case_id in _CASES:
+        _LAST_TOUCHED[case_id] = _clock()
     return items
 
 
@@ -79,6 +135,7 @@ def get_recommendation(case_id: str, recommendation_id: str) -> RecommendationIt
 
 
 def find_recommendation(recommendation_id: str) -> RecommendationItem | None:
+    _prune_expired()
     for recommendations in _RECOMMENDATIONS_BY_CASE.values():
         if recommendation_id in recommendations:
             return recommendations[recommendation_id]

@@ -42,9 +42,9 @@ async def refine_case_with_ai(
         data = _parse_json_object(raw)
     except Exception as exc:
         logger.warning(
-            "rag_triage_adapter refine failed case_id=%s error=%s",
+            "rag_triage_adapter refine failed case_id=%s error_type=%s",
             case.case_id,
-            exc,
+            type(exc).__name__,
         )
         return None
 
@@ -117,9 +117,9 @@ async def detect_department_with_ai(
         data = _parse_json_object(raw)
     except Exception as exc:
         logger.warning(
-            "rag_triage_adapter department parse failed case_id=%s error=%s",
+            "rag_triage_adapter department parse failed case_id=%s error_type=%s",
             case.case_id,
-            exc,
+            type(exc).__name__,
         )
         return None
 
@@ -162,33 +162,25 @@ def merge_ai_next_question(case: TriageCase, suggestion: RagTriageSuggestion | N
     attempted_override = bool(case.triage.next_question)
     if case.triage.next_question:
         logger.info(
-            "rag_triage_adapter kept deterministic next_question case_id=%s deterministic=%s ai_question=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s availability=%s red_flags_checked=%s next_question=%s",
+            "rag_triage_adapter kept deterministic next_question case_id=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s",
             case.case_id,
-            case.triage.next_question,
-            ai_question,
             attempted_override,
             case.conversation_state.last_question_key,
             case.conversation_state.consumed_fields,
             case.conversation_state.question_attempts,
             case.conversation_state.field_statuses,
-            case.availability.model_dump(),
             case.patient_input.red_flags_checked,
-            case.triage.next_question,
         )
     else:
         logger.info(
-            "rag_triage_adapter ignored AI next_question case_id=%s deterministic=%s ai_question=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s availability=%s red_flags_checked=%s next_question=%s",
+            "rag_triage_adapter ignored AI next_question case_id=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s",
             case.case_id,
-            case.triage.next_question,
-            ai_question,
             attempted_override,
             case.conversation_state.last_question_key,
             case.conversation_state.consumed_fields,
             case.conversation_state.question_attempts,
             case.conversation_state.field_statuses,
-            case.availability.model_dump(),
             case.patient_input.red_flags_checked,
-            case.triage.next_question,
         )
 
     case.triage.reasons.append("AI 追問建議已記錄，但 next_question 由後端 deterministic state machine 決定。")
@@ -290,7 +282,7 @@ def _semantic_extractions_from_ai(
                 )
             )
         except (TypeError, ValueError):
-            logger.warning("rag_triage_adapter skipped invalid semantic extraction item=%s", item)
+            logger.warning("rag_triage_adapter skipped invalid semantic extraction")
     return extractions
 
 

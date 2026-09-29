@@ -125,13 +125,14 @@ class ChatPerf:
             "ai_reply_provider_called": bool(ai_reply_calls),
             "actual_provider": all_providers or None,
             "actual_model": all_models or None,
-            "AI_RAW_REPLY": ai_reply_raw,
+            "ai_raw_reply_present": bool(ai_reply_raw),
+            "ai_raw_reply_chars": len(ai_reply_raw or ""),
             "ai_reply_parser_invoked": self.ai_reply_parser_invoked,
             "ai_reply_validator_accepted": self.ai_reply_validator_accepted,
             "fallback": self.ai_reply_fallback,
             "fallback_reason": self.ai_reply_fallback_reason,
-            "deterministic_next_question": self.deterministic_next_question,
-            "FINAL_REPLY": self.final_reply,
+            "deterministic_next_question_present": bool(self.deterministic_next_question),
+            "final_reply_present": bool(self.final_reply),
             "provider_calls": self.ai_calls,
         }
 

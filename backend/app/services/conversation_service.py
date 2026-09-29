@@ -25,6 +25,9 @@ _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科別|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
 _MULTI_QUESTION = re.compile(r"[?？].*[?？]|[;；]", re.DOTALL)
+_MULTI_DIMENSION_QUESTION = re.compile(
+    r"(?:，|、|和|以及|並且|同時|另外|還有).{0,80}(?:是否|有沒有|多久|何時|哪裡|什麼|如何|多少|幾次|幾天)"
+)
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
 
@@ -70,7 +73,8 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
     prompt = (
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
         "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
-        "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向和一個聚焦問句；"
+        "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向、一個聚焦問句、一次詢問要求；"
+        "不得用連接詞在同一問句追加第二個臨床面向，即使整句只有一個問號也不可以；"
         "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
         "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
         "若本輪以具體描述回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
@@ -109,6 +113,7 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             if (
                 not isinstance(question, str) or not 4 <= len(question) <= 180
                 or _UNSAFE_QUESTION.search(question) or _MULTI_QUESTION.search(question)
+                or _MULTI_DIMENSION_QUESTION.search(question)
                 or not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent)
             ):
                 question = None
@@ -142,7 +147,7 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             answer_status, answer_confidence,
         )
     except Exception as exc:
-        logger.warning("clarification provider failed case_id=%s error=%s", case.case_id, exc)
+        logger.warning("clarification provider failed case_id=%s error_type=%s", case.case_id, type(exc).__name__)
         return None
 
 

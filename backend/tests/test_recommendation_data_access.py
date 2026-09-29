@@ -37,15 +37,15 @@ class RecommendationDataAccessTest(unittest.TestCase):
 
         self.assertEqual(repo.fetch_available_slots("一般骨科")[0]["doctor"], "測試醫師")
 
-    def test_db_connection_failure_returns_no_slots(self):
+    def test_db_connection_failure_raises_typed_error(self):
         original_fetch_db = db._fetch_available_slots_from_db
         db._fetch_available_slots_from_db = lambda *_, **__: (_ for _ in ()).throw(RuntimeError("db down"))
         try:
-            slots = db.fetch_available_slots("一般骨科", max_slots=2)
+            with self.assertRaises(db.DatabaseUnavailableError):
+                db.fetch_available_slots("一般骨科", max_slots=2)
         finally:
             db._fetch_available_slots_from_db = original_fetch_db
 
-        self.assertEqual(slots, [])
 
     def test_empty_query_result_returns_no_slots(self):
         original_fetch_db = db._fetch_available_slots_from_db

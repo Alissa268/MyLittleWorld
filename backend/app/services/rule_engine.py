@@ -99,8 +99,6 @@ def apply_user_message(
         return case
 
     revision_mode = case.conversation_state.revision_mode
-    before_patient = case.patient_input.model_dump()
-    before_availability = case.availability.model_dump()
     if record_history:
         case.history_records.append(Message(role="user", content=text))
     if semantic_first:
@@ -214,20 +212,16 @@ def apply_user_message(
         case.conversation_state.awaiting_confirmation = False
         case.conversation_state.revision_mode = False
     logger.info(
-        "apply_user_message case_id=%s history_len=%s before_patient=%s after_patient=%s before_availability=%s after_availability=%s red_flags=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s availability=%s",
+        "apply_user_message case_id=%s history_len=%s collected_fields=%s red_flag_count=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s",
         case.case_id,
         len(case.history_records),
-        before_patient,
-        patient.model_dump(),
-        before_availability,
-        availability.model_dump(),
-        patient.red_flags,
+        patient.collected_fields,
+        len(patient.red_flags),
         patient.red_flags_checked,
         case.conversation_state.last_question_key,
         case.conversation_state.consumed_fields,
         case.conversation_state.question_attempts,
         case.conversation_state.field_statuses,
-        availability.model_dump(),
     )
     return case
 
@@ -295,9 +289,9 @@ def evaluate_urgency(case: TriageCase, *, mark_next_question: bool | None = True
     patient.red_flags = red_flags
     if red_flags:
         logger.info(
-            "evaluate_urgency case_id=%s high_urgency red_flags=%s red_flags_checked=%s history_len=%s",
+            "evaluate_urgency case_id=%s high_urgency red_flag_count=%s red_flags_checked=%s history_len=%s",
             case.case_id,
-            red_flags,
+            len(red_flags),
             patient.red_flags_checked,
             len(case.history_records),
         )
@@ -379,14 +373,13 @@ def evaluate_urgency(case: TriageCase, *, mark_next_question: bool | None = True
         reasons.append("急迫症狀篩檢已詢問，但使用者仍無法確認；不得視為已確認陰性。")
 
     logger.info(
-        "evaluate_urgency case_id=%s history_len=%s need_more_info=%s next_question=%s red_flags=%s red_flags_checked=%s availability=%s collected_fields=%s asked_fields=%s consumed_fields=%s last_question_key=%s question_attempts=%s field_statuses=%s",
+        "evaluate_urgency case_id=%s history_len=%s need_more_info=%s has_next_question=%s red_flag_count=%s red_flags_checked=%s collected_fields=%s asked_fields=%s consumed_fields=%s last_question_key=%s question_attempts=%s field_statuses=%s",
         case.case_id,
         len(case.history_records),
         need_more_info,
-        next_question,
-        patient.red_flags,
+        bool(next_question),
+        len(patient.red_flags),
         patient.red_flags_checked,
-        case.availability.model_dump(),
         patient.collected_fields,
         case.conversation_state.asked_fields,
         case.conversation_state.consumed_fields,

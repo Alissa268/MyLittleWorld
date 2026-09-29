@@ -4,18 +4,32 @@ import unittest
 
 from fastapi.testclient import TestClient
 
+from app.db import DatabaseUnavailableError
 from app.main import app
 from app.schemas import DepartmentResult, TriageCase
 from app.services import followup_service
+from app.services import quick_search_service
 from app.services.case_store import save_case
 
 
 class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_fetch_slots = followup_service.fetch_return_visit_slots
+        self.original_fetch_departments = followup_service.fetch_active_departments
+        self.original_fetch_doctors = followup_service.fetch_reference_doctors
+        followup_service.fetch_active_departments = lambda: [
+            {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"},
+            {"dept_id": 8, "parent_dept": "Surgery", "child_dept": "Orthopedics"},
+        ]
+        names = ["原醫師", "回診醫師", "指定日期醫師", "複診醫師", "醫師A", "Original Doctor"]
+        followup_service.fetch_reference_doctors = lambda _department: [
+            {"doctor_id": "101", "name": name} for name in names
+        ]
 
     def tearDown(self):
         followup_service.fetch_return_visit_slots = self.original_fetch_slots
+        followup_service.fetch_active_departments = self.original_fetch_departments
+        followup_service.fetch_reference_doctors = self.original_fetch_doctors
 
     def test_original_doctor_available(self):
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
@@ -75,17 +89,15 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(missing.status_code, 422)
         self.assertEqual(blank.status_code, 422)
 
-    def test_db_unavailable_returns_empty_without_mock_doctor(self):
-        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("db down"))
+    def test_db_unavailable_returns_503_without_mock_doctor(self):
+        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: (_ for _ in ()).throw(DatabaseUnavailableError("db down"))
 
         response = TestClient(app).post(
             "/followup/recommend",
             json={"childDept": "一般骨科", "parentDept": "外科系", "original_doctor": "原醫師"},
         )
 
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["recommendations"], [])
-        self.assertEqual(response.json()["fallback_departments"], [])
+        self.assertEqual(response.status_code, 503)
 
     def test_empty_result(self):
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: []
@@ -287,13 +299,24 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         recommendation = recommend_data["recommendations"][0]
         self.assertEqual(recommendation["doctor"], "回診醫師")
 
-        script_response = client.post(
-            "/generate_script",
-            json={
-                "case_id": recommend_data["case_id"],
-                "recommendation_id": recommendation["recommendation_id"],
-            },
-        )
+        original_fetch = quick_search_service.fetch_quick_search_slot_by_id
+        quick_search_service.fetch_quick_search_slot_by_id = lambda _schedule_id: {
+            "parent_dept": "外科系", "child_dept": "一般骨科", "doctor": "回診醫師",
+            "doctor_id": "101", "schedule_id": recommendation["schedule_id"], "dept_id": "7",
+            "date": recommendation["date"], "session": recommendation["session"],
+            "room": "3201診", "slot": "3201診", "status": "open", "is_placeholder": False,
+            "supports_followup": True, "visit_type": "複診", "specialty_tags": "膝關節",
+        }
+        try:
+            script_response = client.post(
+                "/generate_script",
+                json={
+                    "case_id": recommend_data["case_id"],
+                    "recommendation_id": recommendation["recommendation_id"],
+                },
+            )
+        finally:
+            quick_search_service.fetch_quick_search_slot_by_id = original_fetch
 
         self.assertEqual(script_response.status_code, 200)
         self.assertTrue(script_response.json()["isSuccess"])
@@ -325,7 +348,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
             {
                 "parent_dept": "Surgery",
                 "child_dept": "Orthopedics",
-                "doctor_id": "original-doctor",
+                "doctor_id": "101",
                 "doctor": "Original Doctor",
                 "schedule_id": "followup-1",
                 "date": "2026-07-20",
@@ -336,11 +359,12 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "status": "open",
                 "source": "db",
                 "visit_type": "複診",
+                "dept_id": "8",
             },
             {
                 "parent_dept": "Surgery",
                 "child_dept": "Orthopedics",
-                "doctor_id": "same-dept",
+                "doctor_id": "102",
                 "doctor": "Same Dept Doctor",
                 "schedule_id": "followup-2",
                 "date": "2026-07-21",
@@ -351,6 +375,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "status": "open",
                 "source": "db",
                 "visit_type": "複診",
+                "dept_id": "8",
             },
         ]
 
@@ -375,7 +400,7 @@ def _row(doctor: str, date: str, session: str, source: str = "db"):
     return {
         "parent_dept": "外科系",
         "child_dept": "一般骨科",
-        "doctor_id": doctor,
+        "doctor_id": "101",
         "doctor": doctor,
         "schedule_id": f"s-{doctor}",
         "date": date,
@@ -386,6 +411,7 @@ def _row(doctor: str, date: str, session: str, source: str = "db"):
         "status": "open",
         "source": source,
         "visit_type": "複診",
+        "dept_id": "7",
     }
 
 

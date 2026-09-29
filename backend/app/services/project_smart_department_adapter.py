@@ -110,16 +110,9 @@ async def detect_department_with_project_smart_adapter(
     """
     hints = keyword_department_hints(case)
     logger.info(
-        "project_smart_department_adapter keyword hints case_id=%s hints=%s",
+        "project_smart_department_adapter keyword hints case_id=%s hint_count=%s",
         case.case_id,
-        [
-            {
-                "childDept": hint.childDept,
-                "matched_keywords": list(hint.matched_keywords),
-                "coverage": hint.coverage,
-            }
-            for hint in hints
-        ],
+        len(hints),
     )
 
     if not departments:
@@ -132,18 +125,18 @@ async def detect_department_with_project_smart_adapter(
     requested_result = _requested_department_result(case, departments)
     if requested_result is not None:
         logger.info(
-            "project_smart_department_adapter requested department selected case_id=%s child=%s fallback=false",
+            "project_smart_department_adapter requested department selected case_id=%s dept_id=%s fallback=false",
             case.case_id,
-            requested_result.childDept,
+            requested_result.dept_id,
         )
         return requested_result
 
     pediatric_result = _pediatric_department_result(case, departments)
     if pediatric_result is not None:
         logger.info(
-            "project_smart_department_adapter pediatric rule selected case_id=%s child=%s fallback=false",
+            "project_smart_department_adapter pediatric rule selected case_id=%s dept_id=%s fallback=false",
             case.case_id,
-            pediatric_result.childDept,
+            pediatric_result.dept_id,
         )
         return pediatric_result
 
@@ -205,11 +198,9 @@ async def detect_department_with_project_smart_adapter(
     )
     logger.info(
         "[DEPARTMENT] detection_called=true candidate_count=%s selected_dept_id=%s "
-        "selected_parent=%s selected_child=%s validation_result=adapter_valid failure_reason=null",
+        "validation_result=adapter_valid failure_reason=null",
         len(departments),
         result.dept_id,
-        result.parentDept,
-        result.childDept,
     )
     return result
 

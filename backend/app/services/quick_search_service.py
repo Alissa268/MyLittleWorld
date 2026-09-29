@@ -86,8 +86,12 @@ async def search_quick_schedules(
     return results
 
 
-def revalidate_quick_schedule(recommendation: RecommendationItem) -> RecommendationItem:
-    """Reload one selected quick-search schedule and return DB-authoritative data."""
+def revalidate_schedule(
+    recommendation: RecommendationItem,
+    *,
+    require_followup_evidence: bool = False,
+) -> RecommendationItem:
+    """Reload any selected schedule and return only DB-authoritative identity fields."""
     if not recommendation.schedule_id or not recommendation.doctor_id or recommendation.dept_id is None:
         raise ValueError("班表缺少 schedule_id、doctor_id 或 dept_id。")
     try:
@@ -98,7 +102,7 @@ def revalidate_quick_schedule(recommendation: RecommendationItem) -> Recommendat
     row = fetch_quick_search_slot_by_id(recommendation.schedule_id)
     if row is None:
         raise ValueError("指定班表已不存在或目前不可掛號。")
-    if not bool(row.get("supports_followup")):
+    if require_followup_evidence and not bool(row.get("supports_followup")):
         raise ValueError("指定班表沒有可供複診使用的正式資料依據。")
     if str(row.get("schedule_id") or "").strip() != recommendation.schedule_id:
         raise ValueError("班表識別碼資料不一致。")
@@ -132,6 +136,10 @@ def revalidate_quick_schedule(recommendation: RecommendationItem) -> Recommendat
             "specialty_tags": str(row.get("specialty_tags") or "").strip() or None,
         }
     )
+
+
+def revalidate_quick_schedule(recommendation: RecommendationItem) -> RecommendationItem:
+    return revalidate_schedule(recommendation, require_followup_evidence=True)
 
 
 def _date_to_text(value: Any) -> str:

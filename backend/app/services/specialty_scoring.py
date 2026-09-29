@@ -103,9 +103,9 @@ async def score_doctor_specialties(
         data = _parse_json_object(raw)
     except Exception as exc:
         logger.warning(
-            "specialty_scoring ai failed case_id=%s error=%s",
+            "specialty_scoring ai failed case_id=%s error_type=%s",
             case.case_id,
-            exc,
+            type(exc).__name__,
         )
         return deterministic
 

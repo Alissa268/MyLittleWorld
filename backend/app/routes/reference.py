@@ -21,7 +21,7 @@ async def reference_departments() -> ReferenceDepartmentResponse:
     try:
         rows = await asyncio.to_thread(fetch_reference_departments)
     except Exception as exc:
-        logger.error("Reference department query failed: %s: %s", type(exc).__name__, exc)
+        logger.error("Reference department query failed error_type=%s", type(exc).__name__)
         raise HTTPException(status_code=503, detail="正式科別資料目前無法載入，請稍後重試。") from exc
 
     return ReferenceDepartmentResponse(
@@ -47,10 +47,8 @@ async def reference_doctors(
         rows = await asyncio.to_thread(fetch_reference_doctors, exact_department)
     except Exception as exc:
         logger.error(
-            "Reference doctor query failed for department=%s: %s: %s",
-            exact_department,
+            "Reference doctor query failed error_type=%s",
             type(exc).__name__,
-            exc,
         )
         raise HTTPException(status_code=503, detail="正式醫師資料目前無法載入，請稍後重試。") from exc
 

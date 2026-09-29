@@ -8,7 +8,7 @@ from app.services.ai_reply_generator import build_department_confirmation_reply,
 from app.services.appointment_service import DepartmentResolutionError, detect_department_result
 from app.services.batch_extraction_service import extract_batch_answers
 from app.services.batch_question_service import build_question_batch
-from app.services.case_store import create_case, get_case, save_case
+from app.services.case_store import create_case, get_case, sanitize_untrusted_snapshot, save_case
 from app.services.chat_perf import (
     ai_phase,
     begin_chat_perf,
@@ -138,8 +138,6 @@ async def chat(req: ChatRequest) -> TriageResult:
         ai_suggestion = None
         department_preference_name = None
         has_user_input = False
-        before_patient = case.patient_input.model_dump()
-        before_availability = case.availability.model_dump()
         semantic_first = runtime_ai_available(settings)
         if free_text_request:
             case.conversation_state.free_text_mode = True
@@ -195,12 +193,10 @@ async def chat(req: ChatRequest) -> TriageResult:
                     has_user_input = True
         if has_user_input:
             logger.info(
-                "chat patient updated case_id=%s before_patient=%s after_patient=%s before_availability=%s after_availability=%s last_question_key=%s history_len=%s",
+                "chat patient updated case_id=%s collected_field_count=%s red_flags_checked=%s last_question_key=%s history_len=%s",
                 case.case_id,
-                before_patient,
-                case.patient_input.model_dump(),
-                before_availability,
-                case.availability.model_dump(),
+                len(case.patient_input.collected_fields),
+                case.patient_input.red_flags_checked,
                 case.conversation_state.last_question_key,
                 len(case.history_records),
             )
@@ -298,18 +294,16 @@ async def chat(req: ChatRequest) -> TriageResult:
                 )
             case.triage.next_question = question_batch[0].question if question_batch else None
     logger.info(
-        "chat triage evaluated case_id=%s need_more_info=%s next_question=%s red_flags=%s red_flags_checked=%s availability=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s field_confidence=%s ai_attempted_override=%s",
+        "chat triage evaluated case_id=%s need_more_info=%s has_next_question=%s red_flag_count=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s ai_attempted_override=%s",
         case.case_id,
         case.triage.need_more_info,
-        case.triage.next_question,
-        case.patient_input.red_flags,
+        bool(case.triage.next_question),
+        len(case.patient_input.red_flags),
         case.patient_input.red_flags_checked,
-        case.availability.model_dump(),
         case.conversation_state.last_question_key,
         case.conversation_state.consumed_fields,
         case.conversation_state.question_attempts,
         case.conversation_state.field_statuses,
-        case.conversation_state.field_confidence,
         ai_attempted_override,
     )
 
@@ -371,17 +365,16 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("case_store"):
         save_case(case)
     logger.info(
-        "chat response case_id=%s stage=%s is_complete=%s awaiting_confirmation=%s confirmed=%s history_len=%s next_question=%s last_question_key=%s consumed_fields=%s availability=%s question_attempts=%s field_statuses=%s red_flags_checked=%s ai_attempted_override=%s",
+        "chat response case_id=%s stage=%s is_complete=%s awaiting_confirmation=%s confirmed=%s history_len=%s has_next_question=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s ai_attempted_override=%s",
         case.case_id,
         case.conversation_state.stage,
         case.conversation_state.is_complete,
         case.conversation_state.awaiting_confirmation,
         case.conversation_state.confirmed,
         len(case.history_records),
-        case.triage.next_question,
+        bool(case.triage.next_question),
         case.conversation_state.last_question_key,
         case.conversation_state.consumed_fields,
-        case.availability.model_dump(),
         case.conversation_state.question_attempts,
         case.conversation_state.field_statuses,
         case.patient_input.red_flags_checked,
@@ -524,6 +517,8 @@ def _apply_visit_type(case: TriageCase, requested: VisitType | None) -> None:
 
 def _resolve_case(req: ChatRequest) -> TriageCase:
     supplied = req.triage_case
+    if req.case_id and supplied is not None and supplied.case_id != req.case_id:
+        raise HTTPException(status_code=422, detail="triage_case.case_id 與 request case_id 不一致。")
     lookup_id = req.case_id or (supplied.case_id if supplied else None)
     stored = get_case(lookup_id) if lookup_id else None
     if supplied is not None and stored is not None:
@@ -532,9 +527,13 @@ def _resolve_case(req: ChatRequest) -> TriageCase:
                 status_code=409,
                 detail="triage_case.visit_type 與已保存案件不一致。",
             )
-        if supplied.visit_type is None:
-            supplied.visit_type = stored.visit_type
-    return supplied or stored or create_case(lookup_id)
+    if stored is not None:
+        return stored
+    if supplied is not None:
+        case = sanitize_untrusted_snapshot(supplied)
+        save_case(case)
+        return case
+    return create_case(lookup_id)
 
 
 def _request_has_text_input(req: ChatRequest) -> bool:

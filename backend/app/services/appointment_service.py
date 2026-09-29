@@ -116,19 +116,21 @@ async def recommend_appointments(
     case: TriageCase,
     visit_type: VisitType | str | None = None,
 ) -> RecommendationResult:
+    active_departments = _canonical_departments(fetch_active_departments())
     requested_department = None
     if case.patient_input.requested_department_id is not None or case.patient_input.requested_department_name:
         requested_department = resolve_requested_department(
             case,
-            _canonical_departments(fetch_active_departments()),
+            active_departments,
         )
+        if requested_department is None:
+            raise DepartmentResolutionError("使用者指定科別無法對應唯一的正式科別。")
     department = requested_department or case.department_result
     if department is None:
         raise DepartmentResolutionError("尚無已驗證的正式科別結果；不執行舊版科別猜測。")
-    if department.dept_id is None:
-        department = resolve_department_result(department)
+    department = resolve_department_result(department, active_departments)
     if department is None or department.dept_id is None:
-        raise DepartmentResolutionError("案件科別無法對應唯一的正式 department_id。")
+        raise DepartmentResolutionError("案件科別識別與目前正式科別主資料不一致。")
     case.department_result = department
 
     canonical_visit_type = normalize_visit_type(visit_type or case.visit_type)
@@ -136,16 +138,13 @@ async def recommend_appointments(
     current_taipei_datetime = datetime.now(TAIPEI_ZONE)
     logger.info(
         "[RECOMMEND_INPUT] case_id=%s visit_type=%s department_id=%s "
-        "department_name=%s preferred_dates=%s preferred_days=%s preferred_sessions=%s "
-        "current_taipei_datetime=%s",
+        "has_date_preferences=%s has_day_preferences=%s has_session_preferences=%s",
         case.case_id,
         canonical_visit_type.value,
         department.dept_id,
-        department.childDept,
-        case.availability.preferred_dates,
-        case.availability.preferred_days,
-        case.availability.preferred_sessions,
-        current_taipei_datetime.isoformat(),
+        bool(case.availability.preferred_dates),
+        bool(case.availability.preferred_days),
+        bool(case.availability.preferred_sessions),
     )
     primary_slots = fetch_available_slots(
         department.childDept,
@@ -346,10 +345,8 @@ def _log_department_result(
 ) -> None:
     logger.info(
         "[DEPARTMENT] detection_called=true candidate_count=validated selected_dept_id=%s "
-        "selected_parent=%s selected_child=%s validation_result=%s failure_reason=%s",
+        "validation_result=%s failure_reason=%s",
         result.dept_id,
-        result.parentDept,
-        result.childDept,
         validation_result,
         failure_reason,
     )
@@ -357,7 +354,6 @@ def _log_department_result(
 
 def _canonical_departments(departments: list[dict]) -> list[dict]:
     canonical: list[dict] = []
-    seen: set[int] = set()
     for item in departments:
         try:
             dept_id = int(item.get("dept_id"))
@@ -365,9 +361,8 @@ def _canonical_departments(departments: list[dict]) -> list[dict]:
             continue
         parent = str(item.get("parent_dept") or "").strip()
         child = str(item.get("child_dept") or "").strip()
-        if not child or dept_id in seen:
+        if not child:
             continue
-        seen.add(dept_id)
         canonical.append({"dept_id": dept_id, "parent_dept": parent, "child_dept": child})
     return canonical
 

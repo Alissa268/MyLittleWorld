@@ -14,6 +14,10 @@ _last_db_fallback_reason = ""
 TAIPEI_ZONE = ZoneInfo("Asia/Taipei")
 
 
+class DatabaseUnavailableError(RuntimeError):
+    """Canonical SQL data could not be read; this is not an empty-result condition."""
+
+
 def create_db_connection():
     settings = get_settings()
     conn_parts = [
@@ -64,6 +68,7 @@ def _merge_visit_type(slot: dict[str, Any], visit_type: str) -> None:
 
 
 def fetch_active_departments() -> List[dict]:
+    conn = None
     try:
         conn = create_db_connection()
         cursor = conn.cursor()
@@ -77,21 +82,26 @@ def fetch_active_departments() -> List[dict]:
             ORDER BY dc.name, d.name
         """)
         rows = cursor.fetchall()
-        conn.close()
         return [
             {"dept_id": int(row[0]), "parent_dept": row[1] or "", "child_dept": row[2] or ""}
             for row in rows
             if row[0] is not None and row[2]
         ]
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
-        logger.error("DB active departments unavailable; returning unresolved: %s", exc)
-        return []
+        logger.error("DB active departments unavailable error_type=%s", type(exc).__name__)
+        raise DatabaseUnavailableError("正式科別資料目前無法載入。") from exc
+    finally:
+        if conn is not None:
+            conn.close()
 
 
 def fetch_reference_departments() -> List[dict]:
     """Return canonical department master data without any mock fallback."""
-    conn = create_db_connection()
+    conn = None
     try:
+        conn = create_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT
@@ -111,8 +121,11 @@ def fetch_reference_departments() -> List[dict]:
             for row in cursor.fetchall()
             if str(row[2] or "").strip()
         ]
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式科別資料目前無法載入。") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def fetch_reference_doctors(department_name: str) -> List[dict]:
@@ -121,8 +134,9 @@ def fetch_reference_doctors(department_name: str) -> List[dict]:
     Doctor has no department foreign key in the current schema, so Schedule is used only
     as the association table. There is intentionally no date, status, or visit-type filter.
     """
-    conn = create_db_connection()
+    conn = None
     try:
+        conn = create_db_connection()
         cursor = conn.cursor()
         cursor.execute("""
             SELECT DISTINCT
@@ -137,16 +151,20 @@ def fetch_reference_doctors(department_name: str) -> List[dict]:
             ORDER BY doc.name, doc.doctor_id
         """, department_name)
         doctors = []
-        seen_names = set()
+        seen_ids = set()
         for row in cursor.fetchall():
+            doctor_id = str(row[0])
             name = str(row[1] or "").strip()
-            if not name or name in seen_names:
+            if not name or doctor_id in seen_ids:
                 continue
-            seen_names.add(name)
-            doctors.append({"doctor_id": str(row[0]), "name": name})
+            seen_ids.add(doctor_id)
+            doctors.append({"doctor_id": doctor_id, "name": name})
         return doctors
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式醫師資料目前無法載入。") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
 
 def fetch_return_visit_slots(
@@ -164,8 +182,7 @@ def fetch_return_visit_slots(
     then queried by the selected doctor/department identity, date, and optional session.
     """
     dates = [date.fromisoformat(value) for value in preferred_dates]
-    if not dates:
-        return []
+    search_start = datetime.now(TAIPEI_ZONE).date()
 
     normalized_sessions = {
         _normalize_schedule_session(value)
@@ -183,7 +200,13 @@ def fetch_return_visit_slots(
         identity_clauses.append("AND doc.doctor_id = ?")
         identity_params.append(doctor_id)
 
-    date_placeholders = ", ".join("?" for _ in dates)
+    if dates:
+        date_placeholders = ", ".join("?" for _ in dates)
+        date_clause = f"s.date IN ({date_placeholders})"
+        date_params: list[Any] = list(dates)
+    else:
+        date_clause = "s.date >= ? AND s.date <= DATEADD(day, 20, ?)"
+        date_params = [search_start, search_start]
     session_clause = ""
     session_params: list[Any] = []
     if normalized_sessions:
@@ -230,7 +253,7 @@ def fetch_return_visit_slots(
         JOIN Doctor doc ON s.doctor_id = doc.doctor_id
         JOIN Department dep ON s.dept_id = dep.dept_id
         JOIN DepartmentCategory dc ON dep.category_id = dc.category_id
-        WHERE s.date IN ({date_placeholders})
+        WHERE {date_clause}
             AND doc.is_active = 1
             AND doc.is_placeholder = 0
             AND (
@@ -241,13 +264,17 @@ def fetch_return_visit_slots(
         ORDER BY s.date ASC, s.session ASC, s.schedule_id ASC
     """
 
-    conn = create_db_connection()
+    conn = None
     try:
+        conn = create_db_connection()
         cursor = conn.cursor()
-        cursor.execute(query, *(identity_params + dates + session_params))
+        cursor.execute(query, *(identity_params + date_params + session_params))
         rows = cursor.fetchall()
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式回診班表目前無法查詢。") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     slots = []
     for row in rows:
@@ -281,7 +308,10 @@ def fetch_return_visit_slots(
             continue
         if doctor_id is not None and slot["doctor_id"] != str(doctor_id):
             continue
-        if slot["date"] not in dates:
+        if dates and slot["date"] not in dates:
+            continue
+        slot_date = slot["date"].date() if isinstance(slot["date"], datetime) else slot["date"]
+        if not dates and not (search_start <= slot_date <= search_start + timedelta(days=20)):
             continue
         if normalized_sessions and _normalize_schedule_session(slot["session"]) not in normalized_sessions:
             continue
@@ -395,13 +425,17 @@ def fetch_quick_search_slots(
         ORDER BY doc.name ASC, s.schedule_id ASC
     """
 
-    conn = create_db_connection()
+    conn = None
     try:
+        conn = create_db_connection()
         cursor = conn.cursor()
         cursor.execute(query, QUICK_SEARCH_VISIT_TYPE, department_id, target_date, *aliases)
         rows = cursor.fetchall()
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式班表目前無法查詢。") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     slots = []
     seen = set()
@@ -476,13 +510,17 @@ def fetch_quick_search_slot_by_id(schedule_id: str) -> dict | None:
             )
     """
 
-    conn = create_db_connection()
+    conn = None
     try:
+        conn = create_db_connection()
         cursor = conn.cursor()
         cursor.execute(query, QUICK_SEARCH_VISIT_TYPE, schedule_id)
         rows = cursor.fetchall()
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式班表目前無法重新確認。") from exc
     finally:
-        conn.close()
+        if conn is not None:
+            conn.close()
 
     if not rows:
         return None
@@ -543,10 +581,16 @@ def fetch_available_slots(
                 reason,
             )
             return []
-        logger.info("DB schedule returned no usable slots for department_id=%s name=%s: %s", department_id, department_text, reason)
+        logger.info("DB schedule returned no usable slots department_id=%s reason=%s", department_id, reason)
+    except DatabaseUnavailableError:
+        raise
     except Exception as exc:
-        reason = f"DB query failed: {type(exc).__name__}: {exc}"
-        logger.error("DB schedule query failed for department_id=%s name=%s; returning no slots: %s", department_id, department_text, reason)
+        logger.error(
+            "DB schedule query failed department_id=%s error_type=%s",
+            department_id,
+            type(exc).__name__,
+        )
+        raise DatabaseUnavailableError("正式班表目前無法查詢。") from exc
     return []
 
 
@@ -559,8 +603,7 @@ def _fetch_available_slots_from_db(
     department_id: int | None = None,
 ) -> List[dict]:
     _set_last_db_fallback_reason("")
-    conn = create_db_connection()
-    cursor = conn.cursor()
+    conn = None
 
     visit_type_clause = " AND s.visit_type = ?" if schedule_visit_type else ""
     department_clause = "dep.dept_id = ?" if department_id is not None else "dep.name LIKE ?"
@@ -596,9 +639,16 @@ def _fetch_available_slots_from_db(
     params: list[Any] = [department_param, start_date, search_days, start_date]
     if schedule_visit_type:
         params.append(schedule_visit_type)
-    cursor.execute(query, *params)
-    rows = cursor.fetchall()
-    conn.close()
+    try:
+        conn = create_db_connection()
+        cursor = conn.cursor()
+        cursor.execute(query, *params)
+        rows = cursor.fetchall()
+    except Exception as exc:
+        raise DatabaseUnavailableError("正式班表目前無法查詢。") from exc
+    finally:
+        if conn is not None:
+            conn.close()
     logger.info(
         "[DB_QUERY] department_id=%s date_from=%s date_to=%s visit_type=%s "
         "raw_schedule_count=%s",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import importlib
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -23,17 +24,27 @@ from app.services.specialty_scoring import SpecialtyScore, score_doctor_determin
 class AppointmentRankingTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_fetch_slots = appointment_service.fetch_available_slots
+        self.original_fetch_departments = appointment_service.fetch_active_departments
         self.original_score = appointment_service.score_doctor_specialties
         self.original_adapter_settings = project_smart_department_adapter.get_settings
         self.original_specialty_settings = specialty_scoring.get_settings
         project_smart_department_adapter.get_settings = lambda: _NoAiSettings()
         specialty_scoring.get_settings = lambda: _NoAiSettings()
+        appointment_service.fetch_active_departments = lambda: [
+            {"dept_id": 1298, "parent_dept": "外科系", "child_dept": "一般骨科"},
+            {"dept_id": 1302, "parent_dept": "外科系", "child_dept": "骨科"},
+        ]
+        self.generate_script_route = importlib.import_module("app.routes.generate_script")
+        self.original_revalidate = self.generate_script_route.revalidate_schedule
+        self.generate_script_route.revalidate_schedule = lambda recommendation, **_kwargs: recommendation
 
     def tearDown(self):
         appointment_service.fetch_available_slots = self.original_fetch_slots
+        appointment_service.fetch_active_departments = self.original_fetch_departments
         appointment_service.score_doctor_specialties = self.original_score
         project_smart_department_adapter.get_settings = self.original_adapter_settings
         specialty_scoring.get_settings = self.original_specialty_settings
+        self.generate_script_route.revalidate_schedule = self.original_revalidate
 
     async def test_specialty_first_sorting(self):
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _ranking_rows()

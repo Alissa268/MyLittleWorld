@@ -178,7 +178,7 @@ class Phase2ConversationTest(unittest.TestCase):
                 "triage_case": forged, "visit_type": "initial", "confirmed": True,
             })
         self.assertEqual(response.status_code, 400)
-        self.assertIn("急迫症狀篩檢尚未完成", response.json()["detail"])
+        self.assertIn("尚未完成", response.json()["detail"])
         detector.assert_not_awaited()
         recommender.assert_not_awaited()
 

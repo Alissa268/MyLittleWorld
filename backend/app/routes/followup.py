@@ -1,8 +1,9 @@
 from fastapi import APIRouter, HTTPException
 
-from app.schemas import DepartmentResult, FollowupRecommendRequest, FollowupRecommendResponse, VisitType
+from app.db import DatabaseUnavailableError
+from app.schemas import FollowupRecommendRequest, FollowupRecommendResponse, VisitType
 from app.services.case_store import create_case, get_case, save_case, save_recommendations
-from app.services.followup_service import recommend_followup
+from app.services.followup_service import ReturnVisitResolutionError, recommend_followup
 
 router = APIRouter(prefix="/followup", tags=["followup"])
 
@@ -17,17 +18,18 @@ async def followup_recommend(req: FollowupRecommendRequest) -> FollowupRecommend
             raise HTTPException(status_code=409, detail="此 case_id 不是回診流程，不能查詢回診班表。")
     else:
         case = create_case()
+    working_case = case.model_copy(deep=True)
 
     child = (req.childDept or "").strip()
     parent = (req.parentDept or "").strip()
-    if not child and case.department_result:
-        child = case.department_result.childDept
-        parent = parent or case.department_result.parentDept
-    dept_id = req.dept_id or (case.department_result.dept_id if case.department_result else None)
+    if not child and working_case.department_result:
+        child = working_case.department_result.childDept
+        parent = parent or working_case.department_result.parentDept
+    dept_id = req.dept_id or (working_case.department_result.dept_id if working_case.department_result else None)
 
     request = req.model_copy(
         update={
-            "case_id": case.case_id,
+            "case_id": working_case.case_id,
             "childDept": child,
             "parentDept": parent or None,
             "dept_id": dept_id,
@@ -37,17 +39,16 @@ async def followup_recommend(req: FollowupRecommendRequest) -> FollowupRecommend
     if not request.childDept:
         raise HTTPException(status_code=422, detail="請提供 childDept 或有效 case_id。")
 
-    case.visit_type = VisitType.RETURN_VISIT
-    case.department_result = DepartmentResult(
-        dept_id=request.dept_id,
-        parentDept=request.parentDept or "",
-        childDept=request.childDept,
-        confidence=1.0,
-        reason=["回診科別由使用者指定"],
-    )
-    result = await recommend_followup(request)
-    case.department_result = result.department
-    case.recommendation_generated = True
-    save_case(case)
-    save_recommendations(result.case_id, result.recommendations)
+    try:
+        result = await recommend_followup(request)
+    except ReturnVisitResolutionError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="正式回診資料目前無法查詢，請稍後重試。") from exc
+    if result.recommendations:
+        working_case.visit_type = VisitType.RETURN_VISIT
+        working_case.department_result = result.department
+        working_case.recommendation_generated = True
+        save_case(working_case)
+        save_recommendations(result.case_id, result.recommendations)
     return result

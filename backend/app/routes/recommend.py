@@ -1,6 +1,7 @@
 from fastapi import APIRouter, HTTPException
 
 from app.config import get_settings
+from app.db import DatabaseUnavailableError
 from app.schemas import ConversationStage, RecommendRequest, RecommendationResult, VisitType
 from app.services.appointment_service import (
     DepartmentResolutionError,
@@ -9,7 +10,7 @@ from app.services.appointment_service import (
     recommend_appointments,
 )
 from app.services.ai_reply_generator import build_no_schedule_message
-from app.services.case_store import create_case, get_case, save_case, save_recommendation_result
+from app.services.case_store import create_case, get_case, sanitize_untrusted_snapshot, save_case, save_recommendation_result
 from app.services.conversation_service import safety_screen_resolved
 from app.services.department_preference_service import resolve_requested_department
 from app.services.ai_service import runtime_ai_available
@@ -22,6 +23,8 @@ router = APIRouter(prefix="/recommend", tags=["recommend"])
 @router.post("", response_model=RecommendationResult)
 async def recommend(req: RecommendRequest) -> RecommendationResult:
     supplied_case = req.triage_case
+    if req.case_id and supplied_case is not None and supplied_case.case_id != req.case_id:
+        raise HTTPException(status_code=422, detail="triage_case.case_id 與 request case_id 不一致。")
     lookup_id = req.case_id or (supplied_case.case_id if supplied_case else None)
     stored_case = get_case(lookup_id) if lookup_id else None
     if supplied_case is not None and stored_case is not None:
@@ -31,9 +34,7 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
             and supplied_case.visit_type != stored_case.visit_type
         ):
             raise HTTPException(status_code=409, detail="triage_case.visit_type 與已保存案件不一致。")
-        if supplied_case.visit_type is None:
-            supplied_case.visit_type = stored_case.visit_type
-    case = supplied_case or stored_case
+    case = stored_case or (sanitize_untrusted_snapshot(supplied_case) if supplied_case else None)
     if case is None and req.userQuery and req.userQuery.strip():
         case = create_case(req.case_id)
         semantic_first = runtime_ai_available(get_settings())
@@ -45,6 +46,10 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
 
     if case is None:
         raise HTTPException(status_code=400, detail="請提供 triage_case、case_id 或 userQuery。")
+
+    # Recommendation is transactional with respect to the in-memory workflow store.
+    # Validation and DB work happen on a detached copy; only success is committed.
+    case = case.model_copy(deep=True)
 
     request_visit_type = normalize_visit_type(req.visit_type) if req.visit_type is not None else None
     if case.visit_type is not None and request_visit_type is not None and case.visit_type != request_visit_type:
@@ -93,19 +98,21 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
     ):
         raise HTTPException(status_code=422, detail="科別候選尚未收斂為已驗證結果。")
 
-    case.confirmed = True
-    case.conversation_state.stage = ConversationStage.RECOMMENDING
-    case.conversation_state.confirmed = True
-    case.conversation_state.awaiting_confirmation = False
-
     try:
         result = await recommend_appointments(case, visit_type=effective_visit_type)
     except DepartmentResolutionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
-    case.recommendation_generated = True
-    save_case(case)
-    save_recommendation_result(result)
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="正式資料目前無法查詢，請稍後重試。") from exc
 
     if not result.recommendations.specialty_first or not result.recommendations.time_first:
         raise HTTPException(status_code=503, detail=build_no_schedule_message(case))
+
+    case.confirmed = True
+    case.conversation_state.stage = ConversationStage.RECOMMENDING
+    case.conversation_state.confirmed = True
+    case.conversation_state.awaiting_confirmation = False
+    case.recommendation_generated = True
+    save_case(case)
+    save_recommendation_result(result)
     return result

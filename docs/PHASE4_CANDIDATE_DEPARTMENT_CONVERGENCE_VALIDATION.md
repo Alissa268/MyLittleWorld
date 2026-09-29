@@ -59,3 +59,43 @@ The answer fields are validated independently of a proposed follow-up question. 
 `backend/tests/test_phase41_clarification.py` adds the exact two-turn hematuria conversation with mocked providers: the first turn has a resolved `dept_id=1242` and pending `severity`; the second includes "有血絲", burning on urination, and explicit red-flag denial. It verifies that `clarification_evidence["severity"]` records the grounded phrase, pending clears, the negative safety screen and accompanying symptom coexist, the department result remains 1242, and the old generic reply is absent. Additional cases cover partial targeted follow-up, wrong intent, ungrounded text, low/boolean confidence, duplicate or compound questions, independently accepted answer fields, and a nonduplicate focused retry after new accepted evidence. Existing Phase 2.3 and Phase 4 tests remain passing.
 
 Full Backend run from `backend` with `CEREBRAS_API_KEY` empty for this unit-test process: `python -m pytest -q` -> **476 passed, 8 warnings, 308 subtests passed**. The warnings are FastAPI/TestClient deprecations and the local `.pytest_cache` write warning. No real provider, Android, DB, KB, TTAS, urgency, or doctor scoring changes were made. Phase 5 was not started.
+
+## Phase 4.2: Backend trust boundary and reliability hardening
+
+### Server authority and transactional recommendation
+
+For an existing `case_id`, `/chat` and `/recommend` now always use the server-stored case. A supplied `triage_case` with a different request `case_id` is rejected. When no stored case exists, compatibility snapshots have all server-owned workflow, safety, confirmation, candidate, and department conclusions reset before use; they cannot self-assert completion. `/recommend` performs work on a deep copy and commits stage, `recommendation_generated`, the case, and recommendation records only after canonical validation and a nonempty successful recommendation. DB failure, invalid department, and empty schedules leave the stored case unchanged.
+
+### Canonical DB validation and outage semantics
+
+Every normal recommendation re-fetches the live Department master and requires one exact `dept_id` + `parentDept` + `childDept` tuple before any Schedule query. Invalid IDs and name mismatches raise `DepartmentResolutionError`; no fuzzy or legacy fallback runs. `DatabaseUnavailableError` now distinguishes connection/query failure from a successful zero-row query. Routes translate unavailable Department, Doctor, and Schedule data to HTTP 503, while genuine zero rows remain normal empty-data behavior where the endpoint contract permits it.
+
+Return visits validate one exact live Department and one canonical active, non-placeholder Doctor relationship before schedule lookup. A supplied doctor ID must match both doctor name and department; name-only input must have one exact relationship. The response claims master-data validation only after this succeeds. With no preferred date, production queries only the next 21 calendar days, including today; explicit dates remain exact and past rows are not accepted by the default window.
+
+### Schedule selection and resource safety
+
+Quick Search, normal recommendations, and follow-up recommendations with a real `schedule_id` use one generalized schedule revalidation path immediately before `build_navigation_script()`. It verifies schedule, doctor, department, date, normalized session, active/non-placeholder doctor, and current availability. Changed or unavailable data returns 409; DB failure returns 503. The script uses the reloaded DB-authoritative row.
+
+All direct `create_db_connection()` call sites in `app/db.py` now close in `finally`, including connection/cursor execution/fetch failures. Reference doctor deduplication uses `doctor_id`, preserving distinct same-name doctors while collapsing repeated Schedule associations for one ID.
+
+### Privacy, TTL, and clarification robustness
+
+Routine INFO logs were reduced to operational metadata: case IDs, field names, counts, booleans, provider/model/latency, and exception types. Patient messages, symptom/body-part/red-flag values, availability values, semantic normalized values, grounded source text, AI questions/replies, keyword matches, and raw medical payloads are no longer logged. Chat performance traces retain only presence/length metadata for generated content.
+
+The prototype case store now has an opportunistic two-hour monotonic TTL. Create/get/save operations prune expired cases; recommendations expire with their case; successful access touches the case and extends its lifetime. This remains a single-process, single-worker store with no background thread or persistence.
+
+Phase 4.1 grounding remains unchanged: a pending intent clears only through an exact grounded answer with matching intent/status and valid confidence. The planner contract now explicitly requires one intent, one information dimension, and one interrogative request. Backend additionally rejects obvious conjunction-style multi-dimension questions while retaining duplicate/history/same-intent/safety checks. The hematuria `有血絲` regression remains passing.
+
+### Phase 4.2 tests and remaining limits
+
+`backend/tests/test_phase42_backend_hardening.py` covers forged stored-state overrides, mismatched IDs, canonical department checks before Schedule access, commit-after-success, return-visit Department/Doctor identity, DB unavailable versus zero rows, schedule revalidation, connection cleanup on success/execute/fetch failure, same-name doctors, log privacy, TTL/touch behavior, and conjunction-style clarification rejection. Existing tests were updated only where prior expectations intentionally treated an invalid department or DB outage as an empty result, or where fixtures now need explicit canonical DB truth.
+
+Final command from `backend` with runtime AI disabled for unit tests:
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+$env:PYTHONPATH='.'
+python -m pytest -q --tb=short -p no:cacheprovider
+```
+
+Result: **492 passed, 8 warnings, 308 subtests passed**. Warnings are existing FastAPI/Starlette deprecations plus the local `.pytest_cache` permission warning. Known limitations remain: the in-memory store is opportunistically pruned and not shared across workers; Doctor-to-Department identity still relies on the existing Schedule association because Doctor has no Department foreign key; no authentication redesign or persistent workflow store was introduced. Android, SQL schema/data, official KB evidence, TTAS/red-flag rules, urgency logic, and Phase 6 doctor scoring behavior were not changed. Phase 5 was not started.

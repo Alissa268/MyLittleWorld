@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+import importlib
 from datetime import date, timedelta
 from fastapi.testclient import TestClient
 
@@ -9,7 +10,7 @@ from app.main import app
 from app.schemas import DepartmentResult, RecommendationItem, TriageCase, VisitType
 from app.routes import chat as chat_route
 from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter
-from app.services.appointment_service import detect_department_result, recommend_appointments
+from app.services.appointment_service import DepartmentResolutionError, detect_department_result, recommend_appointments
 from app.services.case_store import get_case
 from app.services.rule_engine import apply_user_message, evaluate_urgency, next_question_for
 from app.services.script_service import build_navigation_script
@@ -27,6 +28,8 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         appointment_service.fetch_active_departments = lambda: [
             {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"},
             {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
+            {"dept_id": 9, "parent_dept": "一般內科", "child_dept": "心臟內科"},
+            {"dept_id": 1333, "parent_dept": "五官科", "child_dept": "耳科"},
         ]
         department_preference_service.fetch_active_departments = appointment_service.fetch_active_departments
 
@@ -43,6 +46,9 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             return kwargs["fallback_reply"]
 
         chat_route.generate_triage_reply = deterministic_reply
+        self.generate_script_route = importlib.import_module("app.routes.generate_script")
+        self.original_revalidate = self.generate_script_route.revalidate_schedule
+        self.generate_script_route.revalidate_schedule = lambda recommendation, **_kwargs: recommendation
 
     def tearDown(self):
         appointment_service.fetch_active_departments = self.original_departments
@@ -52,6 +58,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         project_smart_department_adapter.complete_prompt = self.original_project_complete
         project_smart_department_adapter.get_settings = self.original_project_settings
         chat_route.generate_triage_reply = self.original_generate_triage_reply
+        self.generate_script_route.revalidate_schedule = self.original_revalidate
 
     async def test_knee_pain_triage_case(self):
         case = TriageCase(case_id="case_knee")
@@ -166,11 +173,11 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         original_create = db.create_db_connection
         db.create_db_connection = lambda: (_ for _ in ()).throw(RuntimeError("db down"))
         try:
-            slots = db.fetch_available_slots("一般骨科", max_slots=2)
+            with self.assertRaises(db.DatabaseUnavailableError):
+                db.fetch_available_slots("一般骨科", max_slots=2)
         finally:
             db.create_db_connection = original_create
 
-        self.assertEqual(slots, [])
 
     async def test_db_empty_slots_return_no_schedule_rows(self):
         original_fetch_db = db._fetch_available_slots_from_db
@@ -455,13 +462,12 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
                 childDept="不存在科",
                 confidence=1.0,
             )
-            result = await recommend_appointments(case)
+            with self.assertRaises(DepartmentResolutionError):
+                await recommend_appointments(case)
         finally:
             appointment_service.fetch_available_slots = original_fetch
 
-        self.assertEqual(captured, [999999])
-        self.assertEqual(result.recommendations.specialty_first, [])
-        self.assertEqual(result.fallback_departments, [])
+        self.assertEqual(captured, [])
 
     async def test_script_template_applies_recommendation(self):
         item = RecommendationItem(

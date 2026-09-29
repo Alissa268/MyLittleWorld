@@ -15,6 +15,7 @@ from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCas
 from app.services import department_reasoning_service as reasoning
 from app.services import department_preference_service
 from app.services.appointment_service import DepartmentResolutionError
+from app.services.case_store import save_case
 from app.services.conversation_service import ClarificationSuggestion, advance_conversation, request_clarification
 from app.services.department_knowledge import resolve_department_names
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
@@ -280,6 +281,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.clarification_status = "safety_check"
         case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
         case.conversation_state.free_text_mode = True
+        save_case(case)
         result = self.no_ai_chat("不太確定", triage_case=case.model_dump(mode="json"))
         self.assertEqual(result["conversation_state"]["clarification_status"], "safety_check")
         self.assertEqual(result["conversation_state"]["last_question_key"], RED_FLAG_QUESTION_KEY)
@@ -367,6 +369,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.confirmed = True
         case.triage.need_more_info = False
         case.confirmed = True
+        save_case(case)
         detector = AsyncMock()
         with patch.object(recommend_route, "detect_department_result", new=detector):
             response = TestClient(app).post("/recommend", json={"triage_case": case.model_dump(mode="json"), "visit_type": "initial"})
@@ -384,6 +387,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.confirmed = True
         case.triage.need_more_info = False
         case.confirmed = True
+        save_case(case)
         explicit = DepartmentResult(dept_id=101, parentDept="測試系", childDept="測試甲科", reason=["使用者明確指定"])
         recommender = AsyncMock(side_effect=DepartmentResolutionError("test stop"))
         with patch.object(recommend_route, "resolve_requested_department", return_value=explicit) as validator, patch.object(

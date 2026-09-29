@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import Message, TriageCase
 from app.services import batch_extraction_service, rag_triage_adapter
+from app.services.case_store import save_case
 
 
 chat_route = importlib.import_module("app.routes.chat")
@@ -159,6 +160,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         case.patient_input.body_part = "膝"
         case.patient_input.duration = "3天"
         case.conversation_state.awaiting_confirmation = True
+        save_case(case)
         result, _ = self.post_text(
             "我想把症狀改成頭暈",
             {"semantic_extractions": [extraction("symptom", "頭暈", "頭暈")]},
