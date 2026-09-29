@@ -90,31 +90,67 @@ def validate_department_knowledge(sources: list[dict], records: list[dict]) -> N
 
 
 def lookup_concept(concept: str, records: list[dict]) -> list[dict]:
-    """Exact concept lookup with source precedence; returns evidence, never a chosen department."""
+    """Keep each department's best evidence for an exact concept, not a chosen department."""
     key = normalize_concept(concept)
     if not key:
         return []
     matches = [record for record in records if normalize_concept(record["concept"]) == key]
-    if not matches:
-        return []
-    best_priority = min(record["source_priority"] for record in matches)
-    selected = [record for record in matches if record["source_priority"] == best_priority]
-    unique = {}
-    for record in selected:
-        unique.setdefault(normalize_concept(record["department_name"]), record)
-    return sorted(unique.values(), key=lambda record: record["department_name"])
+    best_by_department = {}
+    for record in sorted(matches, key=lambda item: (item["source_priority"], item["source_id"])):
+        best_by_department.setdefault(normalize_concept(record["department_name"]), record)
+    return sorted(best_by_department.values(), key=lambda record: record["department_name"])
+
+
+def canonical_department_id(value: object) -> int | None:
+    """Accept only positive integer IDs or ASCII decimal strings from the reference API."""
+    if type(value) is int:
+        return value if value > 0 else None
+    if isinstance(value, str) and re.fullmatch(r"[0-9]+", value):
+        try:
+            parsed = int(value)
+        except ValueError:
+            return None
+        return parsed if parsed > 0 else None
+    return None
+
+
+def resolve_department_names(records: list[dict], db_departments: list[dict]) -> list[dict]:
+    """Build separate, exact-only live DB resolution metadata; never alter evidence records."""
+    resolutions = []
+    for name in sorted({record["department_name"] for record in records}):
+        matches = [row for row in db_departments if _db_child_name(row) == name]
+        entry = {"knowledge_department_name": name}
+        if not matches:
+            entry.update(status="unresolved", reason="no_exact_live_db_child_name")
+        elif len(matches) != 1:
+            entry.update(status="unresolved", reason="duplicate_exact_live_db_child_name")
+        else:
+            row = matches[0]
+            dept_id = canonical_department_id(row.get("dept_id"))
+            parent = row.get("parentDept", row.get("parent_dept"))
+            if dept_id is None:
+                entry.update(status="unresolved", reason="invalid_live_db_dept_id")
+            elif not isinstance(parent, str) or not parent.strip():
+                entry.update(status="unresolved", reason="missing_live_db_parent_name")
+            else:
+                entry.update(
+                    status="resolved", db_dept_id=dept_id, db_parent_dept=parent,
+                    db_child_dept=name, resolution_method="exact_live_db_name",
+                )
+        resolutions.append(entry)
+    return resolutions
 
 
 def exact_db_department_ids(records: list[dict], db_departments: list[dict]) -> dict[str, int | None]:
-    """Report exact, unique SQL name matches without mutating KB or inventing IDs."""
-    result = {}
-    for name in {record["department_name"] for record in records}:
-        matches = [row for row in db_departments if row.get("child_dept") == name]
-        ids = {row.get("dept_id") for row in matches}
-        result[name] = next(iter(ids)) if len(matches) == 1 and len(ids) == 1 and all(
-            type(value) is int and value > 0 for value in ids
-        ) else None
-    return result
+    """Compatibility helper returning only IDs from exact-only resolution metadata."""
+    return {
+        entry["knowledge_department_name"]: entry.get("db_dept_id")
+        for entry in resolve_department_names(records, db_departments)
+    }
+
+
+def _db_child_name(row: dict) -> object:
+    return row.get("childDept", row.get("child_dept"))
 
 
 def _has_fields(item: dict, fields: tuple[str, ...]) -> bool:

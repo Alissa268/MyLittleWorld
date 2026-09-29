@@ -20,6 +20,35 @@
 `README.md`、`CONTRIBUTING.md` 與工作區上一層的 `修改計畫.md` 保留。沒有修改 Android、DB schema、SQL data、TTAS、doctor scoring 或 AI prompt。
 此工作副本的 Git metadata 不可用，故無法獨立核對指定基準 commit；沒有 commit 或 push。
 
+## Phase 3.1 - Live DB Department Resolution
+
+使用者指定本次基準 commit：`d251b33211bc9071a7c51b5ff3f414d523140c4f`。2026-09-29 透過 310 正式 Backend 的唯讀 `GET https://school.tail11a728.ts.net/reference/departments` 驗證 live SQL `Department` master；沒有從本機連 SQL、要求或記錄密碼，也沒有新增 endpoint。Tailscale URL 只是 DB transport，**不是醫療 evidence source**，不進 `sources.json`。
+
+| 本次修改檔案 | 目的 |
+| --- | --- |
+| `docs/PHASE3_310_DEPARTMENT_INVENTORY.json` | 唯讀 API 原樣回傳的 133 筆 `dept_id`、`parentDept`、`childDept` 稽核快照；不是可取代 live DB 的正式主檔，也不由 routing 載入。 |
+| `backend/app/services/department_knowledge.py` | `dept_id` 安全轉換；新增獨立 exact-only resolution metadata；修正 `lookup_concept()` 為每個 department 分別保留最佳來源，不跨科刪除官方 evidence。 |
+| `backend/tests/test_department_knowledge.py` | API 字串／整數 ID 與拒絕案例、snapshot exact mapping、近似名稱／重複名稱、跨科保留與同科優先序。 |
+| `docs/PHASE3_OFFICIAL_DEPARTMENT_KB_VALIDATION.md` | 記錄 live inventory、resolved／unresolved 映射與完整測試。 |
+
+完整 live inventory 見 [310 科別快照](PHASE3_310_DEPARTMENT_INVENTORY.json)：共 **133 筆**。全部欄位與 GET 結果逐筆一致；本階段不更動醫療 evidence 記錄的 `department_resolution`，而由 `resolve_department_names()` 以 live row 產生獨立映射。字串 `dept_id` 只接受 ASCII 十進位正整數並轉為 int；Python 正整數亦可。布林、空值、空字串、浮點、非數字、0 與負值均拒絕。僅 exact `knowledge_department_name == childDept`、唯一 row、有效 ID 及非空 parent 才 resolved。
+最後另以新 helper 對 fresh live GET 直接運算，仍得到 133 筆、5 resolved／5 unresolved；與快照測試一致。
+
+| KB 科名 | 狀態 | `db_dept_id` | `parentDept` | `childDept`／原因 |
+| --- | --- | ---: | --- | --- |
+| 一般內科 | resolved | 1232 | 內科 | 一般內科 |
+| 感染科 | resolved | 1234 | 內科 | 感染科 |
+| 胃腸肝膽科 | resolved | 1239 | 內科 | 胃腸肝膽科 |
+| 腎臟科 | resolved | 1242 | 內科 | 腎臟科 |
+| 血液腫瘤科 | resolved | 1240 | 內科 | 血液腫瘤科 |
+| 內分泌新陳代謝科 | unresolved | - | - | `no_exact_live_db_child_name`（live 有「新陳代謝科」，不推測別名） |
+| 心臟科 | unresolved | - | - | `no_exact_live_db_child_name`（live 有「心臟內科」，不推測別名） |
+| 耳鼻喉頭頸部 | unresolved | - | - | `no_exact_live_db_child_name`（live 有「耳科」，不推測別名） |
+| 過敏免疫風濕科 | unresolved | - | - | `no_exact_live_db_child_name`（live 有「過敏免疫風濕」，不推測別名） |
+| 骨科部 | unresolved | - | - | `no_exact_live_db_child_name`（live 有「一般骨科」，不推測別名） |
+
+結果：**exact unique 5、no exact 5、KB ambiguous 0**。live master 本身另有同名 `childDept=胃腫瘤醫學中心聯合門診` 兩筆（1350／內科、1289／外科系），雖不在本 KB，但 duplicate 測試保證這類名稱會標 `duplicate_exact_live_db_child_name`，不任選其中一筆。沒有 fuzzy matching、沒有把 `dept_id` 寫進 evidence record，也沒有把映射接進 `/chat`、`detect_department_result()` 或推薦流程。
+
 ## 官方來源與科別
 
 | Source ID／優先級 | 實際核對的官方頁面 | 本 KB 對應的官方科名 | 筆數 |
@@ -28,11 +57,11 @@
 | `vghtpe_doctor_specialty_search_2026`／2 | [臺北榮總「醫師及專長查詢」](https://www.vghtpe.gov.tw/docsearch.action)；僅取頁面明列的科部與專長關鍵字。 | 骨科部、耳鼻喉頭頸部 | 2 |
 | `vghtc_symptom_query_2026`／3 | [臺中榮總「症狀查詢」](https://www.vghtc.gov.tw/SymptomQuery/605)；入口可確認，但動態查詢結果未能逐項核對。 | **無 production fallback 記錄** | 0 |
 
-臺中榮總只可補北榮沒有的同項資料。現在沒有可核對的臺中「症狀 → 科別」結果，因此不把其他中榮衛教或醫師專長文章冒充症狀查詢資料，也不建立 70/30 等數學權重。`lookup_concept()` 對相同概念只保留最優先來源；測試以合成臺中 fixture 驗證 fallback 標記與北榮優先，合成資料不進 KB。證據文字每筆只保留短片段，沒有複製網頁全文。
+臺中榮總只可補北榮沒有的同科同概念資料。現在沒有可核對的臺中「症狀 → 科別」結果，因此不把其他中榮衛教或醫師專長文章冒充症狀查詢資料，也不建立 70/30 等數學權重。Phase 3.1 起，`lookup_concept()` 對**同一 department＋concept**保留較高優先來源；**不同 department** 的同概念官方證據都保留，不預先收斂候選。測試以合成臺中 fixture 驗證 fallback 標記與同科北榮優先，合成資料不進 KB。證據文字每筆只保留短片段，沒有複製網頁全文。
 
 ## 科別映射狀態
 
-唯讀 SQL `Department` master 查詢嘗試失敗（ODBC TCP 連線拒絕），故無法在此環境證實任何目前有效的 `dept_id`。現有 `android/app/src/main/assets/vgh_departments.json` 僅作本地名稱對照，不等於 live SQL：一般內科、胃腸肝膽科、腎臟科、血液腫瘤科、感染科為字面完全相同；心臟科／心臟內科、內分泌新陳代謝科／新陳代謝科、過敏免疫風濕科／過敏免疫風濕、骨科部／一般骨科及耳鼻喉頭頸部／耳科等只有近似或不同層級，**沒有推測別名對應**。即使本地資產同名，21 筆 KB 記錄仍一律標 `department_resolution=unresolved`，沒有填造 ID，也不得直接作為可掛號科別。`exact_db_department_ids()` 只有在外部提供正式 SQL row 且名稱唯一、ID 為正整數時才回報對應；不會改寫 KB 或啟動推薦。
+Phase 3 建立時直接 SQL 連線失敗，因此 21 筆 KB evidence 記錄一律標 `department_resolution=unresolved`。Phase 3.1 已透過 live 310 Backend 唯讀 API 驗證正式 master，取得上表 5 個 exact 映射；獨立 resolution layer 不改寫 evidence 的歷史標記。Android 資產**沒有**參與本次映射。`exact_db_department_ids()` 接受 API-style 數字字串並只回唯一、有效、exact 名稱的 canonical int；不可為近似名稱猜 ID。
 
 ## 舊詞庫逐科審核
 
@@ -67,6 +96,8 @@ pytest -q
 
 最後一次完整 Backend suite 結果：`425 passed, 8 warnings, 285 subtests passed in 16.74s`。警告為既有 FastAPI／Starlette deprecation 與 pytest cache 權限。Android 未修改，不執行 Android build。
 
+Phase 3.1 在 `New_Android_Backend/backend` 再執行同一 `pytest -q`：`444 passed, 8 warnings, 285 subtests passed in 9.65s`。Phase 3 provenance validation 全數保留，新增 ID 型別、live inventory exact mapping、duplicate 防護與跨科證據保留的測試。Android 未修改，未執行 Android build。
+
 ## 邊界
 
-未建立 Phase 4 candidate convergence 或 AI 依 KB 正式選科；未進行 Phase 5 TTAS、Phase 6 doctor scoring 或 Phase 7/8 Android 工作。此 KB 是公開頁面結構化索引，**不宣稱已做臨床驗證**。正式 SQL 科別映射與動態中榮查詢的逐筆證據需要可用來源後再審核，不能由相似名稱、舊詞庫或 LLM 補猜。
+未建立 Phase 4 candidate convergence 或 AI 依 KB 正式選科；未進行 Phase 5 TTAS、Phase 6 doctor scoring 或 Phase 7/8 Android 工作。此 KB 是公開頁面結構化索引，**不宣稱已做臨床驗證**。尚未 exact match 的 5 個科名與動態中榮查詢的逐筆證據仍需另行審核，不能由相似名稱、舊詞庫或 LLM 補猜。
