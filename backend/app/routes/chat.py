@@ -19,9 +19,11 @@ from app.services.chat_perf import (
 from app.services.conversation_service import (
     UNRESOLVED_REPLY,
     advance_conversation,
+    capture_pending_answer,
     request_clarification,
     safety_screen_resolved,
 )
+from app.services.department_reasoning_service import reason_about_departments
 from app.services.department_preference_service import capture_department_preference
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
@@ -210,25 +212,40 @@ async def chat(req: ChatRequest) -> TriageResult:
                     department_preference_name = preference.name
 
     with perf.measure("rule_engine"):
-        case.triage = evaluate_urgency(
-            case, mark_next_question=None if conversational_mode else not batch_mode,
-        )
+        confirmation_only = conversational_mode and not has_user_input and case.conversation_state.is_complete
+        if not confirmation_only:
+            case.triage = evaluate_urgency(
+                case, mark_next_question=None if conversational_mode else not batch_mode,
+            )
         ai_attempted_override = (
             False if conversational_mode else merge_ai_next_question(case, ai_suggestion)
         )
-        if conversational_mode:
+        if confirmation_only:
+            pass
+        elif conversational_mode:
             if case.patient_input.red_flags:
                 if not safety_check_turn:
                     case.conversation_state.turn_count += len(user_text_parts)
                 case.conversation_state.clarification_status = "urgent"
                 case.conversation_state.is_complete = True
             else:
-                with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
-                    suggestion = (
-                        await request_clarification(case, user_text_parts)
-                        if has_user_input and semantic_ai_allowed
-                        else None
-                    )
+                suggestion = None
+                pending_before_turn = case.conversation_state.pending_clarification_intent
+                if has_user_input and semantic_ai_allowed and pending_before_turn:
+                    with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
+                        suggestion = await request_clarification(case, user_text_parts)
+                    capture_pending_answer(case, suggestion, user_text_parts)
+                if has_user_input and not safety_check_turn:
+                    with perf.measure("department_detection"), ai_phase("department_detection"):
+                        await reason_about_departments(case)
+                if has_user_input and semantic_ai_allowed and (
+                    not pending_before_turn
+                    or (case.conversation_state.pending_clarification_intent is None
+                        and case.conversation_state.department_next_question_intent
+                        and (suggestion is None or suggestion.intent != case.conversation_state.department_next_question_intent))
+                ):
+                    with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
+                        suggestion = await request_clarification(case, user_text_parts)
                 advance_conversation(
                     case,
                     suggestion,
@@ -278,7 +295,9 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("department_detection"), ai_phase("department_detection"):
         department_status = case.conversation_state.field_statuses.get("department")
         if (
-            not case.triage.need_more_info
+            not conversational_mode
+            and case.conversation_state.turn_count == 0
+            and not case.triage.need_more_info
             and safety_screen_resolved(case)
             and case.department_result is None
             and department_status != "unresolved_final"
@@ -299,7 +318,13 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.conversation_state.awaiting_confirmation = False
             case.conversation_state.confirmed = False
             case.conversation_state.is_complete = False
-        elif case.triage.need_more_info or not safety_screen_resolved(case):
+        elif (
+            case.triage.need_more_info
+            or not safety_screen_resolved(case)
+            or ((conversational_mode or case.conversation_state.turn_count > 0) and (
+                case.conversation_state.department_status != "resolved" or case.department_result is None
+            ))
+        ):
             case.confirmed = False
             case.conversation_state.stage = ConversationStage.COLLECTING
             case.conversation_state.awaiting_confirmation = False
@@ -514,6 +539,12 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.asked_clarification_intents = []
     case.conversation_state.pending_clarification_intent = None
     case.conversation_state.clarification_evidence = {}
+    case.conversation_state.department_status = "unresolved"
+    case.conversation_state.candidate_departments = []
+    case.conversation_state.department_uncertainty_reason = None
+    case.conversation_state.department_next_information_needed = None
+    case.conversation_state.department_next_question_intent = None
+    case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)
     case.conversation_state.clarification_reasons.pop("department", None)
     case.conversation_state.question_attempts.pop(DEPARTMENT_CLARIFICATION_KEY, None)

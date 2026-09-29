@@ -57,6 +57,11 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "asked_clarification_intents": state.asked_clarification_intents,
         "pending_clarification_intent": state.pending_clarification_intent,
         "clarification_evidence": state.clarification_evidence,
+        "department_status": state.department_status,
+        "candidate_departments": [item.model_dump() for item in state.candidate_departments],
+        "department_uncertainty_reason": state.department_uncertainty_reason,
+        "department_next_information_needed": state.department_next_information_needed,
+        "required_next_question_intent": state.department_next_question_intent,
     }
     prompt = (
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
@@ -66,6 +71,9 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "answer_source_text、answer_status (answered、partial 或 unclear) 與 0 到 1 的 "
         "answer_confidence 表示；即使回答無法映射到既有症狀欄位，也要標示。"
         "partial 或 unclear 時可針對相同 intent 提出一個更精確且不重複的追問。"
+        "department_status=ambiguous 時，優先問最能區分候選的一個自然問題；"
+        "若有 required_next_question_intent，追問 intent 必須與它完全一致。"
+        "不得向患者顯示候選科別名稱。"
         "如果症狀資訊足夠，可建議 status=sufficient，但最終完成與否由 Backend 決定。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
         "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, intent, reason, "
@@ -108,6 +116,10 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             answer_source = None
             answer_status = None
             answer_confidence = None
+        if status == "clarification_needed" and state.department_status == "ambiguous" and state.department_next_question_intent:
+            if intent != state.department_next_question_intent:
+                question = None
+                intent = None
         return ClarificationSuggestion(
             status, question, intent, reason, answered_intent,
             answer_source.strip() if answer_source else None,
@@ -116,6 +128,21 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
     except Exception as exc:
         logger.warning("clarification provider failed case_id=%s error=%s", case.case_id, exc)
         return None
+
+
+def capture_pending_answer(case: TriageCase, suggestion: ClarificationSuggestion | None, user_sources: list[str]) -> bool:
+    """Persist only a grounded, confident answer before candidate recomputation."""
+    if not suggestion or suggestion.answer_status != "answered" or suggestion.answer_confidence is None:
+        return False
+    state = case.conversation_state
+    if not _grounded_clarification_answer(
+        suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
+        suggestion.answer_confidence, state.pending_clarification_intent, user_sources,
+    ) or suggestion.answer_confidence < ACCEPT_THRESHOLD:
+        return False
+    state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
+    state.pending_clarification_intent = None
+    return True
 
 
 def advance_conversation(
@@ -139,8 +166,7 @@ def advance_conversation(
         state.pending_clarification_intent, user_sources,
     )
     if grounded_answer and suggestion.answer_status == "answered" and suggestion.answer_confidence >= ACCEPT_THRESHOLD:
-        state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
-        state.pending_clarification_intent = None
+        capture_pending_answer(case, suggestion, user_sources)
 
     grounded_symptom = bool(case.patient_input.symptom) and any(
         case.patient_input.symptom in item.content
@@ -171,7 +197,7 @@ def advance_conversation(
         and state.pending_clarification_intent is None
     )
     if sufficient:
-        if safety_screen_resolved(case):
+        if safety_screen_resolved(case) and state.department_status == "resolved":
             state.clarification_status = "sufficient"
             state.uncertainty_reasons = []
             state.next_information_needed = []
@@ -182,16 +208,17 @@ def advance_conversation(
             case.triage.is_final = True
             case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
             return
-        state.clarification_status = "safety_check"
-        state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
-        state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
-        state.is_complete = False
-        mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
-        case.triage.need_more_info = True
-        case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
-        case.triage.is_final = False
-        case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
-        return
+        if not safety_screen_resolved(case):
+            state.clarification_status = "safety_check"
+            state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
+            state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
+            state.is_complete = False
+            mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
+            case.triage.need_more_info = True
+            case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+            case.triage.is_final = False
+            case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
+            return
 
     if state.turn_count >= HARD_TURN_CAP:
         _unresolved(case)
@@ -205,6 +232,8 @@ def advance_conversation(
     valid_question = (
         suggestion is not None
         and suggestion.status == "clarification_needed"
+        and bool(suggestion.question)
+        and bool(suggestion.intent)
         and (pending_follow_up or (
             state.pending_clarification_intent is None
             and suggestion.intent not in state.asked_clarification_intents
@@ -235,6 +264,8 @@ def advance_conversation(
         reason = "尚無 grounded 的主要症狀描述"
     elif not grounded_detail:
         reason = "目前仍缺少可區分症狀的細節"
+    elif state.department_status != "resolved" and state.department_uncertainty_reason:
+        reason = state.department_uncertainty_reason
     state.clarification_status = "clarifying"
     state.uncertainty_reasons = [reason]
     state.next_information_needed = [reason]

@@ -4,13 +4,14 @@ from app.config import get_settings
 from app.schemas import ConversationStage, RecommendRequest, RecommendationResult, VisitType
 from app.services.appointment_service import (
     DepartmentResolutionError,
-    detect_department_result,
+    detect_department_result,  # Legacy patch seam; /recommend does not invoke it.
     normalize_visit_type,
     recommend_appointments,
 )
 from app.services.ai_reply_generator import build_no_schedule_message
 from app.services.case_store import create_case, get_case, save_case, save_recommendation_result
 from app.services.conversation_service import safety_screen_resolved
+from app.services.department_preference_service import resolve_requested_department
 from app.services.ai_service import runtime_ai_available
 from app.services.rag_triage_adapter import refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
@@ -78,14 +79,26 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
     if not (case.confirmed or case.conversation_state.confirmed):
         raise HTTPException(status_code=400, detail="triage_case 尚未確認，請先以 /chat 傳入 confirmed=true。")
 
+    explicit_department = None
+    if case.patient_input.requested_department_id is not None or case.patient_input.requested_department_name:
+        explicit_department = resolve_requested_department(case)
+    if case.department_result is None:
+        case.department_result = explicit_department
+    if case.department_result is None:
+        raise HTTPException(status_code=422, detail="尚無已驗證的正式科別結果，請先返回 /chat 釐清。")
+    if (
+        case.conversation_state.clarification_status == "sufficient"
+        and case.conversation_state.department_status != "resolved"
+        and explicit_department is None
+    ):
+        raise HTTPException(status_code=422, detail="科別候選尚未收斂為已驗證結果。")
+
     case.confirmed = True
     case.conversation_state.stage = ConversationStage.RECOMMENDING
     case.conversation_state.confirmed = True
     case.conversation_state.awaiting_confirmation = False
 
     try:
-        if case.department_result is None:
-            case.department_result = await detect_department_result(case)
         result = await recommend_appointments(case, visit_type=effective_visit_type)
     except DepartmentResolutionError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc

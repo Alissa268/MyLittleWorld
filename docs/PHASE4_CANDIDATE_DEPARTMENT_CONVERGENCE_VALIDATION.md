@@ -1,0 +1,45 @@
+# Phase 4 Candidate Department Convergence Validation
+
+## Scope and architecture
+
+Phase 4 adds `backend/app/services/department_reasoning_service.py`. In the AI-enabled natural `/chat` path, each new non-safety user turn now follows:
+
+`grounded patient evidence -> Phase 3 official KB lookup -> exact resolution against fetch_active_departments() -> restricted AI comparison -> Backend candidate validation -> unresolved / ambiguous / resolved`.
+
+The service recomputes candidates from current patient evidence every turn. A previous AI candidate is not carried forward as a patient fact. Structured `CandidateDepartmentEvidence` and `CandidateDepartment` live in `app/schemas.py`; `ConversationState` stores `department_status`, up to three `candidate_departments`, an uncertainty reason, the next information needed, and a proposed clarification intent. Only Backend writes these fields and `DepartmentResult`.
+
+Production retrieval uses `load_department_knowledge()`, `lookup_concept()`, and `resolve_department_names()` from the existing Phase 3 service. It reads the unchanged `backend/knowledge/sources.json` and `backend/knowledge/vghtpe_department_guidance.json`. DB truth comes from the current `fetch_active_departments()` call. The audit file `docs/PHASE3_310_DEPARTMENT_INVENTORY.json` is never read by production reasoning. Phase 3 evidence was not edited.
+
+## AI proposal and Backend validation
+
+The AI receives only retrieved official KB evidence with exactly resolved live DB IDs, plus conversation context and grounded patient evidence. It proposes `status`, at most three useful `candidates` (each with `dept_id`, `confidence`, and `supporting_evidence`), `uncertainty_reason`, and `next_question_intent`. Every support must contain verbatim `patient_source_text`, registered `knowledge_source_id`, and an exact retrieved `knowledge_concept`. AI-provided department names, workflow fields, diagnoses, or DB mappings are not accepted.
+
+Backend rejects a candidate when its ID is not a positive integer, is absent or duplicated in the active DB list, or is not in the exact official-KB-to-live-DB resolution for that turn. It rejects unknown or mismatched source IDs, concepts not in the retrieved record, patient quotations not in actual user history, empty support, and confidence outside finite numeric `[0, 1]` (including booleans). Duplicate IDs are discarded; validated candidates are sorted and capped at three. Two or more valid candidates stay `ambiguous` even if AI says `resolved`; one valid candidate still stays `ambiguous` unless AI proposes `resolved` and confidence reaches `ACCEPT_THRESHOLD`. No valid candidate is `unresolved`. Only the successful single-candidate gate creates `DepartmentResult`, populated from the live DB resolution rather than AI names.
+
+An explicit user-requested department remains a separate preference path and is checked against the live DB. Its reason identifies it as the user's registration preference, not a KB-derived medical conclusion.
+
+## Clarification and safety
+
+`request_clarification()` now sees candidate state, uncertainty, and a required intent. When candidates are ambiguous, the planner is asked for one question that distinguishes them without telling the patient department names. A mismatched required intent is rejected and handled with the existing safe fallback. Free-form grounded answers to pending clarification are saved before candidate recomputation, enabling cross-turn convergence without adding fixed medical fields.
+
+Existing positive red-flag urgency and the deterministic `safety_check` turn take precedence. Safety turns do not run semantic extraction, candidate reasoning, or an AI clarification call. Symptom sufficiency alone no longer permits confirmation: a natural case needs both resolved safety and a validated resolved department. At the eight-turn cap, ambiguous/unresolved candidates remain unresolved; the first candidate is never selected automatically. A confirmation-only request retains the previously validated state rather than rerunning a detector.
+
+The AI-enabled natural free-text path no longer invokes `detect_department_result()`, `_rule_based_department()`, or the project-smart single-department adapter, including on reasoning/provider failure. `/recommend` and `recommend_appointments()` no longer rerun old detection when `department_result` is absent; they reject the case. The legacy non-conversational/checklist and batch path remains for compatibility when runtime AI is not configured or structured batch answers are used. Its historical detector is not used as the AI-enabled natural path's fallback.
+
+## Tests and result
+
+`backend/tests/test_phase4_department_convergence.py` uses synthetic KB/DB records and mocked AI. It covers invalid/nonexact IDs, wrong or unknown provenance, ungrounded quotes, invalid confidence, deduplication and Top-K, equal concepts across different official-priority departments, ambiguous and low-confidence proposals, cross-turn ambiguous-to-resolved recomputation, provider timeout/malformed JSON, explicit preference, safety precedence, required intent validation, eight-turn cap, confirmation, no legacy detector in natural `/chat`, missing-result `/recommend`, and no production audit-snapshot dependency. Existing Phase 2 tests were adjusted where their expected transition to confirmation contradicted the new department gate; a revision test now expects stale department results to be cleared.
+
+Run from `backend` with the existing virtual environment and `CEREBRAS_API_KEY` temporarily empty for this test process (unit tests must not call the real provider):
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+$env:PYTHONPATH='.'
+.\.venv\Scripts\pytest.exe -q
+```
+
+Full result: **463 passed, 8 warnings, 302 subtests passed**. Warnings are existing FastAPI/TestClient deprecations plus a local `.pytest_cache` write warning. No Android build was needed because the API was extended additively and Android files were not changed.
+
+## Remaining limits and phase boundary
+
+The production official KB is intentionally small; only exact live-DB-resolved KB departments can become routable candidates. Unresolved Phase 3.1 names are not fuzzy-mapped. Lexical retrieval and accepted normalized interpretations are used, without new medical keyword rules or embeddings. A live SQL Server connection was not used in unit tests; live Department responses and AI proposals were mocked. This is engineering validation, not clinical validation. Phase 5 urgency/TTAS, Phase 6 doctor scoring, Android UI, SQL schema/data, accessibility, and script generation were not changed or started.

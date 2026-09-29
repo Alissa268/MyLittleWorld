@@ -139,6 +139,20 @@ class Preferences(BaseModel):
     hospital_preference: str = "台北榮總"
 
 
+class CandidateDepartmentEvidence(BaseModel):
+    patient_source_text: str
+    knowledge_source_id: str
+    knowledge_concept: str
+
+
+class CandidateDepartment(BaseModel):
+    dept_id: int
+    parentDept: str
+    childDept: str
+    confidence: float
+    supporting_evidence: List[CandidateDepartmentEvidence] = Field(default_factory=list)
+
+
 class ConversationState(BaseModel):
     stage: ConversationStage = ConversationStage.COLLECTING
     is_complete: bool = False
@@ -159,6 +173,11 @@ class ConversationState(BaseModel):
     asked_clarification_intents: List[str] = Field(default_factory=list)
     pending_clarification_intent: Optional[str] = None
     clarification_evidence: Dict[str, str] = Field(default_factory=dict)
+    department_status: Literal["unresolved", "ambiguous", "resolved"] = "unresolved"
+    candidate_departments: List[CandidateDepartment] = Field(default_factory=list)
+    department_uncertainty_reason: Optional[str] = None
+    department_next_information_needed: Optional[str] = None
+    department_next_question_intent: Optional[str] = None
 
 
 class UrgencyResult(BaseModel):

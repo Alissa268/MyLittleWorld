@@ -106,7 +106,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "右腳腳背腫起來")
         self.assertEqual(result["triage_case"]["availability"]["preferred_days"], [])
 
-    def test_negative_safety_answer_completes_before_department_detection(self):
+    def test_negative_safety_answer_does_not_bypass_unresolved_department(self):
         first, _, _, _ = self.rich_first_turn()
         answer = "沒有胸痛，也沒有呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛"
         second, semantic, clarification, department = self.post(
@@ -116,15 +116,16 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_not_awaited()
         clarification.assert_not_awaited()
-        department.assert_awaited_once()
+        department.assert_not_awaited()
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
         self.assertEqual(second["triage_case"]["patient_input"]["accompanying_symptoms"], ["走路越來越痛"])
         self.assertEqual(len(second["triage_case"]["semantic_extractions"]), len(first["triage_case"]["semantic_extractions"]))
-        self.assertEqual(second["triage_case"]["history_records"][-1]["content"], answer)
-        self.assertTrue(second["conversation_state"]["is_complete"])
-        self.assertFalse(second["needMoreInfo"])
-        self.assertEqual(second["conversation_state"]["stage"], "waiting_confirmation")
+        self.assertIn({"role": "user", "content": answer}, second["triage_case"]["history_records"])
+        self.assertFalse(second["conversation_state"]["is_complete"])
+        self.assertTrue(second["needMoreInfo"])
+        self.assertEqual(second["conversation_state"]["stage"], "collecting")
+        self.assertEqual(second["conversation_state"]["department_status"], "unresolved")
 
     def test_eighth_symptom_turn_enters_safety_check_before_hard_cap(self):
         case = TriageCase(case_id="phase22-eighth-turn")
@@ -148,10 +149,10 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_not_awaited()
         clarification.assert_not_awaited()
-        department.assert_awaited_once()
+        department.assert_not_awaited()
         self.assertEqual(completed["conversation_state"]["turn_count"], 8)
-        self.assertEqual(completed["conversation_state"]["clarification_status"], "sufficient")
-        self.assertTrue(completed["conversation_state"]["is_complete"])
+        self.assertEqual(completed["conversation_state"]["clarification_status"], "unresolved")
+        self.assertFalse(completed["conversation_state"]["is_complete"])
         self.assertTrue(completed["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(completed["triage_case"]["patient_input"]["red_flags"], [])
 
@@ -186,7 +187,7 @@ class Phase2ConversationTest(unittest.TestCase):
             "我突然胸痛", [extraction("symptom", "胸痛", "胸痛")], None,
         )
         clarification.assert_not_awaited()
-        department.assert_awaited_once()
+        department.assert_not_awaited()
         self.assertTrue(result["triage_case"]["patient_input"]["red_flags"])
         self.assertTrue(result["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(result["conversation_state"]["clarification_status"], "urgent")

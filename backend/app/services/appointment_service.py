@@ -122,7 +122,9 @@ async def recommend_appointments(
             case,
             _canonical_departments(fetch_active_departments()),
         )
-    department = requested_department or case.department_result or await detect_department_result(case)
+    department = requested_department or case.department_result
+    if department is None:
+        raise DepartmentResolutionError("尚無已驗證的正式科別結果；不執行舊版科別猜測。")
     if department.dept_id is None:
         department = resolve_department_result(department)
     if department is None or department.dept_id is None:
