@@ -1,5 +1,6 @@
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import JSONResponse
 import logging
 import asyncio
 from contextlib import suppress
@@ -11,6 +12,7 @@ from app.routes.voice import router as voice_router
 from app.routes.followup import router as followup_router
 from app.routes.reference import router as reference_router
 from app.routes.schedules import router as schedules_router
+from app.db import DatabaseUnavailableError
 from app.services.ai_service import initialize_ai
 from app.services.tts_cache import tts_cache
 from app.services.voice_perf import VoicePerfMiddleware
@@ -39,6 +41,17 @@ app.include_router(voice_router)
 app.include_router(followup_router)
 app.include_router(reference_router)
 app.include_router(schedules_router)
+
+
+@app.exception_handler(DatabaseUnavailableError)
+async def database_unavailable_handler(
+    _request: Request,
+    _exc: DatabaseUnavailableError,
+) -> JSONResponse:
+    return JSONResponse(
+        status_code=503,
+        content={"detail": "正式資料目前無法查詢，請稍後重試。"},
+    )
 
 
 @app.get("/health", tags=["health"])

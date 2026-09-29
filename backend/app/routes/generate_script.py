@@ -24,7 +24,7 @@ def generate_script(req: ScriptRequest) -> ScriptResponse:
         )
     if recommendation.recommendation_id != req.recommendation_id:
         raise HTTPException(status_code=422, detail="recommendation_id 與 recommendation 內容不一致。")
-    if stored_recommendation is None and (
+    if (
         not recommendation.schedule_id
         or not recommendation.doctor_id
         or recommendation.dept_id is None
@@ -38,18 +38,17 @@ def generate_script(req: ScriptRequest) -> ScriptResponse:
             raise HTTPException(status_code=404, detail="找不到已儲存的 recommendation。")
         if not req.recommendation_id.startswith(f"qs_{req.case_id}_"):
             raise HTTPException(status_code=422, detail="Quick Search recommendation_id 與 case_id 不一致。")
-    if recommendation.schedule_id:
-        try:
-            recommendation = revalidate_schedule(
-                recommendation,
-                require_followup_evidence=is_quick_search,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=409, detail=str(exc)) from exc
-        except DatabaseUnavailableError as exc:
-            raise HTTPException(status_code=503, detail="正式班表目前無法重新確認，請稍後重試。") from exc
-        except Exception as exc:
-            raise HTTPException(status_code=503, detail="正式班表目前無法重新確認，請稍後重試。") from exc
+    try:
+        recommendation = revalidate_schedule(
+            recommendation,
+            require_followup_evidence=is_quick_search,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
+    except DatabaseUnavailableError as exc:
+        raise HTTPException(status_code=503, detail="正式班表目前無法重新確認，請稍後重試。") from exc
+    except Exception as exc:
+        raise HTTPException(status_code=503, detail="正式班表目前無法重新確認，請稍後重試。") from exc
 
     steps = build_navigation_script(recommendation)
     if req.case_id:

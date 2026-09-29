@@ -99,3 +99,34 @@ python -m pytest -q --tb=short -p no:cacheprovider
 ```
 
 Result: **492 passed, 8 warnings, 308 subtests passed**. Warnings are existing FastAPI/Starlette deprecations plus the local `.pytest_cache` permission warning. Known limitations remain: the in-memory store is opportunistically pruned and not shared across workers; Doctor-to-Department identity still relies on the existing Schedule association because Doctor has no Department foreign key; no authentication redesign or persistent workflow store was introduced. Android, SQL schema/data, official KB evidence, TTAS/red-flag rules, urgency logic, and Phase 6 doctor scoring behavior were not changed. Phase 5 was not started.
+
+## Phase 4.2.1: trust-boundary closure
+
+### Complete isolated snapshot sanitization
+
+An isolated client `triage_case` is now compatibility input only. Backend keeps nonempty user-authored history and may retain raw symptom/preferences, but discards all client assistant history and replaces the entire `ConversationState` with a fresh default instance. It also clears semantic extractions, triage, department result, confirmation/recommendation/script flags, selected recommendation, red-flag conclusions, severity and urgency normalization, and collected-field bookkeeping. Existing server-stored cases still win over every supplied snapshot. Tests that need an established workflow now seed the server store instead of treating a client snapshot as authoritative.
+
+### Database-unavailable boundary
+
+FastAPI has an application-level `DatabaseUnavailableError` handler. Any typed Department, Doctor, or Schedule outage that is not handled more specifically by a route returns HTTP 503 with the fixed message `正式資料目前無法查詢，請稍後重試。`; exception text, SQL, hosts, and credentials are not exposed. Regressions cover `/chat` explicit department preference, structured department detection, `/recommend` explicit preference resolution, and the existing normal recommendation failure path.
+
+### Canonical return-visit and schedule identity
+
+`fetch_reference_doctors()` keeps the public name-based reference API for compatibility and adds an internal optional `department_id` constraint. Return-visit validation always supplies the canonical live Department ID, so two Department rows with the same child name cannot share doctor identity accidentally. The SQL predicate becomes `dep.dept_id = ?`, and doctor identity remains `doctor_id` plus exact name.
+
+Every stored recommendation used for navigation must contain `schedule_id`, `doctor_id`, `dept_id`, `date`, and `session`. Missing identity is rejected before script construction. Complete stored recommendations and Quick Search selections always run the shared live schedule revalidation exactly once; the navigation script receives only the DB-authoritative row.
+
+### ChatPerf privacy
+
+`record_ai_call()` no longer stores raw presentation reply text. INFO-facing summary and debug structures retain only `raw_reply_present` and `raw_reply_chars`; provider-call metadata cannot serialize the medical reply itself. A sentinel regression serializes both structures and proves the sentinel is absent.
+
+### Phase 4.2.1 validation
+
+Focused trust-boundary, DB adapter, and follow-up suites: **53 passed, 7 warnings**. The complete Backend suite was run with the real-provider key blank for the unit-test process:
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+.\.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider
+```
+
+Final result: **500 passed, 7 warnings, 308 subtests passed**. The Phase 4.1 hematuria `有血絲` regression remains passing. Zero-schedule API semantics were not changed. Android, SQL schema/data, official Department KB, TTAS/red-flag and urgency rules, and doctor scoring were not modified. Phase 5 was not started.

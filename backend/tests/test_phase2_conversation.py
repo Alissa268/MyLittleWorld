@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import TriageCase
 from app.services import conversation_service, rag_triage_adapter
+from app.services.case_store import save_case
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 
 
@@ -30,6 +31,8 @@ def extraction(field, value, source, confidence=0.95):
 
 class Phase2ConversationTest(unittest.TestCase):
     def post(self, message, extractions, plan, *, triage_case=None, confirmed=False):
+        if triage_case:
+            save_case(TriageCase.model_validate(triage_case))
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
         semantic = AsyncMock(return_value=json.dumps(
             {"semantic_extractions": extractions}, ensure_ascii=False,
@@ -48,6 +51,7 @@ class Phase2ConversationTest(unittest.TestCase):
             new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
         ):
             response = TestClient(app).post("/chat", json={
+                **({"case_id": triage_case["case_id"]} if triage_case else {}),
                 "message": message,
                 "confirmed": confirmed,
                 **({"triage_case": triage_case} if triage_case else {}),

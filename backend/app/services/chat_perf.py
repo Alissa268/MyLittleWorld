@@ -109,13 +109,13 @@ class ChatPerf:
                 if call.get("provider")
             )
         )
-        ai_reply_raw = next(
+        ai_reply_raw_metadata = next(
             (
-                call.get("raw_reply")
+                call
                 for call in reversed(ai_reply_calls)
-                if call.get("raw_reply") is not None
+                if call.get("raw_reply_present")
             ),
-            None,
+            {},
         )
         return {
             "case_id": self.case_id,
@@ -125,8 +125,8 @@ class ChatPerf:
             "ai_reply_provider_called": bool(ai_reply_calls),
             "actual_provider": all_providers or None,
             "actual_model": all_models or None,
-            "ai_raw_reply_present": bool(ai_reply_raw),
-            "ai_raw_reply_chars": len(ai_reply_raw or ""),
+            "ai_raw_reply_present": bool(ai_reply_raw_metadata.get("raw_reply_present")),
+            "ai_raw_reply_chars": int(ai_reply_raw_metadata.get("raw_reply_chars") or 0),
             "ai_reply_parser_invoked": self.ai_reply_parser_invoked,
             "ai_reply_validator_accepted": self.ai_reply_validator_accepted,
             "fallback": self.ai_reply_fallback,
@@ -201,11 +201,9 @@ def record_ai_call(
         call["provider"] = provider
     if model:
         call["model"] = model
-    # Only the presentation reply is privacy-scrubbed before it reaches the
-    # provider. Semantic/department prompts can contain broader case context,
-    # so their raw payloads must not be copied into the per-chat debug trace.
     if raw_reply is not None and call["phase"] == "ai_reply":
-        call["raw_reply"] = raw_reply
+        call["raw_reply_present"] = True
+        call["raw_reply_chars"] = len(raw_reply)
     if error_type:
         call["error_type"] = error_type
     if status is not None:

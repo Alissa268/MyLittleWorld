@@ -4,7 +4,15 @@ import logging
 import time
 from uuid import uuid4
 
-from app.schemas import ConversationStage, RecommendationItem, RecommendationResult, TriageCase, UrgencyResult
+from app.schemas import (
+    ConversationState,
+    RecommendationItem,
+    RecommendationResult,
+    SeverityNormalization,
+    TriageCase,
+    UrgencyNormalization,
+    UrgencyResult,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -46,27 +54,25 @@ def new_case_id() -> str:
 def sanitize_untrusted_snapshot(snapshot: TriageCase) -> TriageCase:
     """Keep compatibility data while removing every client-asserted server-owned conclusion."""
     case = snapshot.model_copy(deep=True)
+    case.history_records = [
+        message.model_copy(deep=True)
+        for message in case.history_records
+        if message.role == "user" and message.content.strip()
+    ]
     case.confirmed = False
     case.recommendation_generated = False
     case.script_generated = False
     case.selected_recommendation_id = None
     case.department_result = None
+    case.semantic_extractions = []
     case.patient_input.red_flags = []
     case.patient_input.red_flags_checked = False
     case.patient_input.red_flags_status = "not_checked"
+    case.patient_input.severity_normalized = SeverityNormalization()
+    case.patient_input.urgency_normalized = UrgencyNormalization()
+    case.patient_input.collected_fields = []
     case.triage = UrgencyResult()
-    state = case.conversation_state
-    state.stage = ConversationStage.COLLECTING
-    state.is_complete = False
-    state.awaiting_confirmation = False
-    state.confirmed = False
-    state.clarification_status = "collecting"
-    state.pending_clarification_intent = None
-    state.department_status = "unresolved"
-    state.candidate_departments = []
-    state.department_uncertainty_reason = None
-    state.department_next_information_needed = None
-    state.department_next_question_intent = None
+    case.conversation_state = ConversationState()
     return case
 
 

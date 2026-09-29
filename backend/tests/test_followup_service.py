@@ -22,7 +22,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
             {"dept_id": 8, "parent_dept": "Surgery", "child_dept": "Orthopedics"},
         ]
         names = ["原醫師", "回診醫師", "指定日期醫師", "複診醫師", "醫師A", "Original Doctor"]
-        followup_service.fetch_reference_doctors = lambda _department: [
+        followup_service.fetch_reference_doctors = lambda _department, **_kwargs: [
             {"doctor_id": "101", "name": name} for name in names
         ]
 

@@ -10,6 +10,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import TriageCase
 from app.services import ai_reply_generator, ai_service, rag_triage_adapter
+from app.services.case_store import save_case
 
 
 chat_route = importlib.import_module("app.routes.chat")
@@ -17,6 +18,11 @@ chat_route = importlib.import_module("app.routes.chat")
 
 class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
     def _post_with_mocked_ai(self, payload: dict, *, ai_available: bool = False):
+        payload = dict(payload)
+        if payload.get("triage_case"):
+            stored = TriageCase.model_validate(payload["triage_case"])
+            save_case(stored)
+            payload["case_id"] = stored.case_id
         semantic = AsyncMock(return_value=None)
 
         async def deterministic_reply(**kwargs) -> str:

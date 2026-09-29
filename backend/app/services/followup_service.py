@@ -40,7 +40,11 @@ async def recommend_followup(req: FollowupRecommendRequest) -> FollowupRecommend
     if req.parentDept and req.parentDept.strip() != parent:
         raise ReturnVisitResolutionError("回診科別分類與正式科別資料不一致。")
 
-    doctors = await asyncio.to_thread(fetch_reference_doctors, child)
+    doctors = await asyncio.to_thread(
+        fetch_reference_doctors,
+        child,
+        department_id=int(canonical["dept_id"]),
+    )
     doctor_matches = [
         item for item in doctors
         if (req.original_doctor_id is None or str(item.get("doctor_id")) == str(req.original_doctor_id))

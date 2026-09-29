@@ -128,28 +128,41 @@ def fetch_reference_departments() -> List[dict]:
             conn.close()
 
 
-def fetch_reference_doctors(department_name: str) -> List[dict]:
+def fetch_reference_doctors(
+    department_name: str,
+    *,
+    department_id: int | None = None,
+) -> List[dict]:
     """Return canonical active doctors historically associated with one exact department.
 
     Doctor has no department foreign key in the current schema, so Schedule is used only
     as the association table. There is intentionally no date, status, or visit-type filter.
     """
+    if department_id is not None and (
+        isinstance(department_id, bool)
+        or not isinstance(department_id, int)
+        or department_id <= 0
+    ):
+        raise ValueError("department_id must be a positive integer")
+
     conn = None
     try:
         conn = create_db_connection()
         cursor = conn.cursor()
-        cursor.execute("""
+        department_predicate = "dep.dept_id = ?" if department_id is not None else "dep.name = ?"
+        department_parameter = department_id if department_id is not None else department_name
+        cursor.execute(f"""
             SELECT DISTINCT
                 doc.doctor_id,
                 doc.name
             FROM Doctor doc
             JOIN Schedule s ON s.doctor_id = doc.doctor_id
             JOIN Department dep ON dep.dept_id = s.dept_id
-            WHERE dep.name = ?
+            WHERE {department_predicate}
                 AND doc.is_active = 1
                 AND doc.is_placeholder = 0
             ORDER BY doc.name, doc.doctor_id
-        """, department_name)
+        """, department_parameter)
         doctors = []
         seen_ids = set()
         for row in cursor.fetchall():

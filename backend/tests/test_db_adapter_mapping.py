@@ -130,6 +130,19 @@ class DbAdapterMappingTest(unittest.TestCase):
         self.assertEqual(conn.cursor_obj.params, ("一般骨科",))
         self.assertTrue(conn.closed)
 
+    def test_reference_doctors_can_be_constrained_by_department_id(self):
+        self.original_create_db_connection = db.create_db_connection
+        conn = _FakeConnection([(101, "測試醫師")])
+        db.create_db_connection = lambda: conn
+
+        doctors = db.fetch_reference_doctors("同名科", department_id=7)
+
+        self.assertEqual(doctors, [{"doctor_id": "101", "name": "測試醫師"}])
+        self.assertIn("dep.dept_id = ?", conn.cursor_obj.query)
+        self.assertNotIn("dep.name = ?", conn.cursor_obj.query)
+        self.assertEqual(conn.cursor_obj.params, (7,))
+        self.assertTrue(conn.closed)
+
     def test_fetch_available_slots_maps_date_schedule_rows(self):
         self.original_create_db_connection = db.create_db_connection
         conn = _FakeConnection(
