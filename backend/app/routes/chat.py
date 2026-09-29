@@ -24,7 +24,7 @@ from app.services.conversation_service import (
     safety_screen_resolved,
 )
 from app.services.department_reasoning_service import reason_about_departments
-from app.services.department_preference_service import capture_department_preference
+from app.services.department_preference_service import capture_department_preference, resolve_requested_department
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
 from app.services.ai_service import runtime_ai_available
@@ -52,6 +52,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         settings = get_settings()
         batch_enabled = bool(settings.batch_triage_enabled)
         safety_check_turn = case.conversation_state.clarification_status == "safety_check"
+        free_text_request = not req.answers and _request_has_text_input(req)
+        free_text_flow = free_text_request or (case.conversation_state.free_text_mode and not req.answers)
         batch_mode = (
             batch_enabled
             and not safety_check_turn
@@ -139,6 +141,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         before_patient = case.patient_input.model_dump()
         before_availability = case.availability.model_dump()
         semantic_first = runtime_ai_available(settings)
+        if free_text_request:
+            case.conversation_state.free_text_mode = True
         semantic_ai_allowed = semantic_first and case.conversation_state.clarification_status not in {
             "unresolved", "safety_check",
         }
@@ -161,6 +165,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     user_text_parts.append(answer.answer)
                     has_user_input = True
         elif req.answers:
+            if batch_mode:
+                case.conversation_state.free_text_mode = False
             batch_outcome = await extract_batch_answers(
                 case, req.answers, semantic_first=semantic_first,
             )
@@ -210,6 +216,16 @@ async def chat(req: ChatRequest) -> TriageResult:
                 preference = capture_department_preference(case, user_text)
                 if preference and preference.resolved:
                     department_preference_name = preference.name
+        if free_text_request and not semantic_first and not safety_check_turn:
+            has_explicit_preference = (
+                case.patient_input.requested_department_id is not None
+                or bool(case.patient_input.requested_department_name)
+            )
+            case.department_result = resolve_requested_department(case) if has_explicit_preference else None
+            case.conversation_state.department_status = (
+                "resolved" if case.department_result is not None else "unresolved"
+            )
+            case.conversation_state.candidate_departments = []
 
     with perf.measure("rule_engine"):
         confirmation_only = conversational_mode and not has_user_input and case.conversation_state.is_complete
@@ -256,6 +272,11 @@ async def chat(req: ChatRequest) -> TriageResult:
                     case.history_records.append(Message(role="assistant", content=case.triage.next_question))
         else:
             case.conversation_state.is_complete = not case.triage.need_more_info
+        if free_text_flow and not semantic_first and case.department_result is None and not case.patient_input.red_flags:
+            if not case.triage.need_more_info and safety_screen_resolved(case):
+                case.triage.need_more_info = True
+                case.triage.next_question = DEPARTMENT_UNRESOLVED_REPLY
+                case.triage.is_final = False
         question_batch = []
         if batch_mode and case.triage.need_more_info:
             question_batch = build_question_batch(
@@ -296,6 +317,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_status = case.conversation_state.field_statuses.get("department")
         if (
             not conversational_mode
+            and not free_text_flow
             and case.conversation_state.turn_count == 0
             and not case.triage.need_more_info
             and safety_screen_resolved(case)
@@ -321,7 +343,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         elif (
             case.triage.need_more_info
             or not safety_screen_resolved(case)
-            or ((conversational_mode or case.conversation_state.turn_count > 0) and (
+            or ((free_text_flow or conversational_mode or case.conversation_state.turn_count > 0) and (
                 case.conversation_state.department_status != "resolved" or case.department_result is None
             ))
         ):

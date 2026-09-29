@@ -219,13 +219,14 @@ class ProjectSmartDepartmentAdapterTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["conversation_state"]["stage"], "waiting_confirmation")
-        self.assertEqual(data["department_result"]["childDept"], "皮膚科")
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertIsNone(data["department_result"])
+        self.assertEqual(data["conversation_state"]["department_status"], "unresolved")
         self.assertFalse(data["conversation_state"]["confirmed"])
 
         recommend_response = client.post("/recommend", json={"case_id": data["case_id"]})
         self.assertEqual(recommend_response.status_code, 400)
-        self.assertIn("尚未確認", recommend_response.json()["detail"])
+        self.assertIn("尚未完成", recommend_response.json()["detail"])
 
     def test_keyword_hints_cover_required_symptoms(self):
         skin_hints = keyword_department_hints(_case_from_message("皮膚發癢、紅疹"))

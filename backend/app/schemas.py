@@ -155,6 +155,7 @@ class CandidateDepartment(BaseModel):
 
 class ConversationState(BaseModel):
     stage: ConversationStage = ConversationStage.COLLECTING
+    free_text_mode: bool = False
     is_complete: bool = False
     awaiting_confirmation: bool = False
     confirmed: bool = False

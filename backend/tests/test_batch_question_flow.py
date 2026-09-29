@@ -1026,9 +1026,10 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
         self.assertEqual(case["availability"]["preferred_dates"], ["2026-09-21"])
         self.assertEqual(case["availability"]["preferred_days"], ["週一"])
         self.assertEqual(case["availability"]["preferred_sessions"], ["上午"])
-        self.assertIsNone(data["department_result"])
-        self.assertEqual(data["conversation_state"]["department_status"], "unresolved")
-        self.assertTrue(data["needMoreInfo"])
+        self.assertEqual(data["department_result"]["dept_id"], 1232)
+        self.assertIn("使用者明確指定", data["department_result"]["reason"][0])
+        self.assertEqual(data["conversation_state"]["department_status"], "resolved")
+        self.assertFalse(data["needMoreInfo"])
         self.assertNotIn("持續時間「9月」", data["reply"])
         self.assertNotIn("較符合一般內科", data["reply"])
 

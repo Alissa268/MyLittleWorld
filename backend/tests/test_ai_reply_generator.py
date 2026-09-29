@@ -123,15 +123,16 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
             ai_reply_generator, "complete_prompt", new=provider
         ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)), patch.object(
             chat_route, "detect_department_result", new=AsyncMock(return_value=department)
-        ):
+        ) as detector:
             response = TestClient(app).post("/chat", json={"message": complete_message})
 
         self.assertEqual(response.status_code, 200)
         data = response.json()
-        self.assertEqual(data["conversation_state"]["stage"], ConversationStage.WAITING_CONFIRMATION.value)
-        self.assertTrue(data["conversation_state"]["awaiting_confirmation"])
+        self.assertEqual(data["conversation_state"]["stage"], ConversationStage.COLLECTING.value)
+        self.assertFalse(data["conversation_state"]["awaiting_confirmation"])
         self.assertFalse(data["conversation_state"]["confirmed"])
-        self.assertIsNone(data["next_question"])
+        self.assertIsNone(data["department_result"])
+        detector.assert_not_awaited()
 
     def test_department_confirmation_reason_uses_only_collected_case_fields(self):
         case = TriageCase(case_id="grounded-confirmation")

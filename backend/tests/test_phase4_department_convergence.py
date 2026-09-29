@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase, VisitType
 from app.services import department_reasoning_service as reasoning
+from app.services import department_preference_service
 from app.services.appointment_service import DepartmentResolutionError
 from app.services.conversation_service import ClarificationSuggestion, advance_conversation, request_clarification
 from app.services.department_knowledge import resolve_department_names
@@ -197,6 +198,102 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
 
 
 class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
+    def no_ai_chat(self, message: str, *, triage_case: dict | None = None, confirmed: bool = False):
+        settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
+        old_detector = AsyncMock()
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
+            chat_route, "detect_department_result", new=old_detector,
+        ), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
+            response = TestClient(app).post("/chat", json={
+                "message": message, "confirmed": confirmed,
+                **({"triage_case": triage_case} if triage_case else {}),
+            })
+        self.assertEqual(response.status_code, 200)
+        old_detector.assert_not_awaited()
+        return response.json()
+
+    def test_missing_ai_key_free_text_stays_unresolved(self):
+        result = self.no_ai_chat("我最近一直頭暈", confirmed=True)
+        self.assertTrue(result["conversation_state"]["free_text_mode"])
+        self.assertEqual(result["conversation_state"]["department_status"], "unresolved")
+        self.assertIsNone(result["department_result"])
+        self.assertEqual(result["conversation_state"]["stage"], "collecting")
+        self.assertFalse(result["conversation_state"]["awaiting_confirmation"])
+        self.assertFalse(result["conversation_state"]["confirmed"])
+        confirmed = self.no_ai_chat("", triage_case=result["triage_case"], confirmed=True)
+        self.assertEqual(confirmed["conversation_state"]["stage"], "collecting")
+        self.assertIsNone(confirmed["department_result"])
+
+    def test_missing_ai_key_messages_user_text_is_also_free_text(self):
+        settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
+        old_detector = AsyncMock()
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
+            chat_route, "detect_department_result", new=old_detector,
+        ), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
+            response = TestClient(app).post("/chat", json={"messages": [{"role": "user", "content": "我膝蓋很痛"}], "confirmed": True})
+        self.assertEqual(response.status_code, 200)
+        old_detector.assert_not_awaited()
+        self.assertTrue(response.json()["conversation_state"]["free_text_mode"])
+        self.assertIsNone(response.json()["department_result"])
+        self.assertEqual(response.json()["conversation_state"]["stage"], "collecting")
+
+    def test_missing_ai_key_knee_pain_cannot_use_legacy_mapping_even_later(self):
+        first = self.no_ai_chat("我膝蓋很痛")
+        self.assertIsNone(first["department_result"])
+        second = self.no_ai_chat(
+            "膝蓋痛兩週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診",
+            triage_case=first["triage_case"], confirmed=True,
+        )
+        self.assertEqual(second["conversation_state"]["department_status"], "unresolved")
+        self.assertIsNone(second["department_result"])
+        self.assertEqual(second["conversation_state"]["stage"], "collecting")
+        self.assertFalse(second["conversation_state"]["confirmed"])
+        self.assertIn("無法安全地自動判定", second["reply"])
+
+    def test_missing_ai_key_explicit_preference_uses_exact_live_db(self):
+        row = {"dept_id": 1234, "parent_dept": "內科系", "child_dept": "感染科"}
+        with patch.object(department_preference_service, "fetch_active_departments", return_value=[row]) as live_db:
+            result = self.no_ai_chat("我想看感染科")
+        self.assertGreaterEqual(live_db.call_count, 1)
+        self.assertEqual(result["department_result"]["dept_id"], 1234)
+        self.assertEqual(result["department_result"]["childDept"], "感染科")
+        self.assertEqual(result["conversation_state"]["department_status"], "resolved")
+        self.assertIn("使用者明確指定", result["department_result"]["reason"][0])
+        self.assertNotIn("官方 KB", result["department_result"]["reason"][0])
+
+    def test_missing_ai_key_keeps_safety_question_ahead_of_department(self):
+        result = self.no_ai_chat("我最近一直頭暈")
+        self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(result["conversation_state"]["last_question_key"], RED_FLAG_QUESTION_KEY)
+        self.assertIn("胸痛", result["next_question"])
+        self.assertIsNone(result["department_result"])
+        self.assertEqual(result["conversation_state"]["stage"], "collecting")
+
+    def test_missing_ai_key_pending_safety_is_not_replaced_by_department(self):
+        case = TriageCase(case_id="phase4-no-ai-pending-safety")
+        case.history_records = [Message(role="user", content="我最近一直頭暈，上禮拜開始")]
+        case.patient_input.symptom = "頭暈"
+        case.semantic_extractions = [SemanticExtraction(
+            field="duration", normalized_value="一週", source_text="上禮拜",
+            confidence=0.9, semantic_status="available",
+        )]
+        case.conversation_state.clarification_status = "safety_check"
+        case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
+        case.conversation_state.free_text_mode = True
+        result = self.no_ai_chat("不太確定", triage_case=case.model_dump(mode="json"))
+        self.assertEqual(result["conversation_state"]["clarification_status"], "safety_check")
+        self.assertEqual(result["conversation_state"]["last_question_key"], RED_FLAG_QUESTION_KEY)
+        self.assertIn("胸痛", result["next_question"])
+        self.assertIsNone(result["department_result"])
+        self.assertEqual(result["conversation_state"]["stage"], "collecting")
+
+    def test_missing_ai_key_positive_red_flag_keeps_urgent_warning(self):
+        result = self.no_ai_chat("我突然胸痛")
+        self.assertTrue(result["triage_case"]["patient_input"]["red_flags"])
+        self.assertTrue(result["triage"]["warning_required"])
+        self.assertEqual(result["triage"]["urgency_level"], "high")
+        self.assertIsNone(result["department_result"])
+
     async def test_safety_question_precedes_candidate_question(self):
         case = case_with_symptom()
         case.conversation_state.department_status = "ambiguous"

@@ -8,7 +8,7 @@ from app import db
 from app.main import app
 from app.schemas import DepartmentResult, RecommendationItem, TriageCase, VisitType
 from app.routes import chat as chat_route
-from app.services import appointment_service, project_smart_department_adapter, rag_triage_adapter
+from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter
 from app.services.appointment_service import detect_department_result, recommend_appointments
 from app.services.case_store import get_case
 from app.services.rule_engine import apply_user_message, evaluate_urgency, next_question_for
@@ -18,6 +18,7 @@ from app.services.script_service import build_navigation_script
 class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_departments = appointment_service.fetch_active_departments
+        self.original_preference_departments = department_preference_service.fetch_active_departments
         self.original_rag_complete = rag_triage_adapter.complete_prompt
         self.original_rag_settings = rag_triage_adapter.get_settings
         self.original_project_complete = project_smart_department_adapter.complete_prompt
@@ -27,6 +28,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"},
             {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
         ]
+        department_preference_service.fetch_active_departments = appointment_service.fetch_active_departments
 
         async def fail_complete(_: str) -> str:
             raise RuntimeError("llm disabled in tests")
@@ -44,6 +46,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         appointment_service.fetch_active_departments = self.original_departments
+        department_preference_service.fetch_active_departments = self.original_preference_departments
         rag_triage_adapter.complete_prompt = self.original_rag_complete
         rag_triage_adapter.get_settings = self.original_rag_settings
         project_smart_department_adapter.complete_prompt = self.original_project_complete
@@ -504,7 +507,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         client = TestClient(app)
         chat_response = client.post(
             "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
+            json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
         )
         self.assertEqual(chat_response.status_code, 200)
         chat_data = chat_response.json()
@@ -584,11 +587,12 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         data = response.json()
 
-        self.assertEqual(data["conversation_state"]["stage"], "waiting_confirmation")
-        self.assertFalse(data["needMoreInfo"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertTrue(data["needMoreInfo"])
         self.assertTrue(data["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(data["triage_case"]["patient_input"]["red_flags"], [])
-        self.assertIsNone(data["next_question"])
+        self.assertIsNone(data["department_result"])
+        self.assertIn("無法安全地自動判定", data["next_question"])
 
     async def test_ai_question_does_not_override_deterministic_red_flag_state(self):
         class FakeSettings:
@@ -688,10 +692,11 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session_response.status_code, 200)
         session_data = session_response.json()
 
-        self.assertEqual(session_data["conversation_state"]["stage"], "waiting_confirmation")
-        self.assertFalse(session_data["needMoreInfo"])
+        self.assertEqual(session_data["conversation_state"]["stage"], "collecting")
+        self.assertTrue(session_data["needMoreInfo"])
         self.assertEqual(session_data["triage_case"]["availability"]["preferred_sessions"], ["上午"])
-        self.assertIsNone(session_data["next_question"])
+        self.assertIsNone(session_data["department_result"])
+        self.assertIn("無法安全地自動判定", session_data["next_question"])
 
     async def test_ai_question_does_not_override_deterministic_availability_state(self):
         class FakeSettings:
@@ -952,7 +957,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
 
         chat_response = client.post(
             "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
+            json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
         )
         self.assertEqual(chat_response.status_code, 200)
         chat_data = chat_response.json()

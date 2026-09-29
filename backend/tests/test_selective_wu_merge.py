@@ -7,7 +7,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import DepartmentResult, TriageCase
-from app.services import appointment_service, project_smart_department_adapter, rag_triage_adapter, specialty_scoring
+from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter, specialty_scoring
 from app.services.project_smart_department_adapter import detect_department_with_project_smart_adapter
 from app.services.rule_engine import apply_user_message
 from app.services.semantic_normalizer import ALL_SESSIONS, ALL_WEEKDAYS, normalize_message
@@ -17,6 +17,7 @@ from app.services.specialty_scoring import score_doctor_deterministically
 class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
         self.original_fetch_departments = appointment_service.fetch_active_departments
+        self.original_preference_departments = department_preference_service.fetch_active_departments
         self.original_fetch_slots = appointment_service.fetch_available_slots
         self.original_project_settings = project_smart_department_adapter.get_settings
         self.original_project_complete = project_smart_department_adapter.complete_prompt
@@ -28,6 +29,7 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         rag_triage_adapter.get_settings = lambda: _NoAiSettings()
         specialty_scoring.get_settings = lambda: _NoAiSettings()
         appointment_service.fetch_active_departments = _active_departments
+        department_preference_service.fetch_active_departments = _active_departments
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _available_slots()
 
         async def fail_complete(_: str) -> str:
@@ -38,6 +40,7 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
 
     def tearDown(self):
         appointment_service.fetch_active_departments = self.original_fetch_departments
+        department_preference_service.fetch_active_departments = self.original_preference_departments
         appointment_service.fetch_available_slots = self.original_fetch_slots
         project_smart_department_adapter.get_settings = self.original_project_settings
         project_smart_department_adapter.complete_prompt = self.original_project_complete
@@ -104,7 +107,7 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
 
         chat_response = client.post(
             "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
+            json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
         )
         self.assertEqual(chat_response.status_code, 200)
         chat_data = chat_response.json()
