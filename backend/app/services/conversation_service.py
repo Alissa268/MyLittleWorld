@@ -24,6 +24,7 @@ UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科別|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
+_MULTI_QUESTION = re.compile(r"[?？].*[?？]|[;；]", re.DOTALL)
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
 
@@ -56,6 +57,9 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "next_information_needed": state.next_information_needed,
         "asked_clarification_intents": state.asked_clarification_intents,
         "pending_clarification_intent": state.pending_clarification_intent,
+        "pending_question": next(
+            (item.content for item in reversed(case.history_records) if item.role == "assistant"), None,
+        ) if state.pending_clarification_intent else None,
         "clarification_evidence": state.clarification_evidence,
         "department_status": state.department_status,
         "candidate_departments": [item.model_dump() for item in state.candidate_departments],
@@ -66,11 +70,15 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
     prompt = (
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
         "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
-        "已經有可靠回答的資訊不要重問；若本輪回答了 pending intent，"
-        "若本輪回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
+        "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向和一個聚焦問句；"
+        "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
+        "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
+        "若本輪以具體描述回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
         "answer_source_text、answer_status (answered、partial 或 unclear) 與 0 到 1 的 "
-        "answer_confidence 表示；即使回答無法映射到既有症狀欄位，也要標示。"
-        "partial 或 unclear 時可針對相同 intent 提出一個更精確且不重複的追問。"
+        "answer_confidence 表示；例如程度問題回答『只有一點』『不是很多』『明顯變多』『影響活動』，"
+        "即使沒有 canonical severity extraction，也可以是 answered。"
+        "回答欄位與整體 status 獨立，status=clarification_needed 時也須標記已回答的 pending intent。"
+        "partial 或 unclear 時維持同一 intent，提出一個更精確、不重複、只問同一面向的追問。"
         "department_status=ambiguous 時，優先問最能區分候選的一個自然問題；"
         "若有 required_next_question_intent，追問 intent 必須與它完全一致。"
         "不得向患者顯示候選科別名稱。"
@@ -96,11 +104,15 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         question = data.get("question")
         intent = data.get("intent")
         if status == "clarification_needed":
-            if not isinstance(question, str) or not 4 <= len(question.strip()) <= 180:
-                return None
-            question = question.strip()
-            if _UNSAFE_QUESTION.search(question) or not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent):
-                return None
+            if isinstance(question, str):
+                question = question.strip()
+            if (
+                not isinstance(question, str) or not 4 <= len(question) <= 180
+                or _UNSAFE_QUESTION.search(question) or _MULTI_QUESTION.search(question)
+                or not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent)
+            ):
+                question = None
+                intent = None
         else:
             question = None
             intent = None
@@ -118,8 +130,12 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             answer_confidence = None
         if status == "clarification_needed" and state.department_status == "ambiguous" and state.department_next_question_intent:
             if intent != state.department_next_question_intent:
-                question = None
-                intent = None
+                if not (
+                    state.pending_clarification_intent == intent
+                    and answer_status in {"partial", "unclear"}
+                ):
+                    question = None
+                    intent = None
         return ClarificationSuggestion(
             status, question, intent, reason, answered_intent,
             answer_source.strip() if answer_source else None,
@@ -241,6 +257,7 @@ def advance_conversation(
         and not any(item.role == "assistant" and item.content == suggestion.question for item in case.history_records)
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
+    pending_focus = _pending_focus(state.next_information_needed)
     if valid_question:
         question = suggestion.question or ""
         if not pending_follow_up:
@@ -248,8 +265,12 @@ def advance_conversation(
             state.asked_clarification_intents.append(suggestion.intent or "")
         reason = suggestion.reason
     elif state.pending_clarification_intent:
-        question = "可以先補充上一個追問的答案，或描述目前症狀有什麼新的變化嗎？"
-        reason = "上一個澄清問題尚未可靠回答"
+        new_evidence = _new_grounded_medical_evidence(current_extractions, user_sources)
+        question = _focused_pending_retry(case, pending_focus, acknowledge=new_evidence)
+        if question is None:
+            _unresolved(case)
+            return
+        reason = "已記錄本輪新資訊，上一個澄清面向仍需確認" if new_evidence else "上一個澄清問題尚未可靠回答"
     else:
         question = next(
             (text for text in FALLBACK_QUESTIONS if not any(
@@ -268,7 +289,7 @@ def advance_conversation(
         reason = state.department_uncertainty_reason
     state.clarification_status = "clarifying"
     state.uncertainty_reasons = [reason]
-    state.next_information_needed = [reason]
+    state.next_information_needed = [pending_focus] if state.pending_clarification_intent and pending_focus and not valid_question else [reason]
     state.last_question_key = None
     state.is_complete = False
     case.triage.need_more_info = True
@@ -281,6 +302,47 @@ def _asks_filled_duration(case: TriageCase, intent: str | None, question: str | 
     return bool(
         case.patient_input.duration
         and ((intent and "duration" in intent) or (question and _DURATION_QUESTION.search(question)))
+    )
+
+
+def _new_grounded_medical_evidence(extractions: list[SemanticExtraction], user_sources: list[str]) -> bool:
+    return any(
+        item.field in _MEDICAL_FIELDS
+        and item.semantic_status in {"available", "partial"}
+        and isinstance(item.confidence, (int, float))
+        and not isinstance(item.confidence, bool)
+        and math.isfinite(item.confidence)
+        and item.confidence >= ACCEPT_THRESHOLD
+        and item.source_text.strip()
+        and any(item.source_text.strip() in source for source in user_sources)
+        for item in extractions
+    )
+
+
+def _pending_focus(reasons: list[str]) -> str | None:
+    if not reasons:
+        return None
+    focus = reasons[0].strip().strip("。？！? ")
+    if not focus or len(focus) > 60 or _UNSAFE_QUESTION.search(focus) or "科" in focus or re.search(r"與|和|及|、|以及|或", focus):
+        return None
+    return focus
+
+
+def _focused_pending_retry(case: TriageCase, focus: str | None, *, acknowledge: bool) -> str | None:
+    if focus:
+        prefix = "謝謝補充。" if acknowledge else ""
+        candidates = (
+            f"{prefix}關於「{focus}」，可以再具體描述一下嗎？",
+            f"關於「{focus}」，可以換個方式說明目前的情況嗎？",
+            *FALLBACK_QUESTIONS,
+        )
+    else:
+        candidates = FALLBACK_QUESTIONS
+    return next(
+        (question for question in candidates if not any(
+            item.role == "assistant" and item.content == question for item in case.history_records
+        )),
+        None,
     )
 
 
