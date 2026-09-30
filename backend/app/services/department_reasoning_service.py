@@ -216,7 +216,9 @@ async def reason_about_departments(case: TriageCase) -> None:
         state.department_next_question_intent = intent if (
             state.pending_clarification_intent is None and (proposed_status != "resolved" or len(candidates) != 1)
         ) else None
-        state.department_next_information_needed = reason if state.department_next_question_intent else None
+        # The proposal contract currently provides a diagnostic uncertainty reason and
+        # a machine intent, not a separately validated patient-answerable information need.
+        state.department_next_information_needed = None
         if not candidates:
             state.department_status = "unresolved"
         elif proposed_status == "resolved" and len(candidates) == 1 and candidates[0].confidence >= ACCEPT_THRESHOLD:

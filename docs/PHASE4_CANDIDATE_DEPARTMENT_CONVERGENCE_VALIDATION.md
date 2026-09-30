@@ -130,3 +130,28 @@ $env:CEREBRAS_API_KEY=''
 ```
 
 Final result: **500 passed, 7 warnings, 308 subtests passed**. The Phase 4.1 hematuria `有血絲` regression remains passing. Zero-schedule API semantics were not changed. Android, SQL schema/data, official Department KB, TTAS/red-flag and urgency rules, and doctor scoring were not modified. Phase 5 was not started.
+
+## Phase 4.2.2: clarification focus state
+
+The live hematuria conversation exposed a state-boundary bug rather than a candidate-ranking error. When the official evidence legitimately expanded from one routable department to multiple candidates, a surviving `flank_pain` intent could fall back through `next_information_needed`. That list had previously been populated with a Backend diagnostic reason, causing workflow wording such as `已記錄本輪新資訊，上一個澄清面向仍需確認` to be quoted to the patient.
+
+Clarification state now has strict responsibilities:
+
+- `uncertainty_reasons` stores Backend diagnostic and workflow reasons.
+- `next_information_needed` stores only concrete patient-answerable needs that pass the focus validator.
+- `pending_clarification_intent` stores the current canonical machine intent.
+- `department_next_question_intent` stores the candidate-disambiguation machine intent.
+- `department_next_information_needed` is left empty unless a separately validated patient-answerable need exists; the current department proposal's uncertainty reason is no longer copied into it.
+
+A confidently grounded pending answer clears both the pending intent and its old information need. A valid, safe, nonduplicate same-intent planner question is accepted even when the provider does not emit a canonical structured field. Partial or unclear answers keep the pending intent and may use a targeted same-intent follow-up. Invalid, wrong-intent, unsafe, or duplicate proposals fall back without quoting uncertainty reasons. If no concrete patient-facing focus is available, Backend uses a neutral retry such as `可以再補充和剛才問題相關的症狀細節嗎？`; it does not derive medical wording from a snake_case intent.
+
+`backend/tests/test_phase422_clarification_focus.py` covers the exact ambiguous hematuria/urinary-burning state with required `flank_pain`, valid same-intent planning, invalid and duplicate proposals, partial/unclear persistence, grounded clearing, ambiguity preservation, forbidden workflow-reason invariants, and the unchanged eight-turn cap. Phase 4.1's grounded `有血絲` severity progression remains passing. No priority override or symptom-to-department mapping was added; multiple official candidates remain ambiguous until later grounded evidence changes convergence.
+
+Final Backend command, with the real-provider key blank for deterministic unit tests:
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+.\.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider
+```
+
+Result: **510 passed, 7 warnings, 308 subtests passed**. Android, SQL schema/data, official KB evidence, department mappings, TTAS/red-flag and urgency rules, and doctor scoring were unchanged. Phase 5 was not started.

@@ -20,6 +20,11 @@ FALLBACK_QUESTIONS = (
     "剛才提到的不舒服，還有什麼變化或細節是你覺得重要的？",
     "可以補充目前症狀發生時的感受，或回答上一個追問嗎？",
 )
+NEUTRAL_PENDING_RETRIES = (
+    "可以再補充和剛才問題相關的症狀細節嗎？",
+    "可以換個方式描述剛才問題所詢問的具體情況嗎？",
+    "請再說明一下和剛才問題相關的症狀變化或感受。",
+)
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科別|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
@@ -27,6 +32,11 @@ _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開
 _MULTI_QUESTION = re.compile(r"[?？].*[?？]|[;；]", re.DOTALL)
 _MULTI_DIMENSION_QUESTION = re.compile(
     r"(?:，|、|和|以及|並且|同時|另外|還有).{0,80}(?:是否|有沒有|多久|何時|哪裡|什麼|如何|多少|幾次|幾天)"
+)
+_INTERNAL_STATE_TEXT = re.compile(
+    r"已記錄本輪新資訊|上一個澄清(?:面向|問題)|目前仍需更多可靠|"
+    r"科別仍不確定|科別.*(?:不確定|未收斂)|workflow|工作流程|"
+    r"本輪症狀抽取|尚無\s*grounded|目前仍缺少可區分症狀"
 )
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
@@ -85,6 +95,9 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "partial 或 unclear 時維持同一 intent，提出一個更精確、不重複、只問同一面向的追問。"
         "department_status=ambiguous 時，優先問最能區分候選的一個自然問題；"
         "若有 required_next_question_intent，追問 intent 必須與它完全一致。"
+        "uncertainty_reasons 與 department_uncertainty_reason 是 Backend 診斷資訊，絕不可引用、改寫或當成患者追問焦點。"
+        "next_information_needed 只在內容是患者可直接回答的具體資訊需求時使用；若為空，應依 required intent、"
+        "既有對話和 grounded evidence 自然產生問題，不得把 snake_case intent 逐字翻譯成診斷。"
         "不得向患者顯示候選科別名稱。"
         "如果症狀資訊足夠，可建議 status=sufficient，但最終完成與否由 Backend 決定。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
@@ -114,6 +127,7 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
                 not isinstance(question, str) or not 4 <= len(question) <= 180
                 or _UNSAFE_QUESTION.search(question) or _MULTI_QUESTION.search(question)
                 or _MULTI_DIMENSION_QUESTION.search(question)
+                or _INTERNAL_STATE_TEXT.search(question)
                 or not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent)
             ):
                 question = None
@@ -163,6 +177,7 @@ def capture_pending_answer(case: TriageCase, suggestion: ClarificationSuggestion
         return False
     state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
     state.pending_clarification_intent = None
+    state.next_information_needed = []
     return True
 
 
@@ -175,6 +190,10 @@ def advance_conversation(
 ) -> None:
     """Apply only validated clarification proposals and Backend-owned state gates."""
     state = case.conversation_state
+    state.next_information_needed = _patient_information_needs(state.next_information_needed)
+    state.department_next_information_needed = _patient_information_need(
+        state.department_next_information_needed
+    )
     if state.clarification_status == "unresolved":
         _unresolved(case)
         return
@@ -245,9 +264,9 @@ def advance_conversation(
         _unresolved(case)
         return
 
-    pending_follow_up = bool(
-        grounded_answer
-        and suggestion.answer_status in {"partial", "unclear"}
+    same_pending_intent = bool(
+        suggestion is not None
+        and state.pending_clarification_intent
         and suggestion.intent == state.pending_clarification_intent
     )
     valid_question = (
@@ -255,7 +274,7 @@ def advance_conversation(
         and suggestion.status == "clarification_needed"
         and bool(suggestion.question)
         and bool(suggestion.intent)
-        and (pending_follow_up or (
+        and (same_pending_intent or (
             state.pending_clarification_intent is None
             and suggestion.intent not in state.asked_clarification_intents
         ))
@@ -263,9 +282,11 @@ def advance_conversation(
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
     pending_focus = _pending_focus(state.next_information_needed)
+    if pending_focus is None:
+        pending_focus = _patient_information_need(state.department_next_information_needed)
     if valid_question:
         question = suggestion.question or ""
-        if not pending_follow_up:
+        if state.pending_clarification_intent is None:
             state.pending_clarification_intent = suggestion.intent
             state.asked_clarification_intents.append(suggestion.intent or "")
         reason = suggestion.reason
@@ -277,12 +298,26 @@ def advance_conversation(
             return
         reason = "已記錄本輪新資訊，上一個澄清面向仍需確認" if new_evidence else "上一個澄清問題尚未可靠回答"
     else:
-        question = next(
-            (text for text in FALLBACK_QUESTIONS if not any(
-                item.role == "assistant" and item.content == text for item in case.history_records
-            )),
-            FALLBACK_QUESTIONS[-1],
+        required_intent = (
+            state.department_next_question_intent
+            if state.department_status == "ambiguous"
+            else None
         )
+        if required_intent:
+            state.pending_clarification_intent = required_intent
+            if required_intent not in state.asked_clarification_intents:
+                state.asked_clarification_intents.append(required_intent)
+            question = _focused_pending_retry(case, None, acknowledge=False)
+            if question is None:
+                _unresolved(case)
+                return
+        else:
+            question = next(
+                (text for text in FALLBACK_QUESTIONS if not any(
+                    item.role == "assistant" and item.content == text for item in case.history_records
+                )),
+                FALLBACK_QUESTIONS[-1],
+            )
         reason = "目前仍需更多可靠的症狀描述"
     if low_confidence:
         reason = "本輪症狀抽取信心不足，仍需釐清"
@@ -294,7 +329,7 @@ def advance_conversation(
         reason = state.department_uncertainty_reason
     state.clarification_status = "clarifying"
     state.uncertainty_reasons = [reason]
-    state.next_information_needed = [pending_focus] if state.pending_clarification_intent and pending_focus and not valid_question else [reason]
+    state.next_information_needed = [pending_focus] if state.pending_clarification_intent and pending_focus else []
     state.last_question_key = None
     state.is_complete = False
     case.triage.need_more_info = True
@@ -325,10 +360,29 @@ def _new_grounded_medical_evidence(extractions: list[SemanticExtraction], user_s
 
 
 def _pending_focus(reasons: list[str]) -> str | None:
-    if not reasons:
+    return next(
+        (focus for focus in (_patient_information_need(reason) for reason in reasons) if focus),
+        None,
+    )
+
+
+def _patient_information_needs(values: list[str]) -> list[str]:
+    needs = [_patient_information_need(value) for value in values]
+    return [need for need in needs if need]
+
+
+def _patient_information_need(value: object) -> str | None:
+    if not isinstance(value, str):
         return None
-    focus = reasons[0].strip().strip("。？！? ")
-    if not focus or len(focus) > 60 or _UNSAFE_QUESTION.search(focus) or "科" in focus or re.search(r"與|和|及|、|以及|或", focus):
+    focus = value.strip().strip("。？！? ")
+    if (
+        not focus
+        or len(focus) > 60
+        or _UNSAFE_QUESTION.search(focus)
+        or _INTERNAL_STATE_TEXT.search(focus)
+        or "科" in focus
+        or re.search(r"與|和|及|、|以及|或", focus)
+    ):
         return None
     return focus
 
@@ -342,7 +396,7 @@ def _focused_pending_retry(case: TriageCase, focus: str | None, *, acknowledge: 
             *FALLBACK_QUESTIONS,
         )
     else:
-        candidates = FALLBACK_QUESTIONS
+        candidates = (*NEUTRAL_PENDING_RETRIES, *FALLBACK_QUESTIONS)
     return next(
         (question for question in candidates if not any(
             item.role == "assistant" and item.content == question for item in case.history_records
