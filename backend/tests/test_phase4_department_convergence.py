@@ -44,6 +44,15 @@ def case_with_symptom() -> TriageCase:
     case = TriageCase(case_id="phase4-synthetic")
     case.history_records = [Message(role="user", content="我有症狀甲")]
     case.patient_input.symptom = "症狀甲"
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="症狀甲",
+        semantic_status="available",
+        assertion="present",
+        confidence=0.95,
+        source_text="症狀甲",
+        extractor="ai",
+    )]
     return case
 
 
@@ -152,6 +161,28 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.case.conversation_state.department_status, "ambiguous")
         self.assertIsNone(self.case.department_result)
 
+    async def test_candidate_ai_payload_uses_structured_evidence_not_raw_clinical_text(self):
+        self.case.conversation_state.clarification_evidence["severity"] = "raw clarification"
+        provider = AsyncMock(return_value=json.dumps({
+            "status": "ambiguous",
+            "candidates": [candidate(101), candidate(102)],
+        }, ensure_ascii=False))
+        with patch.object(reasoning, "fetch_active_departments", return_value=self.active), patch.object(
+            reasoning, "load_department_knowledge", return_value=(self.sources, self.records),
+        ), patch.object(reasoning, "complete_runtime_json", new=provider):
+            await reasoning.reason_about_departments(self.case)
+
+        prompt = provider.await_args.args[0]
+        payload = json.loads(prompt.split("\n資料：", 1)[1])
+        self.assertEqual(
+            set(payload),
+            {"accepted_semantic_evidence", "retrieved_official_evidence", "previously_asked_intents"},
+        )
+        self.assertNotIn("conversation_history", payload)
+        self.assertNotIn("grounded_patient_evidence", payload)
+        self.assertNotIn("accepted_clarification_evidence", payload)
+        self.assertEqual(payload["accepted_semantic_evidence"][0]["assertion"], "present")
+
     async def test_new_grounded_answer_recomputes_candidates_and_converges(self):
         first = {"status": "ambiguous", "candidates": [candidate(101, 0.8), candidate(102, 0.77)], "next_question_intent": "differentiate_signal"}
         second = {"status": "resolved", "candidates": [candidate(102, 0.91, [support(102, "線索乙", text="線索乙")])]}
@@ -162,6 +193,15 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
             await reasoning.reason_about_departments(self.case)
             self.case.history_records.append(Message(role="user", content="還有線索乙"))
             self.case.conversation_state.clarification_evidence["differentiate_signal"] = "線索乙"
+            self.case.semantic_extractions.append(SemanticExtraction(
+                field="accompanying_symptoms",
+                normalized_value=["線索乙"],
+                semantic_status="available",
+                assertion="present",
+                confidence=0.95,
+                source_text="線索乙",
+                extractor="ai",
+            ))
             await reasoning.reason_about_departments(self.case)
         self.assertEqual(self.case.conversation_state.department_status, "resolved")
         self.assertEqual([item.dept_id for item in self.case.conversation_state.candidate_departments], [102])

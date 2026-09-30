@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import re
 import logging
 from datetime import datetime, timedelta
@@ -56,6 +57,9 @@ RED_FLAG_PATTERNS = {
 RED_FLAG_QUESTION_KEY = "red_flags"
 QUESTION_TEXTS = {spec.state_field: spec.canonical_text for spec in QUESTION_SPECS}
 CHECKLIST_FIELD_ORDER = tuple(spec.state_field for spec in QUESTION_SPECS)
+_EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
+_MEDICAL_ASSERTION_FIELDS = {"symptom", "accompanying_symptoms"}
+_SEMANTIC_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous", "uncertain"}
 
 RED_FLAG_SCREEN_TERMS = [
     "胸痛",
@@ -566,6 +570,22 @@ def apply_semantic_extractions(
             if is_ai_extraction:
                 _log_ai_apply_decision(case, extraction, False, "invalid_field")
             continue
+        has_medical_concept = _has_nonempty_medical_concept(extraction)
+        if is_ai_extraction and (
+            extraction.semantic_status not in _SEMANTIC_STATUSES
+            or type(extraction.confidence) not in {int, float}
+            or not math.isfinite(extraction.confidence)
+            or not 0.0 <= extraction.confidence <= 1.0
+        ):
+            _log_ai_apply_decision(case, extraction, False, "invalid_semantic_metadata")
+            continue
+        if (
+            is_ai_extraction
+            and has_medical_concept
+            and extraction.assertion not in _EVIDENCE_ASSERTIONS
+        ):
+            _log_ai_apply_decision(case, extraction, False, "missing_or_invalid_assertion")
+            continue
         if extraction.field == RED_FLAG_QUESTION_KEY and not allow_red_flag_completion:
             if is_ai_extraction:
                 _log_ai_apply_decision(case, extraction, False, "red_flags_deterministic_only")
@@ -575,6 +595,10 @@ def apply_semantic_extractions(
             and not case.conversation_state.revision_mode
             and extraction.semantic_status in {"available", "partial"}
             and extraction.field != "accompanying_symptoms"
+            and not (
+                extraction.field == "symptom"
+                and extraction.assertion in {"absent", "uncertain"}
+            )
             and _field_has_value(case, extraction.field)
         ):
             _log_ai_apply_decision(case, extraction, False, "duplicate_existing_value")
@@ -605,6 +629,19 @@ def apply_semantic_extractions(
             if is_ai_extraction:
                 _log_ai_apply_decision(case, extraction, False, "invalid_normalized_value")
             continue
+        nonpositive_medical_evidence = (
+            is_ai_extraction
+            and has_medical_concept
+            and extraction.assertion in {"absent", "uncertain"}
+        )
+        if nonpositive_medical_evidence:
+            if extraction.confidence < ACCEPT_THRESHOLD:
+                _log_ai_apply_decision(case, extraction, False, "confidence_too_low")
+                continue
+            _record_semantic_extraction(case, extraction)
+            accepted_extractions.append(extraction)
+            _log_ai_apply_decision(case, extraction, True, None)
+            continue
         if is_ai_extraction and not accepted(extraction.confidence, extraction.semantic_status):
             reason = (
                 "confidence_too_low"
@@ -629,6 +666,16 @@ def apply_semantic_extractions(
         case.semantic_extractions.extend(accepted_extractions)
         case.semantic_extractions = case.semantic_extractions[-50:]
     _refresh_collected_fields(case)
+
+
+def _has_nonempty_medical_concept(extraction: SemanticExtraction) -> bool:
+    if extraction.field == "symptom":
+        return isinstance(extraction.normalized_value, str) and bool(extraction.normalized_value.strip())
+    if extraction.field == "accompanying_symptoms":
+        return isinstance(extraction.normalized_value, list) and any(
+            isinstance(item, str) and item.strip() for item in extraction.normalized_value
+        )
+    return False
 
 
 def _field_has_value(case: TriageCase, field_name: str) -> bool:
@@ -674,6 +721,13 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
 
     if extraction.field == "red_flags" and extraction.semantic_status == "ambiguous":
         case.patient_input.red_flags_status = "ambiguous"
+        return
+
+    if (
+        extraction.extractor.startswith("ai")
+        and extraction.field in _MEDICAL_ASSERTION_FIELDS
+        and extraction.assertion != "present"
+    ):
         return
 
     if extraction.semantic_status != "uncertain" and not accepted(

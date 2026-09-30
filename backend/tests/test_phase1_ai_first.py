@@ -18,14 +18,17 @@ chat_route = importlib.import_module("app.routes.chat")
 recommend_route = importlib.import_module("app.routes.recommend")
 
 
-def extraction(field, value, source, confidence=0.95):
-    return {
+def extraction(field, value, source, confidence=0.95, assertion=None):
+    item = {
         "field": field,
         "normalized_value": value,
         "semantic_status": "available",
         "confidence": confidence,
         "source_text": source,
     }
+    if assertion is not None or field in {"symptom", "accompanying_symptoms"}:
+        item["assertion"] = assertion or "present"
+    return item
 
 
 class Phase1AiFirstTest(unittest.TestCase):
@@ -40,6 +43,8 @@ class Phase1AiFirstTest(unittest.TestCase):
         self.assertIn("最短連續逐字原文", prompt)
         self.assertIn("直接支持該 extraction", prompt)
         self.assertIn("不得包含無關的前後症狀、否定句或其他子句", prompt)
+        self.assertIn("present 表示患者陳述存在", prompt)
+        self.assertIn("若同一句包含不同 polarity，必須拆成多筆 extraction", prompt)
 
     def post_text(self, message, provider_result, *, triage_case=None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
@@ -99,11 +104,56 @@ class Phase1AiFirstTest(unittest.TestCase):
         result, _ = self.post_text(message, {"semantic_extractions": [
             extraction("onset", "從樓梯踩空", "上禮拜從樓梯踩空"),
             extraction("accompanying_symptoms", ["右腳腳背腫", "走路會痛"], message),
-            extraction("accompanying_symptoms", ["發燒"], "右腳腳背腫"),
         ]})
         patient = result["triage_case"]["patient_input"]
         self.assertEqual(patient["onset"], "從樓梯踩空")
         self.assertEqual(patient["accompanying_symptoms"], ["右腳腳背腫", "走路會痛"])
+
+    def test_missing_or_invalid_medical_assertion_fails_closed(self):
+        for assertion in (None, "yes"):
+            with self.subTest(assertion=assertion):
+                item = extraction("symptom", "胸痛", "有胸痛")
+                if assertion is None:
+                    item.pop("assertion")
+                else:
+                    item["assertion"] = assertion
+                result, _ = self.post_text("我有胸痛", {"semantic_extractions": [item]})
+                self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "")
+                self.assertEqual(result["triage_case"]["semantic_extractions"], [])
+
+    def test_absent_and_uncertain_medical_assertions_do_not_fill_positive_patient_state(self):
+        cases = (
+            ("我沒有胸痛", "沒有胸痛", "absent", "available"),
+            ("我不知道這算不算胸痛", "不知道這算不算胸痛", "uncertain", "ambiguous"),
+        )
+        for message, source, assertion, status in cases:
+            with self.subTest(assertion=assertion):
+                item = extraction(
+                    "accompanying_symptoms", ["胸痛"], source, assertion=assertion,
+                )
+                item["semantic_status"] = status
+                result, _ = self.post_text(message, {"semantic_extractions": [item]})
+                case = result["triage_case"]
+                self.assertEqual(case["patient_input"]["accompanying_symptoms"], [])
+                self.assertEqual(case["semantic_extractions"][0]["assertion"], assertion)
+
+    def test_malicious_medical_extraction_metadata_is_rejected(self):
+        base = extraction("symptom", "胸痛", "有胸痛")
+        invalid_items = []
+        for confidence in (float("nan"), float("inf"), True, -0.1, 1.1):
+            item = dict(base, confidence=confidence)
+            invalid_items.append(item)
+        invalid_items.extend([
+            dict(base, field="confirmed"),
+            dict(base, source_text="使用者沒說過"),
+            dict(base, normalized_value=["胸痛"]),
+        ])
+
+        for item in invalid_items:
+            with self.subTest(item=item):
+                result, _ = self.post_text("我有胸痛", {"semantic_extractions": [item]})
+                self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "")
+                self.assertEqual(result["triage_case"]["semantic_extractions"], [])
 
     def test_ungrounded_disallowed_and_invalid_values_are_rejected(self):
         result, _ = self.post_text(

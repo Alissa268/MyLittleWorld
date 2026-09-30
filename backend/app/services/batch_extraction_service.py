@@ -6,10 +6,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.config import get_settings
-from app.schemas import BatchAnswer, Message, SemanticExtraction, TriageCase
+from app.schemas import BatchAnswer, EvidenceAssertion, Message, SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS
 from app.services.department_preference_service import capture_department_preference
@@ -64,10 +64,18 @@ class _AiExtractionItem(BaseModel):
     field: str
     normalized_value: Any = None
     semantic_status: str = "unknown"
+    assertion: EvidenceAssertion | None = None
     confidence: float = Field(default=0.0, ge=0.0, le=1.0)
     source_text: str = ""
     needs_clarification: bool = False
     follow_up_reason: str | None = None
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence_type(cls, value: object) -> object:
+        if type(value) not in {int, float}:
+            raise ValueError("confidence must be a finite number")
+        return value
 
 
 class _AiExtractionPayload(BaseModel):
@@ -802,6 +810,7 @@ def _build_batch_prompt(
       "field": "body_part",
       "normalized_value": "右肩",
       "semantic_status": "available",
+      "assertion": null,
       "confidence": 0.9,
       "source_text": "右肩附近",
       "needs_clarification": false,
@@ -814,11 +823,12 @@ confidence 必須介於 0 與 1。不得輸出未列在允許欄位中的 field�
 key 只表示目前系統正在問的欄位，不代表原句一定回答了該欄位；答非所問時不得硬填。
 同一句若明確包含其他允許欄位，可以一併抽取，但不得猜測未提及資訊。
 最外層 key 必須且只能是 extractions，不可改成 semantic_extractions 或其他名稱。
-source_text 必須逐字複製自本批 keyed answers 的一段連續原文，不可改寫或省略。
+source_text 必須是直接支持該 extraction 的最短連續逐字患者原文，不可改寫，不得夾帶無關子句。
 只要原句對任一允許欄位有明確資訊，就必須輸出該 extraction；不要因其他欄位不確定而整體回空。
 弱語氣不等於無法回答：「吧、可能、大概、應該、好像、差不多、左右」若仍有清楚核心資訊，必須輸出 available（集合欄位可用 partial）、needs_clarification=false。
 available 表示資訊足以寫入；partial 表示可用但只涵蓋集合的一部分；ambiguous 只用於互相衝突且無法安全選擇；unknown 只用於未提供資訊或明確表示不知道。
 symptom 可正規化為簡短症狀文字，不必受手寫症狀詞表限制；body_part 可正規化為簡短解剖位置，不必受手寫部位詞表限制。
+symptom 只要 normalized_value 非空，就必須輸出 assertion=present/absent/uncertain。若同一句有不同 polarity，必須拆成不同 extraction 並各自引用最短 source_text；Backend 不會替你解析否定 scope。
 body_part 若是未知於既有 canonical 的部位，normalized_value 應保留 source_text 中可逐字找到的核心部位（例如「鎖骨附近」→「鎖骨」、「手腕那邊」→「手腕」）；只有已知 canonical 可改寫（例如「腸胃」→「腹」）。不得把來源中的部位替換成無關部位。
 duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 severity 的 normalized_value 只能是字串 "mild"、"moderate" 或 "severe"；輕微／還好轉為 mild，普通／中等／中度轉為 moderate，嚴重／很嚴重／痛到無法睡覺轉為 severe。不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
@@ -903,6 +913,7 @@ def _parse_ai_extractions(
                 field=field_name,
                 normalized_value=item.normalized_value,
                 semantic_status=item.semantic_status,
+                assertion=item.assertion,
                 confidence=item.confidence,
                 source_text=source_text,
                 needs_clarification=item.needs_clarification,
@@ -941,6 +952,13 @@ def _semantic_rejection_reason(
         return "duplicate_field"
     if item.semantic_status not in _ALLOWED_STATUSES:
         return "invalid_status"
+    if (
+        field_name == "symptom"
+        and isinstance(item.normalized_value, str)
+        and item.normalized_value.strip()
+        and item.assertion is None
+    ):
+        return "missing_assertion"
     if (
         item.semantic_status in {"available", "partial", "unavailable"}
         and item.confidence < ACCEPT_THRESHOLD

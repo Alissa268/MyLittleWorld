@@ -233,6 +233,7 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
                 "field": "symptom",
                 "normalized_value": "灼熱感",
                 "semantic_status": "available",
+                "assertion": "present",
                 "confidence": 0.87,
                 "source_text": "燒灼的感覺",
             },
@@ -458,6 +459,31 @@ class SemanticAiValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("我不喜歡早上跟晚上", prompt)
         self.assertIn("其他都可以／其餘都可以", prompt)
         self.assertIn("partial 是可直接寫入的有效答案", prompt)
+        self.assertIn("assertion=present/absent/uncertain", prompt)
+        self.assertIn("Backend 不會替你解析否定 scope", prompt)
+
+    def test_batch_ai_symptom_requires_valid_assertion(self):
+        answer = "我有胸痛"
+        for assertion in (None, "yes"):
+            with self.subTest(assertion=assertion):
+                item = {
+                    "field": "symptom",
+                    "normalized_value": "胸痛",
+                    "semantic_status": "available",
+                    "confidence": 0.95,
+                    "source_text": "有胸痛",
+                }
+                if assertion is not None:
+                    item["assertion"] = assertion
+                try:
+                    parsed = batch_extraction_service._parse_ai_extractions(
+                        json.dumps({"extractions": [item]}, ensure_ascii=False),
+                        {"symptom": answer},
+                        ["symptom"],
+                    )
+                except ValueError:
+                    parsed = []
+                self.assertEqual(parsed, [])
 
 
 if __name__ == "__main__":

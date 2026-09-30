@@ -38,6 +38,7 @@ ChecklistField = Literal[
 ]
 DepartmentQuestionKey = Literal["department_clarification"]
 DepartmentStateField = Literal["department_context"]
+EvidenceAssertion = Literal["present", "absent", "uncertain"]
 
 
 class QuestionItem(BaseModel):
@@ -63,6 +64,7 @@ class SemanticExtraction(BaseModel):
     field: str
     normalized_value: Any = None
     semantic_status: str = "unknown"
+    assertion: Optional[EvidenceAssertion] = None
     confidence: float = 0.0
     source_text: str = ""
     needs_clarification: bool = False

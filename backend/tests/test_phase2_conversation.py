@@ -19,14 +19,17 @@ chat_route = importlib.import_module("app.routes.chat")
 recommend_route = importlib.import_module("app.routes.recommend")
 
 
-def extraction(field, value, source, confidence=0.95):
-    return {
+def extraction(field, value, source, confidence=0.95, assertion=None):
+    item = {
         "field": field,
         "normalized_value": value,
         "source_text": source,
         "confidence": confidence,
         "semantic_status": "available",
     }
+    if assertion is not None or field in {"symptom", "accompanying_symptoms"}:
+        item["assertion"] = assertion or "present"
+    return item
 
 
 class Phase2ConversationTest(unittest.TestCase):

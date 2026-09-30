@@ -24,11 +24,14 @@ SECOND_USER_TEXT = (
 )
 
 
-def extraction(field: str, value: object, source: str) -> dict:
-    return {
+def extraction(field: str, value: object, source: str, assertion: str | None = None) -> dict:
+    item = {
         "field": field, "normalized_value": value, "source_text": source,
         "confidence": 0.95, "semantic_status": "available",
     }
+    if assertion is not None or field in {"symptom", "accompanying_symptoms"}:
+        item["assertion"] = assertion or "present"
+    return item
 
 
 def pending_case() -> TriageCase:

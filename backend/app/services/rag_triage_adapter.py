@@ -13,6 +13,8 @@ from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
 
 logger = logging.getLogger(__name__)
+_EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
+_MEDICAL_ASSERTION_FIELDS = {"symptom", "accompanying_symptoms"}
 
 
 async def complete_prompt(prompt: str) -> str:
@@ -252,10 +254,16 @@ def _semantic_extractions_from_ai(
         field = str(item.get("field") or "").strip()
         status = str(item.get("semantic_status") or "unknown")
         source_text = str(item.get("source_text") or "").strip()
-        try:
-            confidence = float(item.get("confidence", 0.0))
-        except (TypeError, ValueError):
+        raw_confidence = item.get("confidence", 0.0)
+        if type(raw_confidence) not in {int, float}:
             continue
+        confidence = float(raw_confidence)
+        raw_assertion = item.get("assertion")
+        assertion = raw_assertion if isinstance(raw_assertion, str) and raw_assertion in _EVIDENCE_ASSERTIONS else None
+        medical_concept = field in _MEDICAL_ASSERTION_FIELDS and _has_nonempty_medical_concept(
+            field,
+            item.get("normalized_value"),
+        )
         if (
             field not in {
                 "symptom", "body_part", "duration", "severity", "onset",
@@ -264,6 +272,7 @@ def _semantic_extractions_from_ai(
             or status not in {"available", "unavailable", "unknown", "partial", "ambiguous"}
             or not math.isfinite(confidence)
             or not 0.0 <= confidence <= 1.0
+            or (medical_concept and assertion is None)
             or not _semantic_value_valid(field, item.get("normalized_value"), status, source_text)
             or not _source_text_grounded(source_text, user_sources or [])
         ):
@@ -274,6 +283,7 @@ def _semantic_extractions_from_ai(
                     field=field,
                     normalized_value=item.get("normalized_value"),
                     semantic_status=status,
+                    assertion=assertion,
                     confidence=confidence,
                     source_text=source_text,
                     needs_clarification=bool(item.get("needs_clarification", False)),
@@ -284,6 +294,16 @@ def _semantic_extractions_from_ai(
         except (TypeError, ValueError):
             logger.warning("rag_triage_adapter skipped invalid semantic extraction")
     return extractions
+
+
+def _has_nonempty_medical_concept(field: str, value: Any) -> bool:
+    if field == "symptom":
+        return isinstance(value, str) and bool(value.strip())
+    if field == "accompanying_symptoms":
+        return isinstance(value, list) and any(
+            isinstance(item, str) and item.strip() for item in value
+        )
+    return False
 
 
 def _source_text_grounded(source_text: str, user_sources: list[str]) -> bool:
@@ -357,9 +377,11 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
 6. 不得輸出 red_flags；急迫症狀由 deterministic safety parser 獨立處理。
 7. 不要輸出 patient_input、triage、next_question、stage、科別或掛號資訊。
 8. duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
-9. source_text 必須是直接支持該 extraction 的最短連續逐字原文，不可改寫；不得包含無關的前後症狀、否定句或其他子句。
-10. severity 的 normalized_value 只能輸出字串 "mild"、"moderate" 或 "severe"：輕微／還好 → mild，普通／中等／中度 → moderate，嚴重／很嚴重／痛到無法睡覺 → severe；不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
-11. onset 為簡短的發作描述字串；accompanying_symptoms 為伴隨症狀字串陣列。這兩欄的 normalized_value 必須逐字出現在各自的 source_text 中。
+9. source_text 必須是直接支持該 extraction 的最短連續逐字原文（患者原話），不可改寫；不得包含無關的前後症狀、否定句或其他子句。
+10. symptom 與 accompanying_symptoms 只要 normalized_value 含有 medical concept，就必須輸出 assertion：present 表示患者陳述存在、absent 表示患者否認、uncertain 表示患者不確定；其他欄位可省略 assertion 或輸出 null。
+11. 同一 extraction 中的所有 normalized concept 必須具有相同 assertion；若同一句包含不同 polarity，必須拆成多筆 extraction，且每筆各自引用最短的 grounded source_text。不得把 mixed-polarity 整句共用為單一 medical extraction。
+12. severity 的 normalized_value 只能輸出字串 "mild"、"moderate" 或 "severe"：輕微／還好 → mild，普通／中等／中度 → moderate，嚴重／很嚴重／痛到無法睡覺 → severe；不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
+13. onset 為簡短的發作描述字串；accompanying_symptoms 為伴隨症狀字串陣列，可使用 grounded source_text 的語意正規化概念，不可添加原文未表達的症狀。
 
 請只輸出 JSON，不要輸出其他文字：
 {{
@@ -368,6 +390,7 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
       "field": "preferred_days",
       "normalized_value": ["週一", "週二"],
       "semantic_status": "partial",
+      "assertion": null,
       "confidence": 0.82,
       "source_text": "週一週二可以",
       "needs_clarification": false,

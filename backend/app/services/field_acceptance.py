@@ -364,13 +364,29 @@ def ai_normalized_value_rejection_reason(
     source_text: str,
 ) -> str | None:
     """Validate AI output shape without requiring free-text values to be in rule dictionaries."""
+    if field == "symptom":
+        text = str(value or "").strip() if isinstance(value, str) else ""
+        if not text or len(text) > 24 or re.search(r"[\r\n，。！？；;]", text):
+            return "invalid_normalized_value"
+        if "科" in text or any(term in text for term in ("門診", "醫院", "診所", "掛號")):
+            return "invalid_normalized_value"
+        if re.search(r"\d{4}-\d{2}-\d{2}", text) or text in {
+            "週一", "週二", "週三", "週四", "週五", "週六", "週日", "上午", "下午", "夜間",
+        }:
+            return "invalid_normalized_value"
+        return None
+    if field == "accompanying_symptoms":
+        return None if (
+            isinstance(value, list)
+            and 0 < len(value) <= 10
+            and all(isinstance(item, str) and 0 < len(item.strip()) <= 30 for item in value)
+        ) else "invalid_normalized_value"
     if status in {"unknown", "ambiguous"}:
         return None
-    if field in {"onset", "accompanying_symptoms"}:
+    if field == "onset":
         if not normalized_value_valid(field, value, status):
             return "invalid_normalized_value"
-        values = [value] if field == "onset" else value
-        if any(item.strip() not in source_text for item in values):
+        if value.strip() not in source_text:
             return "normalized_value_not_supported_by_source"
         return None
     if field not in {"symptom", "body_part"}:
@@ -378,7 +394,7 @@ def ai_normalized_value_rejection_reason(
 
     text = str(value or "").strip()
     source = str(source_text or "").strip()
-    max_length = 24 if field == "symptom" else 16
+    max_length = 16
     if not text or len(text) > max_length or re.search(r"[\r\n，。！？；;]", text):
         return "invalid_normalized_value"
     if "科" in text or any(term in text for term in ("門診", "醫院", "診所", "掛號")):
@@ -387,9 +403,6 @@ def ai_normalized_value_rejection_reason(
         "週一", "週二", "週三", "週四", "週五", "週六", "週日", "上午", "下午", "夜間",
     }:
         return "invalid_normalized_value"
-
-    if field == "symptom":
-        return None
 
     if text in {"左", "右", "左邊", "右邊", "附近", "這裡", "那裡", "身體"}:
         return "invalid_normalized_value"

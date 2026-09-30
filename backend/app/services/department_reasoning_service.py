@@ -15,84 +15,79 @@ from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
 )
 from app.services.department_preference_service import resolve_requested_department
-from app.services.negation_utils import (
-    contains_non_negated_keyword,
-    grounded_source_supports_positive_normalization,
-)
+from app.services.field_acceptance import ai_normalized_value_valid
 
 logger = logging.getLogger(__name__)
 _INTENT = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
-_MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
+_ASSERTED_MEDICAL_FIELDS = {"symptom", "accompanying_symptoms"}
+_EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
+_SEMANTIC_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous"}
 
 
 def _user_texts(case: TriageCase) -> list[str]:
     return [message.content for message in case.history_records if message.role == "user"]
 
 
-def _accepted_evidence(case: TriageCase) -> list[tuple[str, str]]:
+def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
+    """Return grounded, schema-valid medical evidence without interpreting raw text."""
     history = _user_texts(case)
-    evidence: set[tuple[str, str]] = set()
-    symptom = case.patient_input.symptom.strip()
-    if symptom and any(symptom in text for text in history):
-        evidence.add((symptom, symptom))
+    evidence: dict[tuple[str, str, str, str], dict] = {}
     for item in case.semantic_extractions:
         source = item.source_text.strip()
         if (
-            item.field not in _MEDICAL_FIELDS
-            or item.semantic_status not in {"available", "partial"}
+            item.field not in _ASSERTED_MEDICAL_FIELDS
+            or item.assertion not in _EVIDENCE_ASSERTIONS
+            or item.semantic_status not in _SEMANTIC_STATUSES
             or type(item.confidence) not in {int, float}
             or not math.isfinite(item.confidence)
             or item.confidence < ACCEPT_THRESHOLD
             or not source
             or not any(source in text for text in history)
+            or not ai_normalized_value_valid(
+                item.field,
+                item.normalized_value,
+                item.semantic_status,
+                source,
+            )
         ):
             continue
-        evidence.add((source, source))
-        normalized = item.normalized_value
-        if isinstance(normalized, str) and normalized.strip():
-            evidence.add((source, normalized.strip()))
-        elif isinstance(normalized, list):
-            evidence.update((source, value.strip()) for value in normalized if isinstance(value, str) and value.strip())
-    for source in case.conversation_state.clarification_evidence.values():
-        if isinstance(source, str) and source.strip() and any(source.strip() in text for text in history):
-            evidence.add((source.strip(), source.strip()))
-    for field in ("body_part", "duration", "severity", "onset"):
-        value = getattr(case.patient_input, field)
-        if isinstance(value, str) and value.strip() and any(value.strip() in text for text in history):
-            evidence.add((value.strip(), value.strip()))
-    return sorted(evidence)
+        concepts = (
+            [item.normalized_value]
+            if isinstance(item.normalized_value, str)
+            else item.normalized_value
+        )
+        for concept in concepts if isinstance(concepts, list) else []:
+            if not isinstance(concept, str) or not concept.strip():
+                continue
+            normalized = concept.strip()
+            key = (item.field, normalized, source, item.assertion)
+            evidence[key] = {
+                "field": item.field,
+                "normalized_value": normalized,
+                "source_text": source,
+                "assertion": item.assertion,
+                "semantic_status": item.semantic_status,
+                "confidence": float(item.confidence),
+            }
+    return [evidence[key] for key in sorted(evidence)]
 
 
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
-    """Lexically match only official concepts against grounded text or accepted AI concepts."""
+    """Match official concepts only against validated present semantic evidence."""
     resolved = {entry["knowledge_department_name"]: entry for entry in resolutions if entry["status"] == "resolved"}
     concepts = {record["concept"] for record in records}
     found: dict[tuple[int, str, str, str], dict] = {}
-    for source, interpretation in _accepted_evidence(case):
-        normalized_source = normalize_concept(source)
-        normalized_interpretation = normalize_concept(interpretation)
+    for evidence in accepted_semantic_evidence(case):
+        if (
+            evidence["assertion"] != "present"
+            or evidence["semantic_status"] not in {"available", "partial"}
+        ):
+            continue
+        source = evidence["source_text"]
+        normalized_interpretation = normalize_concept(evidence["normalized_value"])
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
-            if (
-                normalized_concept not in normalized_interpretation
-                or not contains_non_negated_keyword(
-                    normalized_interpretation,
-                    normalized_concept,
-                )
-                or (
-                    normalized_concept in normalized_source
-                    and not contains_non_negated_keyword(
-                        normalized_source,
-                        normalized_concept,
-                    )
-                )
-                or (
-                    normalized_concept not in normalized_source
-                    and not grounded_source_supports_positive_normalization(
-                        normalized_source,
-                    )
-                )
-            ):
+            if normalized_concept not in normalized_interpretation:
                 continue
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["department_name"])
@@ -218,14 +213,14 @@ async def reason_about_departments(case: TriageCase) -> None:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             return
         payload = {
-            "conversation_history": [item.model_dump() for item in case.history_records[-24:]],
-            "grounded_patient_evidence": case.patient_input.model_dump(),
-            "accepted_clarification_evidence": state.clarification_evidence,
+            "accepted_semantic_evidence": accepted_semantic_evidence(case),
             "retrieved_official_evidence": retrieved,
             "previously_asked_intents": state.asked_clarification_intents,
         }
         prompt = (
             "僅比較 retrieved_official_evidence 中的正式 DB 科別，不可新增科別、猜 dept_id、診斷或控制流程。"
+            "accepted_semantic_evidence 是已驗證的 present/absent/uncertain 語意證據；"
+            "retrieved_official_evidence 只會由 present 證據建立，候選 supporting_evidence 只能引用其中項目。"
             "輸出 JSON：status (resolved/ambiguous/unresolved), candidates (最多 3 個，每項 dept_id, "
             "confidence 0..1, supporting_evidence 陣列；每筆有逐字 patient_source_text, knowledge_source_id, "
             "knowledge_concept), uncertainty_reason, next_question_intent。"
