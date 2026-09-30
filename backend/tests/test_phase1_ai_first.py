@@ -29,6 +29,18 @@ def extraction(field, value, source, confidence=0.95):
 
 
 class Phase1AiFirstTest(unittest.TestCase):
+    def test_semantic_prompt_requires_minimal_directly_supporting_source_span(self):
+        case = TriageCase(case_id="phase1-source-span-prompt")
+        case.history_records = [
+            Message(role="user", content="我沒有頭暈，但是現在有胸口痛"),
+        ]
+
+        prompt = rag_triage_adapter._build_symptom_collection_prompt(case)
+
+        self.assertIn("最短連續逐字原文", prompt)
+        self.assertIn("直接支持該 extraction", prompt)
+        self.assertIn("不得包含無關的前後症狀、否定句或其他子句", prompt)
+
     def post_text(self, message, provider_result, *, triage_case=None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
         provider = AsyncMock(

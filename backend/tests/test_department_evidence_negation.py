@@ -191,13 +191,19 @@ def test_positive_synonym_normalization_remains_available():
     assert retrieved[0]["patient_source_text"] == "我有胸口痛"
 
 
-def test_unrelated_earlier_negation_does_not_block_positive_contrast_clause():
-    case = TriageCase(case_id="normalized-positive-contrast")
-    source = "我沒有症狀乙，但是現在有症狀俗稱甲"
+@pytest.mark.parametrize(
+    "source",
+    [
+        "我沒有胸口痛，但是現在有頭暈",
+        "我沒有頭暈，但是現在有胸口痛",
+    ],
+)
+def test_mixed_polarity_source_cannot_support_normalized_only_concept(source):
+    case = TriageCase(case_id="normalized-mixed-polarity")
     case.history_records = [Message(role="user", content=source)]
     case.semantic_extractions = [SemanticExtraction(
         field="symptom",
-        normalized_value="正式症狀甲",
+        normalized_value="胸痛",
         semantic_status="available",
         confidence=0.96,
         source_text=source,
@@ -206,11 +212,48 @@ def test_unrelated_earlier_negation_does_not_block_positive_contrast_clause():
 
     retrieved = retrieve_official_evidence(
         case,
-        [_record("測試甲科", "正式症狀甲", "official_a")],
-        [_resolution("測試甲科", 101)],
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
+    )
+
+    assert retrieved == []
+
+
+def test_minimal_positive_synonym_span_supports_normalized_concept():
+    case = TriageCase(case_id="normalized-minimal-positive-span")
+    source = "現在有胸口痛"
+    case.history_records = [Message(role="user", content=source)]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="胸痛",
+        semantic_status="available",
+        confidence=0.96,
+        source_text=source,
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
     )
 
     assert len(retrieved) == 1
+    assert retrieved[0]["knowledge_concept"] == "胸痛"
+    assert retrieved[0]["patient_source_text"] == source
+
+
+def test_literal_concept_uses_all_occurrences_and_keeps_current_positive_one():
+    source = "之前沒有胸痛，但是現在有胸痛"
+
+    retrieved = retrieve_official_evidence(
+        _case_with_grounded_text(source),
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
+    )
+
+    assert len(retrieved) == 1
+    assert retrieved[0]["knowledge_concept"] == "胸痛"
     assert retrieved[0]["patient_source_text"] == source
 
 
