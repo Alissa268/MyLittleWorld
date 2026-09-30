@@ -12,7 +12,7 @@ Production retrieval uses `load_department_knowledge()`, `lookup_concept()`, and
 
 ## AI proposal and Backend validation
 
-The AI receives only retrieved official KB evidence with exactly resolved live DB IDs, plus conversation context and grounded patient evidence. It proposes `status`, at most three useful `candidates` (each with `dept_id`, `confidence`, and `supporting_evidence`), `uncertainty_reason`, and `next_question_intent`. Every support must contain verbatim `patient_source_text`, registered `knowledge_source_id`, and an exact retrieved `knowledge_concept`. AI-provided department names, workflow fields, diagnoses, or DB mappings are not accepted.
+The AI receives current validated structured semantic evidence, retrieved official KB evidence with exactly resolved live DB IDs, and previously asked intents. It proposes `status`, at most three useful `candidates` (each with `dept_id`, `confidence`, and `supporting_evidence`), `uncertainty_reason`, and `next_question_intent`. Every support must contain verbatim `patient_source_text`, registered `knowledge_source_id`, and an exact retrieved `knowledge_concept`. AI-provided department names, workflow fields, diagnoses, or DB mappings are not accepted.
 
 Backend rejects a candidate when its ID is not a positive integer, is absent or duplicated in the active DB list, or is not in the exact official-KB-to-live-DB resolution for that turn. It rejects unknown or mismatched source IDs, concepts not in the retrieved record, patient quotations not in actual user history, empty support, and confidence outside finite numeric `[0, 1]` (including booleans). Duplicate IDs are discarded; validated candidates are sorted and capped at three. Two or more valid candidates stay `ambiguous` even if AI says `resolved`; one valid candidate still stays `ambiguous` unless AI proposes `resolved` and confidence reaches `ACCEPT_THRESHOLD`. No valid candidate is `unresolved`. Only the successful single-candidate gate creates `DepartmentResult`, populated from the live DB resolution rather than AI names.
 
@@ -155,7 +155,7 @@ The same live test also exposed a separate Department evidence bug: `我沒有�
 
 Backend validates the field allow-list, normalized-value shape, semantic status, finite numeric confidence, assertion enum, and exact source grounding. It does not infer assertion from words such as `沒有` or `但是`, does not map synonyms, and does not decide which clause supports a normalized concept. A structurally valid `absent` or `uncertain` extraction remains in `case.semantic_extractions` for clarification, candidate context, and audit, but it cannot populate positive `patient_input.symptom` or `patient_input.accompanying_symptoms` state. Missing or invalid assertion on an AI medical concept fails closed.
 
-Department reasoning now uses `accepted_semantic_evidence(case)` as its clinical evidence boundary. This helper returns only grounded, confidence-qualified, shape-valid structured `symptom` and `accompanying_symptoms` concepts with their assertion. Raw conversation history remains available only for source grounding and workflow context. `patient_input` strings and `conversation_state.clarification_evidence` are no longer lexically scanned for KB concepts; clarification evidence proves that an intent received a grounded answer, not that every medical word in the answer is positive.
+Department reasoning now uses `accepted_semantic_evidence(case)` as its clinical evidence boundary. It returns current grounded, confidence-qualified, shape-valid structured evidence: asserted `symptom` and `accompanying_symptoms` concepts plus the relevant non-concept `body_part`, `duration`, `severity`, and `onset` fields. Raw conversation history remains available only for source grounding and workflow context. `patient_input` strings and `conversation_state.clarification_evidence` are no longer lexically scanned for KB concepts; clarification evidence proves that an intent received a grounded answer, not that every medical word in the answer is positive.
 
 Official KB retrieval considers only structured evidence with `assertion=present` and an available/partial semantic status. AI normalization therefore remains useful (`尿尿很痛 → 小便疼痛`, `症狀俗稱甲 → 正式症狀甲`) without a Python synonym dictionary. `absent` and `uncertain` evidence are included in the candidate reasoning context but cannot create routable official evidence. Candidate proposal validation is unchanged: every support must exactly match retrieved official evidence, a registered source, a grounded patient source span, and a unique live DB Department ID.
 
@@ -171,3 +171,28 @@ $env:CEREBRAS_API_KEY=''
 ```
 
 Result: **526 passed, 7 warnings, 322 subtests passed**. This is code-level Phase 4 architecture validation only; real Cerebras, real SQL, and Tailscale live acceptance remain separate after review. Android, SQL schema/data, official KB evidence, department mappings, TTAS/red-flag and urgency rules, and doctor scoring were unchanged. Phase 5 was not started.
+
+## Phase 4 Final Alignment: evidence-state closure
+
+`case.semantic_extractions` remains an append-only evidence history; it is not treated as the current clinical truth snapshot. Department reasoning now builds that snapshot in two steps. `validated_semantic_evidence_history()` keeps only grounded, schema-valid, confidence-qualified evidence in chronological append order. `effective_semantic_evidence()` then applies supersession and is the source used by candidate reasoning and official KB retrieval.
+
+For `symptom` and `accompanying_symptoms`, the supersession key is `(field, normalized concept)`. A list-valued accompanying-symptom extraction is expanded concept by concept, so a later `胸痛 / absent` replaces only the earlier `胸痛 / present` while an unrelated `頭暈 / present` remains current. A newer valid `absent` or `uncertain` assertion can replace an older `present`, and a newer valid `present` can replace an older denial. Malformed, ungrounded, or below-threshold evidence never enters the validated history and therefore cannot erase an older valid fact. This state update uses structured assertion and append order only; no Chinese negation, contrast, synonym, or revision-language parser was added.
+
+For non-concept context fields, the latest accepted value per field is current. The candidate AI's `accepted_semantic_evidence` now includes validated current evidence for `symptom`, `accompanying_symptoms`, `body_part`, `duration`, `severity`, and `onset`. This restores the structured location, timing, severity, and onset context that was lost when raw conversation and the mutable patient snapshot were removed from the payload. The candidate payload remains limited to `accepted_semantic_evidence`, `retrieved_official_evidence`, and `previously_asked_intents`; raw history, `patient_input`, and `clarification_evidence` are not clinical truth inputs.
+
+Official KB retrieval remains narrower than candidate context. It only looks up current `symptom` or `accompanying_symptoms` concepts whose assertion is `present` and whose semantic status is `available` or `partial`. `body_part`, `duration`, `severity`, and `onset` may inform candidate comparison but do not become symptom-to-department facts. Clarification evidence remains workflow grounding only and is never raw-scanned for KB concepts.
+
+The batch semantic extraction contract now applies the same assertion gate to both `symptom` and `accompanying_symptoms`: any nonempty medical concept requires `present`, `absent`, or `uncertain`. Missing or invalid assertion fails closed. The prompt states this requirement explicitly and continues to require the shortest directly supporting contiguous verbatim source span.
+
+New regressions cover present-to-absent, absent-to-present, present-to-uncertain, low-confidence non-supersession, independent list-concept supersession, latest non-concept context, all six candidate-context fields, present-concept-only retrieval, and missing/invalid batch accompanying-symptom assertions. Focused evidence/candidate/assertion tests passed **64 tests with 44 subtests**. Phase 4.1, Phase 4.2 hardening, Phase 4.2.2 clarification focus, and batch-flow focused regressions passed **95 tests with 69 subtests**.
+
+The complete Backend suite was run with `CEREBRAS_API_KEY` blank and no real provider calls:
+
+```powershell
+$env:CEREBRAS_API_KEY=''
+.\.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider
+```
+
+Final result: **533 passed, 7 warnings, 324 subtests passed**. The warnings are existing FastAPI/Starlette deprecations.
+
+This is Phase 4 code-level evidence-state closure only. It does not claim real Cerebras, real SQL, or Tailscale live acceptance. Android, SQL schema/data, official KB records and mappings, TTAS/red-flag policy, urgency scoring, doctor scoring, accessibility, ASR/TTS, and the Schedule contract were not changed. Phase 5 was not started.

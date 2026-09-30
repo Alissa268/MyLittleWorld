@@ -3,8 +3,10 @@ from __future__ import annotations
 from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.department_reasoning_service import (
     accepted_semantic_evidence,
+    effective_semantic_evidence,
     retrieve_official_evidence,
     validate_candidate_proposal,
+    validated_semantic_evidence_history,
 )
 from app.services.rule_engine import apply_semantic_extractions
 
@@ -56,6 +58,24 @@ def _retrieve(case: TriageCase, concept: str = "胸痛") -> list[dict]:
         case,
         [_record("一般內科", concept, "general_official")],
         [_resolution("一般內科", 1232)],
+    )
+
+
+def _evidence(
+    field: str,
+    value: str | list[str],
+    assertion: str | None,
+    source: str,
+    confidence: float = 0.96,
+) -> SemanticExtraction:
+    return SemanticExtraction(
+        field=field,
+        normalized_value=value,
+        semantic_status="available" if assertion != "uncertain" else "ambiguous",
+        assertion=assertion,
+        confidence=confidence,
+        source_text=source,
+        extractor="ai",
     )
 
 
@@ -263,3 +283,89 @@ def test_live_hematuria_denial_uses_structured_assertions_only():
         [message.content for message in case.history_records],
     )
     assert candidates == []
+
+
+def test_new_absent_evidence_supersedes_old_present_evidence():
+    case = TriageCase(case_id="present-to-absent")
+    case.history_records = [
+        Message(role="user", content="我有胸痛"),
+        Message(role="user", content="其實沒有胸痛"),
+    ]
+    case.semantic_extractions = [
+        _evidence("symptom", "胸痛", "present", "有胸痛"),
+        _evidence("symptom", "胸痛", "absent", "沒有胸痛"),
+    ]
+
+    assert len(validated_semantic_evidence_history(case)) == 2
+    assert [(item["normalized_value"], item["assertion"]) for item in effective_semantic_evidence(case)] == [
+        ("胸痛", "absent"),
+    ]
+    assert _retrieve(case) == []
+
+
+def test_new_present_evidence_supersedes_old_absent_evidence():
+    case = TriageCase(case_id="absent-to-present")
+    case.history_records = [
+        Message(role="user", content="我沒有胸痛"),
+        Message(role="user", content="剛剛開始胸痛"),
+    ]
+    case.semantic_extractions = [
+        _evidence("symptom", "胸痛", "absent", "沒有胸痛"),
+        _evidence("symptom", "胸痛", "present", "剛剛開始胸痛"),
+    ]
+
+    assert [(item["normalized_value"], item["assertion"]) for item in effective_semantic_evidence(case)] == [
+        ("胸痛", "present"),
+    ]
+    assert len(_retrieve(case)) == 1
+
+
+def test_low_confidence_revision_cannot_supersede_valid_current_evidence():
+    case = TriageCase(case_id="low-confidence-no-supersession")
+    case.history_records = [
+        Message(role="user", content="我有胸痛"),
+        Message(role="user", content="可能沒有胸痛"),
+    ]
+    case.semantic_extractions = [
+        _evidence("symptom", "胸痛", "present", "有胸痛", 0.98),
+        _evidence("symptom", "胸痛", "absent", "可能沒有胸痛", 0.2),
+    ]
+
+    assert [(item["normalized_value"], item["assertion"]) for item in effective_semantic_evidence(case)] == [
+        ("胸痛", "present"),
+    ]
+    assert len(_retrieve(case)) == 1
+
+
+def test_list_valued_evidence_is_superseded_per_individual_concept():
+    case = TriageCase(case_id="list-concept-supersession")
+    case.history_records = [
+        Message(role="user", content="我有胸痛和頭暈"),
+        Message(role="user", content="後來確認沒有胸痛"),
+    ]
+    case.semantic_extractions = [
+        _evidence("accompanying_symptoms", ["胸痛", "頭暈"], "present", "胸痛和頭暈"),
+        _evidence("accompanying_symptoms", ["胸痛"], "absent", "沒有胸痛"),
+    ]
+
+    assert {
+        (item["normalized_value"], item["assertion"])
+        for item in effective_semantic_evidence(case)
+    } == {("胸痛", "absent"), ("頭暈", "present")}
+
+
+def test_new_uncertain_evidence_supersedes_old_present_evidence():
+    case = TriageCase(case_id="present-to-uncertain")
+    case.history_records = [
+        Message(role="user", content="我有胸痛"),
+        Message(role="user", content="我不確定這算不算胸痛"),
+    ]
+    case.semantic_extractions = [
+        _evidence("symptom", "胸痛", "present", "有胸痛"),
+        _evidence("symptom", "胸痛", "uncertain", "不確定這算不算胸痛", 0.8),
+    ]
+
+    assert [(item["normalized_value"], item["assertion"]) for item in effective_semantic_evidence(case)] == [
+        ("胸痛", "uncertain"),
+    ]
+    assert _retrieve(case) == []

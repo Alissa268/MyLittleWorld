@@ -36,7 +36,7 @@ from app.services.semantic_normalizer import (
 
 logger = logging.getLogger(__name__)
 
-_ALLOWED_FIELDS = frozenset(CHECKLIST_FIELD_ORDER)
+_ALLOWED_FIELDS = frozenset((*CHECKLIST_FIELD_ORDER, "onset", "accompanying_symptoms"))
 _ALLOWED_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous"}
 _META_REPLY_TERMS = (
     "我剛剛已經回答了",
@@ -828,7 +828,7 @@ source_text 必須是直接支持該 extraction 的最短連續逐字患者原�
 弱語氣不等於無法回答：「吧、可能、大概、應該、好像、差不多、左右」若仍有清楚核心資訊，必須輸出 available（集合欄位可用 partial）、needs_clarification=false。
 available 表示資訊足以寫入；partial 表示可用但只涵蓋集合的一部分；ambiguous 只用於互相衝突且無法安全選擇；unknown 只用於未提供資訊或明確表示不知道。
 symptom 可正規化為簡短症狀文字，不必受手寫症狀詞表限制；body_part 可正規化為簡短解剖位置，不必受手寫部位詞表限制。
-symptom 只要 normalized_value 非空，就必須輸出 assertion=present/absent/uncertain。若同一句有不同 polarity，必須拆成不同 extraction 並各自引用最短 source_text；Backend 不會替你解析否定 scope。
+symptom 與 accompanying_symptoms 只要 normalized_value 含 nonempty medical concept，就必須輸出 assertion=present/absent/uncertain。若同一句有不同 polarity，必須拆成不同 extraction 並各自引用最短 source_text；Backend 不會替你解析否定 scope。
 body_part 若是未知於既有 canonical 的部位，normalized_value 應保留 source_text 中可逐字找到的核心部位（例如「鎖骨附近」→「鎖骨」、「手腕那邊」→「手腕」）；只有已知 canonical 可改寫（例如「腸胃」→「腹」）。不得把來源中的部位替換成無關部位。
 duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 severity 的 normalized_value 只能是字串 "mild"、"moderate" 或 "severe"；輕微／還好轉為 mild，普通／中等／中度轉為 moderate，嚴重／很嚴重／痛到無法睡覺轉為 severe。不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
@@ -952,12 +952,7 @@ def _semantic_rejection_reason(
         return "duplicate_field"
     if item.semantic_status not in _ALLOWED_STATUSES:
         return "invalid_status"
-    if (
-        field_name == "symptom"
-        and isinstance(item.normalized_value, str)
-        and item.normalized_value.strip()
-        and item.assertion is None
-    ):
+    if _has_nonempty_medical_concept(field_name, item.normalized_value) and item.assertion is None:
         return "missing_assertion"
     if (
         item.semantic_status in {"available", "partial", "unavailable"}
@@ -965,6 +960,16 @@ def _semantic_rejection_reason(
     ):
         return "confidence_too_low"
     return None
+
+
+def _has_nonempty_medical_concept(field_name: str, value: Any) -> bool:
+    if field_name == "symptom":
+        return isinstance(value, str) and bool(value.strip())
+    if field_name == "accompanying_symptoms":
+        return isinstance(value, list) and any(
+            isinstance(item, str) and item.strip() for item in value
+        )
+    return False
 
 
 def _source_text_grounded(

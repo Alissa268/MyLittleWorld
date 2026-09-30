@@ -20,6 +20,9 @@ from app.services.field_acceptance import ai_normalized_value_valid
 logger = logging.getLogger(__name__)
 _INTENT = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _ASSERTED_MEDICAL_FIELDS = {"symptom", "accompanying_symptoms"}
+_CANDIDATE_CONTEXT_FIELDS = {
+    "symptom", "accompanying_symptoms", "body_part", "duration", "severity", "onset",
+}
 _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
 _SEMANTIC_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous"}
 
@@ -28,15 +31,14 @@ def _user_texts(case: TriageCase) -> list[str]:
     return [message.content for message in case.history_records if message.role == "user"]
 
 
-def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
-    """Return grounded, schema-valid medical evidence without interpreting raw text."""
+def validated_semantic_evidence_history(case: TriageCase) -> list[dict]:
+    """Return validated evidence in append order without interpreting raw text."""
     history = _user_texts(case)
-    evidence: dict[tuple[str, str, str, str], dict] = {}
+    evidence: list[dict] = []
     for item in case.semantic_extractions:
         source = item.source_text.strip()
         if (
-            item.field not in _ASSERTED_MEDICAL_FIELDS
-            or item.assertion not in _EVIDENCE_ASSERTIONS
+            item.field not in _CANDIDATE_CONTEXT_FIELDS
             or item.semantic_status not in _SEMANTIC_STATUSES
             or type(item.confidence) not in {int, float}
             or not math.isfinite(item.confidence)
@@ -51,25 +53,53 @@ def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
             )
         ):
             continue
-        concepts = (
-            [item.normalized_value]
-            if isinstance(item.normalized_value, str)
-            else item.normalized_value
-        )
-        for concept in concepts if isinstance(concepts, list) else []:
-            if not isinstance(concept, str) or not concept.strip():
+        if item.field in _ASSERTED_MEDICAL_FIELDS:
+            if item.assertion not in _EVIDENCE_ASSERTIONS:
                 continue
-            normalized = concept.strip()
-            key = (item.field, normalized, source, item.assertion)
-            evidence[key] = {
+            concepts = (
+                [item.normalized_value]
+                if isinstance(item.normalized_value, str)
+                else item.normalized_value
+            )
+            for concept in concepts if isinstance(concepts, list) else []:
+                if not isinstance(concept, str) or not concept.strip():
+                    continue
+                evidence.append({
+                    "field": item.field,
+                    "normalized_value": concept.strip(),
+                    "source_text": source,
+                    "assertion": item.assertion,
+                    "semantic_status": item.semantic_status,
+                    "confidence": float(item.confidence),
+                })
+        elif item.semantic_status in {"available", "partial"}:
+            evidence.append({
                 "field": item.field,
-                "normalized_value": normalized,
+                "normalized_value": item.normalized_value,
                 "source_text": source,
-                "assertion": item.assertion,
+                "assertion": None,
                 "semantic_status": item.semantic_status,
                 "confidence": float(item.confidence),
-            }
-    return [evidence[key] for key in sorted(evidence)]
+            })
+    return evidence
+
+
+def effective_semantic_evidence(case: TriageCase) -> list[dict]:
+    """Collapse validated evidence history into the latest current fact per key."""
+    current: dict[tuple[str, ...], tuple[int, dict]] = {}
+    for position, evidence in enumerate(validated_semantic_evidence_history(case)):
+        field = evidence["field"]
+        if field in _ASSERTED_MEDICAL_FIELDS:
+            key = ("concept", field, normalize_concept(str(evidence["normalized_value"])))
+        else:
+            key = ("field", field)
+        current[key] = (position, evidence)
+    return [evidence for _, evidence in sorted(current.values(), key=lambda item: item[0])]
+
+
+def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
+    """Compatibility name for current effective structured semantic evidence."""
+    return effective_semantic_evidence(case)
 
 
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:

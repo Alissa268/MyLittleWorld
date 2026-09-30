@@ -183,6 +183,69 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("accepted_clarification_evidence", payload)
         self.assertEqual(payload["accepted_semantic_evidence"][0]["assertion"], "present")
 
+    async def test_candidate_context_has_all_current_fields_but_kb_uses_only_present_concepts(self):
+        case = case_with_symptom()
+        case.history_records.extend([
+            Message(role="user", content="一開始是左膝不舒服"),
+            Message(role="user", content="現在是右下腹，兩天，中等程度，今天開始，還有伴隨線索"),
+        ])
+        case.semantic_extractions.extend([
+            SemanticExtraction(
+                field="body_part", normalized_value="左膝", semantic_status="available",
+                confidence=0.9, source_text="左膝", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="body_part", normalized_value="右下腹", semantic_status="available",
+                confidence=0.95, source_text="右下腹", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="duration", normalized_value="2天", semantic_status="available",
+                confidence=0.97, source_text="兩天", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="severity", normalized_value="moderate", semantic_status="available",
+                confidence=0.91, source_text="中等程度", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="onset", normalized_value="今天開始", semantic_status="available",
+                confidence=0.93, source_text="今天開始", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="accompanying_symptoms", normalized_value=["伴隨線索"],
+                semantic_status="available", assertion="present", confidence=0.9,
+                source_text="伴隨線索", extractor="ai",
+            ),
+        ])
+        nonconcept_records = [
+            {"department_name": "測試甲科", "concept": concept, "source_id": "official_one",
+             "evidence_text": f"測試甲科：{concept}", "source_priority": 1}
+            for concept in ("右下腹", "2天", "moderate", "今天開始")
+        ]
+        records = [*self.records, *nonconcept_records]
+        provider = AsyncMock(return_value=json.dumps({
+            "status": "ambiguous",
+            "candidates": [candidate(101), candidate(102)],
+        }, ensure_ascii=False))
+        with patch.object(reasoning, "fetch_active_departments", return_value=self.active), patch.object(
+            reasoning, "load_department_knowledge", return_value=(self.sources, records),
+        ), patch.object(reasoning, "complete_runtime_json", new=provider):
+            await reasoning.reason_about_departments(case)
+
+        payload = json.loads(provider.await_args.args[0].split("\n資料：", 1)[1])
+        context = payload["accepted_semantic_evidence"]
+        self.assertEqual(
+            {item["field"] for item in context},
+            {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"},
+        )
+        self.assertEqual(
+            [item["normalized_value"] for item in context if item["field"] == "body_part"],
+            ["右下腹"],
+        )
+        self.assertEqual(
+            {item["knowledge_concept"] for item in payload["retrieved_official_evidence"]},
+            {"症狀甲"},
+        )
+
     async def test_new_grounded_answer_recomputes_candidates_and_converges(self):
         first = {"status": "ambiguous", "candidates": [candidate(101, 0.8), candidate(102, 0.77)], "next_question_intent": "differentiate_signal"}
         second = {"status": "resolved", "candidates": [candidate(102, 0.91, [support(102, "線索乙", text="線索乙")])]}
