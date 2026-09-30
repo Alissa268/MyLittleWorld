@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pytest
 
-from app.schemas import Message, TriageCase
+from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.department_reasoning_service import (
     retrieve_official_evidence,
     validate_candidate_proposal,
@@ -124,3 +124,47 @@ def test_non_negated_helper_checks_every_occurrence():
 
     assert contains_non_negated_keyword("我沒有症狀甲", "症狀甲") is False
     assert contains_non_negated_keyword(text, "症狀甲") is True
+
+
+def test_ai_normalized_value_cannot_erase_grounded_source_negation():
+    case = TriageCase(case_id="normalized-negation-bypass")
+    case.history_records = [Message(role="user", content="我沒有胸痛")]
+    case.semantic_extractions = [SemanticExtraction(
+        field="accompanying_symptoms",
+        normalized_value=["胸痛"],
+        semantic_status="available",
+        confidence=0.96,
+        source_text="我沒有胸痛",
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
+    )
+
+    assert retrieved == []
+
+
+def test_positive_normalized_interpretation_without_literal_canonical_term_survives():
+    case = TriageCase(case_id="positive-semantic-normalization")
+    case.history_records = [Message(role="user", content="症狀俗稱甲")]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="正式症狀甲",
+        semantic_status="available",
+        confidence=0.96,
+        source_text="症狀俗稱甲",
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("測試甲科", "正式症狀甲", "official_a")],
+        [_resolution("測試甲科", 101)],
+    )
+
+    assert len(retrieved) == 1
+    assert retrieved[0]["knowledge_concept"] == "正式症狀甲"
+    assert retrieved[0]["patient_source_text"] == "症狀俗稱甲"

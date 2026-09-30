@@ -66,12 +66,23 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     concepts = {record["concept"] for record in records}
     found: dict[tuple[int, str, str, str], dict] = {}
     for source, interpretation in _accepted_evidence(case):
-        normalized = normalize_concept(interpretation)
+        normalized_source = normalize_concept(source)
+        normalized_interpretation = normalize_concept(interpretation)
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
             if (
-                normalized_concept not in normalized
-                or not contains_non_negated_keyword(normalized, normalized_concept)
+                normalized_concept not in normalized_interpretation
+                or not contains_non_negated_keyword(
+                    normalized_interpretation,
+                    normalized_concept,
+                )
+                or (
+                    normalized_concept in normalized_source
+                    and not contains_non_negated_keyword(
+                        normalized_source,
+                        normalized_concept,
+                    )
+                )
             ):
                 continue
             for record in lookup_concept(concept, records):
