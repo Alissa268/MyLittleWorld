@@ -16,6 +16,7 @@ NEGATION_TERMS = (
 
 CONTRAST_TERMS = ("但是", "可是", "不過", "但")
 CLAUSE_BOUNDARIES = ("。", "！", "？", "；", "，", ",", ";", "\n")
+POLARITY_RESET_TERMS = ("。", "！", "？", "；", ";", "\n", *CONTRAST_TERMS)
 
 RED_FLAG_KEYWORDS = (
     "突發胸痛",
@@ -89,6 +90,25 @@ def contains_non_negated_keyword(text: str, keyword: str) -> bool:
             return True
         start = source.find(target, start + 1)
     return False
+
+
+def grounded_source_is_clearly_negated(text: str) -> bool:
+    """Conservatively classify the current grounded source clause's polarity.
+
+    This is used only when a normalized medical concept has no literal occurrence
+    in its raw source, so occurrence-level polarity cannot be established.
+    """
+    source = str(text or "").strip()
+    if not source:
+        return False
+    reset_at = max(
+        (source.rfind(marker) + len(marker) for marker in POLARITY_RESET_TERMS),
+        default=0,
+    )
+    current_clause = source[reset_at:].strip()
+    return bool(current_clause) and any(
+        marker in current_clause for marker in NEGATION_TERMS
+    )
 
 
 def _occurrence_is_negated(text: str, keyword: str, start: int) -> bool:

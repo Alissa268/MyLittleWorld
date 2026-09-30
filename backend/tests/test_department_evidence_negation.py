@@ -147,6 +147,73 @@ def test_ai_normalized_value_cannot_erase_grounded_source_negation():
     assert retrieved == []
 
 
+def test_negated_synonym_normalization_cannot_create_positive_department_evidence():
+    case = TriageCase(case_id="normalized-negated-synonym")
+    case.history_records = [Message(role="user", content="我沒有胸口痛")]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="胸痛",
+        semantic_status="available",
+        confidence=0.96,
+        source_text="我沒有胸口痛",
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
+    )
+
+    assert retrieved == []
+
+
+def test_positive_synonym_normalization_remains_available():
+    case = TriageCase(case_id="normalized-positive-synonym")
+    case.history_records = [Message(role="user", content="我有胸口痛")]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="胸痛",
+        semantic_status="available",
+        confidence=0.96,
+        source_text="我有胸口痛",
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("一般內科", "胸痛", "general_official")],
+        [_resolution("一般內科", 1232)],
+    )
+
+    assert len(retrieved) == 1
+    assert retrieved[0]["knowledge_concept"] == "胸痛"
+    assert retrieved[0]["patient_source_text"] == "我有胸口痛"
+
+
+def test_unrelated_earlier_negation_does_not_block_positive_contrast_clause():
+    case = TriageCase(case_id="normalized-positive-contrast")
+    source = "我沒有症狀乙，但是現在有症狀俗稱甲"
+    case.history_records = [Message(role="user", content=source)]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="正式症狀甲",
+        semantic_status="available",
+        confidence=0.96,
+        source_text=source,
+        extractor="ai",
+    )]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("測試甲科", "正式症狀甲", "official_a")],
+        [_resolution("測試甲科", 101)],
+    )
+
+    assert len(retrieved) == 1
+    assert retrieved[0]["patient_source_text"] == source
+
+
 def test_positive_normalized_interpretation_without_literal_canonical_term_survives():
     case = TriageCase(case_id="positive-semantic-normalization")
     case.history_records = [Message(role="user", content="症狀俗稱甲")]
