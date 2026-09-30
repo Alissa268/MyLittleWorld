@@ -131,9 +131,9 @@ $env:CEREBRAS_API_KEY=''
 
 Final result: **500 passed, 7 warnings, 308 subtests passed**. The Phase 4.1 hematuria `有血絲` regression remains passing. Zero-schedule API semantics were not changed. Android, SQL schema/data, official Department KB, TTAS/red-flag and urgency rules, and doctor scoring were not modified. Phase 5 was not started.
 
-## Phase 4.2.2: clarification focus state
+## Phase 4.2.2: negation-safe evidence and clarification focus state
 
-The live hematuria conversation exposed a state-boundary bug rather than a candidate-ranking error. When the official evidence legitimately expanded from one routable department to multiple candidates, a surviving `flank_pain` intent could fall back through `next_information_needed`. That list had previously been populated with a Backend diagnostic reason, causing workflow wording such as `已記錄本輪新資訊，上一個澄清面向仍需確認` to be quoted to the patient.
+The live hematuria conversation exposed two independent bugs. First, a surviving clarification intent could fall back through `next_information_needed`, which had been populated with a Backend diagnostic reason. That caused workflow wording such as `已記錄本輪新資訊，上一個澄清面向仍需確認` to be quoted to the patient. Second, the apparent general-medicine candidate was not legitimate ambiguity: lexical KB retrieval matched `胸痛` inside the grounded denial `我沒有胸痛`, incorrectly treating a negated concept as positive official Department evidence.
 
 Clarification state now has strict responsibilities:
 
@@ -145,7 +145,11 @@ Clarification state now has strict responsibilities:
 
 A confidently grounded pending answer clears both the pending intent and its old information need. A valid, safe, nonduplicate same-intent planner question is accepted even when the provider does not emit a canonical structured field. Partial or unclear answers keep the pending intent and may use a targeted same-intent follow-up. Invalid, wrong-intent, unsafe, or duplicate proposals fall back without quoting uncertainty reasons. If no concrete patient-facing focus is available, Backend uses a neutral retry such as `可以再補充和剛才問題相關的症狀細節嗎？`; it does not derive medical wording from a snake_case intent.
 
-`backend/tests/test_phase422_clarification_focus.py` covers the exact ambiguous hematuria/urinary-burning state with required `flank_pain`, valid same-intent planning, invalid and duplicate proposals, partial/unclear persistence, grounded clearing, ambiguity preservation, forbidden workflow-reason invariants, and the unchanged eight-turn cap. Phase 4.1's grounded `有血絲` severity progression remains passing. No priority override or symptom-to-department mapping was added; multiple official candidates remain ambiguous until later grounded evidence changes convergence.
+`backend/tests/test_phase422_clarification_focus.py` covers clarification focus separation with required `flank_pain`, valid same-intent planning, invalid and duplicate proposals, partial/unclear persistence, grounded clearing, ambiguity preservation for genuinely validated candidates, forbidden workflow-reason invariants, and the unchanged eight-turn cap. Phase 4.1's grounded `有血絲` severity progression remains passing.
+
+Department KB retrieval now requires three gates for every concept: the patient source is grounded, the concept occurs in the evidence interpretation, and at least one occurrence is non-negated. The generic helper in `negation_utils.py` checks every occurrence, resets negation scope at sentence/clause boundaries and contrast terms, and recognizes direct postfix negation such as `症狀甲沒有了`. It does not alter `is_negated_keyword()`, `strip_negated_red_flags()`, or any urgency/safety rule. The original `patient_source_text` remains unchanged; negation filtering only controls whether the concept may become positive retrieval evidence.
+
+`backend/tests/test_department_evidence_negation.py` reproduces the exact grounded hematuria text, including the same full text in `clarification_evidence["severity"]`. Retrieval preserves `血尿 → 腎臟科` and excludes `胸痛 → 一般內科`; a proposed general-medicine candidate using that denial is rejected. Synthetic tests cover all-negated evidence, an earlier negated occurrence followed by a current positive occurrence, postfix negation of one concept alongside a positive second concept, and an ordinary positive statement. No symptom-specific dictionary, candidate priority override, Department mapping, or evidence-supersession behavior was added.
 
 Final Backend command, with the real-provider key blank for deterministic unit tests:
 
@@ -154,4 +158,4 @@ $env:CEREBRAS_API_KEY=''
 .\.venv\Scripts\python.exe -m pytest -q --tb=short -p no:cacheprovider
 ```
 
-Result: **510 passed, 7 warnings, 308 subtests passed**. Android, SQL schema/data, official KB evidence, department mappings, TTAS/red-flag and urgency rules, and doctor scoring were unchanged. Phase 5 was not started.
+Result: **516 passed, 7 warnings, 308 subtests passed**. Android, SQL schema/data, official KB evidence, department mappings, TTAS/red-flag and urgency rules, and doctor scoring were unchanged. Phase 5 was not started.

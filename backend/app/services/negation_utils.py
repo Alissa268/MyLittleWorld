@@ -15,6 +15,7 @@ NEGATION_TERMS = (
 )
 
 CONTRAST_TERMS = ("但是", "可是", "不過", "但")
+CLAUSE_BOUNDARIES = ("。", "！", "？", "；", "，", ",", ";", "\n")
 
 RED_FLAG_KEYWORDS = (
     "突發胸痛",
@@ -69,7 +70,37 @@ def is_negated_keyword(text: str, keyword: str, window: int = 30, start_index: i
 
 
 def contains_non_negated(text: str, keywords: Iterable[str]) -> bool:
-    return any(keyword in text and not is_negated_keyword(text, keyword) for keyword in keywords)
+    return any(contains_non_negated_keyword(text, keyword) for keyword in keywords)
+
+
+def contains_non_negated_keyword(text: str, keyword: str) -> bool:
+    """Return true when any occurrence is positive within its local clause.
+
+    This is separate from the established red-flag parser so Department evidence
+    can inspect every occurrence without changing existing safety behavior.
+    """
+    source = str(text or "")
+    target = str(keyword or "")
+    if not source or not target:
+        return False
+    start = source.find(target)
+    while start >= 0:
+        if not _occurrence_is_negated(source, target, start):
+            return True
+        start = source.find(target, start + 1)
+    return False
+
+
+def _occurrence_is_negated(text: str, keyword: str, start: int) -> bool:
+    prefix = text[:start]
+    boundary_end = max((prefix.rfind(marker) + len(marker) for marker in CLAUSE_BOUNDARIES), default=0)
+    contrast_end = max((prefix.rfind(marker) + len(marker) for marker in CONTRAST_TERMS), default=0)
+    scoped_prefix = prefix[max(boundary_end, contrast_end):]
+    if any(marker in scoped_prefix for marker in NEGATION_TERMS):
+        return True
+
+    suffix = text[start + len(keyword):].lstrip()
+    return any(suffix.startswith(marker) for marker in NEGATION_TERMS)
 
 
 def strip_negated_red_flags(text: str) -> str:

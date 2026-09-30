@@ -15,6 +15,7 @@ from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
 )
 from app.services.department_preference_service import resolve_requested_department
+from app.services.negation_utils import contains_non_negated_keyword
 
 logger = logging.getLogger(__name__)
 _INTENT = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
@@ -67,7 +68,11 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     for source, interpretation in _accepted_evidence(case):
         normalized = normalize_concept(interpretation)
         for concept in concepts:
-            if normalize_concept(concept) not in normalized:
+            normalized_concept = normalize_concept(concept)
+            if (
+                normalized_concept not in normalized
+                or not contains_non_negated_keyword(normalized, normalized_concept)
+            ):
                 continue
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["department_name"])
