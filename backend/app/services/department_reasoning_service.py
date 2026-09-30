@@ -114,10 +114,14 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         ):
             continue
         source = evidence["source_text"]
-        normalized_interpretation = normalize_concept(evidence["normalized_value"])
+        retrieval_surfaces = {
+            normalize_concept(str(value))
+            for value in (evidence["normalized_value"], source)
+            if isinstance(value, str) and value.strip()
+        }
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
-            if normalized_concept not in normalized_interpretation:
+            if not any(normalized_concept in surface for surface in retrieval_surfaces):
                 continue
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["department_name"])

@@ -246,6 +246,51 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
             {"症狀甲"},
         )
 
+    async def test_live_hematuria_english_normalization_resolves_canonical_kidney_candidate(self):
+        case = TriageCase(case_id="live-hematuria-dual-surface")
+        case.history_records = [Message(role="user", content="我最近有血尿，已經兩天了")]
+        case.semantic_extractions = [
+            SemanticExtraction(
+                field="symptom", normalized_value="hematuria", semantic_status="available",
+                assertion="present", confidence=0.96, source_text="血尿", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="duration", normalized_value="2天", semantic_status="available",
+                confidence=0.96, source_text="兩天", extractor="ai",
+            ),
+        ]
+        sources = [{"source_id": "kidney_official"}]
+        records = [{
+            "department_name": "腎臟科", "concept": "血尿",
+            "source_id": "kidney_official", "evidence_text": "腎臟科：血尿",
+            "source_priority": 1,
+        }]
+        active = [{"dept_id": "1242", "parent_dept": "內科部", "child_dept": "腎臟科"}]
+        proposal = {
+            "status": "resolved",
+            "candidates": [{
+                "dept_id": 1242,
+                "confidence": 0.94,
+                "supporting_evidence": [{
+                    "patient_source_text": "血尿",
+                    "knowledge_source_id": "kidney_official",
+                    "knowledge_concept": "血尿",
+                }],
+            }],
+        }
+        provider = AsyncMock(return_value=json.dumps(proposal, ensure_ascii=False))
+        with patch.object(reasoning, "fetch_active_departments", return_value=active), patch.object(
+            reasoning, "load_department_knowledge", return_value=(sources, records),
+        ), patch.object(reasoning, "complete_runtime_json", new=provider):
+            await reasoning.reason_about_departments(case)
+
+        payload = json.loads(provider.await_args.args[0].split("\n資料：", 1)[1])
+        self.assertEqual(len(payload["retrieved_official_evidence"]), 1)
+        self.assertEqual(payload["retrieved_official_evidence"][0]["patient_source_text"], "血尿")
+        self.assertEqual(case.conversation_state.department_status, "resolved")
+        self.assertEqual(case.department_result.dept_id, 1242)
+        self.assertEqual(case.department_result.childDept, "腎臟科")
+
     async def test_new_grounded_answer_recomputes_candidates_and_converges(self):
         first = {"status": "ambiguous", "candidates": [candidate(101, 0.8), candidate(102, 0.77)], "next_question_intent": "differentiate_signal"}
         second = {"status": "resolved", "candidates": [candidate(102, 0.91, [support(102, "線索乙", text="線索乙")])]}

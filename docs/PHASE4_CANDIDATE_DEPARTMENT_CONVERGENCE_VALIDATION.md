@@ -196,3 +196,13 @@ $env:CEREBRAS_API_KEY=''
 Final result: **533 passed, 7 warnings, 324 subtests passed**. The warnings are existing FastAPI/Starlette deprecations.
 
 This is Phase 4 code-level evidence-state closure only. It does not claim real Cerebras, real SQL, or Tailscale live acceptance. Android, SQL schema/data, official KB records and mappings, TTAS/red-flag policy, urgency scoring, doctor scoring, accessibility, ASR/TTS, and the Schedule contract were not changed. Phase 5 was not started.
+
+## Phase 4 live fix: grounded source and normalized concept retrieval
+
+A real Cerebras and live SQL/Tailscale test exposed a retrieval-surface mismatch. For `我最近有血尿，已經兩天了`, the provider returned a valid present symptom with grounded `source_text=血尿` but normalized it as `hematuria`. The official KB concept remains `血尿`, so retrieval that considered only `normalized_value` incorrectly produced no official evidence and left the department unresolved.
+
+Official KB retrieval now builds two normalized lexical surfaces from each current effective, confidence-qualified, grounded `present` symptom concept: the AI `normalized_value` and the original grounded `source_text`. A KB concept may match either surface using the existing lexical behavior. This does not translate `hematuria`, add a bilingual synonym dictionary, infer medical meaning from arbitrary history, or introduce fuzzy matching. It only broadens lookup over the two values already contained in validated structured evidence after assertion, semantic-status, confidence, grounding, and supersession gates have passed.
+
+The original `source_text` remains the provenance written to `patient_source_text`, including when the normalized surface produced the KB match. If both surfaces match the same Department/source/concept record, the existing `(dept_id, patient_source_text, source_id, concept)` key emits one record. `absent` and `uncertain` evidence are rejected before either surface is considered. Retrieval still starts from effective evidence, so a later valid denial supersedes an older present fact and raw conversation history cannot restore it.
+
+Regressions cover the live `血尿 -> hematuria` variation resolving to the official `腎臟科 / dept_id 1242` candidate, normalized-only `尿尿很痛 -> 小便疼痛`, absent and uncertain literal source blocking, duplicate-surface deduplication, and present-to-absent supersession. Focused Department evidence and Phase 4 convergence tests passed **49 tests with 17 subtests**. The complete Backend suite, run with `CEREBRAS_API_KEY` blank, passed **539 tests with 324 subtests** and 7 existing FastAPI/Starlette deprecation warnings. This remains a narrow Phase 4 live fix; production KB coverage and records were not expanded, and Phase 5 was not started.

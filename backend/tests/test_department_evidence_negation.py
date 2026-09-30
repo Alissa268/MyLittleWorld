@@ -145,6 +145,58 @@ def test_positive_synonym_normalization_retrieves_official_concept_without_dicti
     assert retrieved[0]["patient_source_text"] == "尿尿很痛"
 
 
+def test_grounded_source_surface_retrieves_when_normalized_concept_uses_english():
+    case = _case_with_extraction("血尿", "hematuria", "present")
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("腎臟科", "血尿", "kidney_official")],
+        [_resolution("腎臟科", 1242)],
+    )
+
+    assert len(retrieved) == 1
+    assert retrieved[0]["dept_id"] == 1242
+    assert retrieved[0]["knowledge_concept"] == "血尿"
+    assert retrieved[0]["patient_source_text"] == "血尿"
+
+
+def test_absent_literal_source_surface_cannot_create_department_evidence():
+    case = _case_with_extraction("沒有血尿", "hematuria", "absent")
+
+    assert retrieve_official_evidence(
+        case,
+        [_record("腎臟科", "血尿", "kidney_official")],
+        [_resolution("腎臟科", 1242)],
+    ) == []
+
+
+def test_uncertain_literal_source_surface_cannot_create_department_evidence():
+    case = _case_with_extraction(
+        "不知道這算不算血尿",
+        "hematuria",
+        "uncertain",
+        status="ambiguous",
+    )
+
+    assert retrieve_official_evidence(
+        case,
+        [_record("腎臟科", "血尿", "kidney_official")],
+        [_resolution("腎臟科", 1242)],
+    ) == []
+
+
+def test_matching_normalized_and_source_surfaces_are_deduplicated():
+    case = _case_with_extraction("血尿", "血尿", "present")
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("腎臟科", "血尿", "kidney_official")],
+        [_resolution("腎臟科", 1242)],
+    )
+
+    assert len(retrieved) == 1
+
+
 def test_absent_synonym_normalization_cannot_create_positive_department_evidence():
     case = _case_with_extraction(
         "尿尿不會痛",
@@ -301,6 +353,29 @@ def test_new_absent_evidence_supersedes_old_present_evidence():
         ("胸痛", "absent"),
     ]
     assert _retrieve(case) == []
+
+
+def test_hematuria_absent_revision_blocks_old_source_surface_retrieval():
+    case = TriageCase(case_id="hematuria-present-to-absent")
+    case.history_records = [
+        Message(role="user", content="我有血尿"),
+        Message(role="user", content="後來確認沒有血尿"),
+    ]
+    case.semantic_extractions = [
+        _evidence("symptom", "hematuria", "present", "血尿"),
+        _evidence("symptom", "hematuria", "absent", "沒有血尿"),
+    ]
+
+    retrieved = retrieve_official_evidence(
+        case,
+        [_record("腎臟科", "血尿", "kidney_official")],
+        [_resolution("腎臟科", 1242)],
+    )
+
+    assert [(item["normalized_value"], item["assertion"]) for item in effective_semantic_evidence(case)] == [
+        ("hematuria", "absent"),
+    ]
+    assert retrieved == []
 
 
 def test_new_present_evidence_supersedes_old_absent_evidence():
