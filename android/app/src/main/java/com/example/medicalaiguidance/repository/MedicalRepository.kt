@@ -155,6 +155,9 @@ class MedicalRepository(
     suspend fun startBatchTriage(visitType: String): TriageResultDto =
         apiClient.chat(ChatRequest(visitType = visitType)).also(::consumeTriageResult)
 
+    suspend fun prepareMockDemoCase(): TriageResultDto =
+        apiClient.prepareMockDemo().also(::consumeTriageResult)
+
     suspend fun submitBatchAnswers(
         caseId: String,
         visitType: String,

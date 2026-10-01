@@ -11,6 +11,7 @@ from app.routes.voice import router as voice_router
 from app.routes.followup import router as followup_router
 from app.routes.reference import router as reference_router
 from app.routes.schedules import router as schedules_router
+from app.routes.mock_demo import router as mock_demo_router
 from app.services.ai_service import initialize_ai
 from app.services.tts_cache import tts_cache
 from app.services.voice_perf import VoicePerfMiddleware
@@ -39,6 +40,7 @@ app.include_router(voice_router)
 app.include_router(followup_router)
 app.include_router(reference_router)
 app.include_router(schedules_router)
+app.include_router(mock_demo_router)
 
 
 @app.get("/health", tags=["health"])

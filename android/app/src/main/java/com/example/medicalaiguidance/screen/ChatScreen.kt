@@ -129,6 +129,9 @@ fun ChatScreen(
     val pendingChatLatency by viewModel.pendingChatLatency.collectAsState()
     val inputText by viewModel.inputText.collectAsState()
     val isAiThinking by viewModel.isAiThinking.collectAsState()
+    val thinkingLabel by viewModel.thinkingLabel.collectAsState()
+    val isDemoComplete by viewModel.isDemoComplete.collectAsState()
+    val chatError by viewModel.chatError.collectAsState()
     val isListening by viewModel.isListening.collectAsState()
     val isVoiceTranscribing by viewModel.isVoiceTranscribing.collectAsState()
     val showDecisionButtons by viewModel.showDecisionButtons.collectAsState()
@@ -144,7 +147,7 @@ fun ChatScreen(
     var showHistoryRecommendations by remember(openedHistory?.id) { mutableStateOf(false) }
     var isInputFocused by remember { mutableStateOf(false) }
     val canSendMessage = !isHistoryReadOnly && inputText.isNotBlank() &&
-        !isAiThinking && !isListening && !isVoiceTranscribing
+        !isDemoComplete && !isAiThinking && !isListening && !isVoiceTranscribing
     val navigateToDoctorSelection = {
         val effectiveVisitPlan = selectedVisitType ?: visitPlan
         if (effectiveVisitPlan != VisitPlan.UNKNOWN) {
@@ -481,6 +484,11 @@ fun ChatScreen(
                         UrgentWarningCard(warning = warning)
                     }
                 }
+                chatError?.let { error ->
+                    item(key = "chat_error") {
+                        Text(error, color = primaryDark, modifier = Modifier.padding(12.dp))
+                    }
+                }
                 val historySnapshot = openedHistory
                 if (isHistoryReadOnly && historySnapshot != null) {
                     item(key = "completed_history_${historySnapshot.id}") {
@@ -496,7 +504,7 @@ fun ChatScreen(
                 }
                 if (isAiThinking) {
                     item {
-                        AiThinkingBubble(primaryDark = primaryDark)
+                        AiThinkingBubble(primaryDark = primaryDark, label = thinkingLabel)
                     }
                 }
 
@@ -594,7 +602,7 @@ fun ChatScreen(
                             shape = CircleShape
                         )
                         .alpha(if (isVoiceTranscribing) 0.45f else 1f)
-                        .clickable(enabled = !isVoiceTranscribing) { handleMicClick() },
+                        .clickable(enabled = !isDemoComplete && !isVoiceTranscribing) { handleMicClick() },
                     contentAlignment = Alignment.Center
                 ) {
                     if (isListening) {
@@ -635,6 +643,7 @@ fun ChatScreen(
                     if (!isListening && !isVoiceTranscribing) {
                         BasicTextField(
                             value = inputText,
+                            enabled = !isDemoComplete,
                             onValueChange = { viewModel.onInputTextChanged(it) },
                             maxLines = 3,
                             textStyle = TextStyle(color = primaryDark, fontSize = 18.sp),
@@ -853,7 +862,7 @@ private fun UrgentWarningCard(warning: String) {
 }
 
 @Composable
-fun AiThinkingBubble(primaryDark: Color) {
+fun AiThinkingBubble(primaryDark: Color, label: String) {
     val transition = rememberInfiniteTransition(label = "aiThinkingDots")
     val dotOffsets = List(3) { index ->
         transition.animateFloat(
@@ -867,9 +876,8 @@ fun AiThinkingBubble(primaryDark: Color) {
         )
     }
 
-    Row(
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(8.dp),
+    Column(
+        verticalArrangement = Arrangement.spacedBy(8.dp),
         modifier = Modifier
             .shadow(
                 elevation = 1.dp,
@@ -892,21 +900,20 @@ fun AiThinkingBubble(primaryDark: Color) {
             .padding(horizontal = 18.dp, vertical = 14.dp)
     ) {
 
-        dotOffsets.forEach { offset ->
-            Text(
-                text = "•",
-                color = primaryDark,
-                fontSize = 16.sp,
-                fontWeight = FontWeight.Bold,
-                modifier = Modifier.offset(y = offset.value.dp)
-            )
+        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            dotOffsets.forEach { offset ->
+                Text(
+                    text = "•",
+                    color = primaryDark,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.offset(y = offset.value.dp)
+                )
+            }
         }
-        /*Text(
-            text = "正在分析中請稍後",
-            color = primaryDark,
-            fontSize = 16.sp,
-            fontWeight = FontWeight.Medium
-        )*/
+        if (label.isNotBlank()) {
+            Text(text = label, color = primaryDark, fontSize = 16.sp, fontWeight = FontWeight.Medium)
+        }
     }
 }
 

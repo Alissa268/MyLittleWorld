@@ -10,6 +10,7 @@ import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.model.VisitPlan
+import com.example.medicalaiguidance.demo.MockDemoScript
 import com.example.medicalaiguidance.network.BatchAnswerDto
 import com.example.medicalaiguidance.network.QuestionItemDto
 import com.example.medicalaiguidance.network.TriageResultDto
@@ -18,6 +19,7 @@ import com.example.medicalaiguidance.repository.MedicalRepository
 import com.example.medicalaiguidance.repository.TtsSession
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.delay
 import com.example.medicalaiguidance.util.AudioRecorder
 import com.example.medicalaiguidance.util.AudioPlayer
 import com.example.medicalaiguidance.util.FixedTriageAudioResolver
@@ -74,6 +76,12 @@ class ChatViewModel(
 
     private val _isAiThinking = MutableStateFlow(false)
     val isAiThinking: StateFlow<Boolean> = _isAiThinking.asStateFlow()
+
+    private val _thinkingLabel = MutableStateFlow("")
+    val thinkingLabel: StateFlow<String> = _thinkingLabel.asStateFlow()
+
+    private val _isDemoComplete = MutableStateFlow(false)
+    val isDemoComplete: StateFlow<Boolean> = _isDemoComplete.asStateFlow()
 
     private val _showDoctorButton = MutableStateFlow(false)
     val showDoctorButton: StateFlow<Boolean> = _showDoctorButton.asStateFlow()
@@ -142,19 +150,23 @@ class ChatViewModel(
     private var activeHistoryId: String = "hist_${System.currentTimeMillis()}"
     private var openedHistoryId: String? = null
     private var conversationInitialized: Boolean = false
+    private var scriptedDemo = false
+    private var demoStep = 0
+    private var demoJob: Job? = null
 
     init {
         publishMessages()
     }
 
     fun onInputTextChanged(text: String) {
-        if (_isHistoryReadOnly.value) return
+        if (_isHistoryReadOnly.value || _isDemoComplete.value) return
         _inputText.value = text
     }
 
     fun startNewConversation(visitPlan: VisitPlan = VisitPlan.UNKNOWN) {
         if (conversationInitialized) return
         conversationInitialized = true
+        scriptedDemo = visitPlan == VisitPlan.INITIAL
         openedHistoryId = null
         caseId = null
         activeHistoryId = "hist_${System.currentTimeMillis()}"
@@ -175,17 +187,24 @@ class ChatViewModel(
         repository.clearRecommendationFlow()
         _selectedVisitType.value?.let { repository.setActiveVisitType(it.apiValue) }
         repository.clearChatMessages()
-        ttsSession = ttsSessionFactory()
+        ttsSession = if (scriptedDemo) null else ttsSessionFactory()
         stopVoicePlayback()
         _messages.value = emptyList()
         _pendingChatLatency.value = null
-        if (visitPlan == VisitPlan.INITIAL || visitPlan == VisitPlan.FOLLOW_UP) {
+        if (scriptedDemo) {
+            resetMockDemo()
+        } else if (visitPlan == VisitPlan.FOLLOW_UP) {
             startTriage(visitPlan)
         }
     }
 
     fun openHistory(historyId: String) {
         if (openedHistoryId == historyId) return
+        demoJob?.cancel()
+        scriptedDemo = false
+        _isDemoComplete.value = false
+        _thinkingLabel.value = ""
+        _isAiThinking.value = false
         conversationInitialized = true
         cancelVoiceRecording()
         ttsSession = ttsSessionFactory()
@@ -239,6 +258,10 @@ class ChatViewModel(
         val text = _inputText.value.trim()
         if (_isHistoryReadOnly.value || text.isBlank() || _isAiThinking.value ||
             _isListening.value || _isVoiceTranscribing.value) return
+        if (scriptedDemo) {
+            sendMockDemoMessage(text)
+            return
+        }
         if (_currentBatchQuestion.value != null) {
             submitCurrentBatchAnswer(text, onAnalysisComplete)
             return
@@ -299,6 +322,50 @@ class ChatViewModel(
                 publishMessages()
                 latencyTrace?.let { _pendingChatLatency.value = it }
                 _isAiThinking.value = false
+            }
+        }
+    }
+
+    private fun resetMockDemo() {
+        demoJob?.cancel()
+        cancelVoiceRecording()
+        stopVoicePlayback()
+        demoStep = 0
+        caseId = null
+        repository.clearRecommendationFlow()
+        repository.setActiveVisitType(VisitPlan.INITIAL.apiValue)
+        repository.clearChatMessages()
+        _inputText.value = ""
+        _isDemoComplete.value = false
+        _isAiThinking.value = false
+        _thinkingLabel.value = ""
+        _showDecisionButtons.value = false
+        _showDoctorButton.value = false
+        _chatError.value = null
+        repository.addMessage(ChatMessage(content = MockDemoScript.openingMessage, sender = MessageSender.AI))
+        publishMessages()
+    }
+
+    private fun sendMockDemoMessage(text: String) {
+        val next = MockDemoScript.nextReply(demoStep) ?: return
+        repository.addMessage(ChatMessage(content = text, sender = MessageSender.USER))
+        publishMessages()
+        _inputText.value = ""
+        _thinkingLabel.value = next.thinkingLabel
+        _isAiThinking.value = true
+        demoJob = viewModelScope.launch {
+            try {
+                delay(next.delayMs)
+                repository.addMessage(ChatMessage(content = next.message, sender = MessageSender.AI))
+                demoStep++
+                publishMessages()
+                val complete = MockDemoScript.isComplete(demoStep)
+                _isDemoComplete.value = complete
+                _showDecisionButtons.value = complete
+                _showDoctorButton.value = complete
+            } finally {
+                _isAiThinking.value = false
+                _thinkingLabel.value = ""
             }
         }
     }
@@ -366,7 +433,7 @@ class ChatViewModel(
     }
 
     fun beginSystemVoiceInput(): Boolean {
-        if (_isHistoryReadOnly.value || _isAiThinking.value || _isListening.value ||
+        if (_isHistoryReadOnly.value || _isDemoComplete.value || _isAiThinking.value || _isListening.value ||
             _isVoiceTranscribing.value) return false
         stopVoicePlayback()
         _isListening.value = true
@@ -383,13 +450,15 @@ class ChatViewModel(
 
     /** ASR only edits the draft. Only the Send button/IME invokes sendMessage. */
     fun acceptVoiceTranscript(text: String) {
-        if (_isHistoryReadOnly.value) return
+        if (_isHistoryReadOnly.value || _isDemoComplete.value) return
         val transcript = text.trim()
         if (transcript.isNotBlank()) _inputText.value = transcript
     }
 
     // ── 語音錄音（國台語通用）──
     fun startVoiceRecording(): Boolean {
+        // The recording demo must not send audio to backend ASR services.
+        if (scriptedDemo) return false
         if (
             _isHistoryReadOnly.value ||
             _isAiThinking.value ||
@@ -467,6 +536,7 @@ class ChatViewModel(
 
     fun prepareSpeech(message: ChatMessage, lang: String) {
         if (message.sender != MessageSender.AI || message.content.isBlank()) return
+        if (scriptedDemo || MockDemoScript.containsMessage(message.content)) return
         if (FixedTriageAudioResolver.resolve(message.content, lang) != null) return
         val session = ttsSession?.takeUnless { it.closed } ?: return
         // Both the UI effect and microphone callbacks can reach this method.
@@ -496,6 +566,7 @@ class ChatViewModel(
         if (message.sender != MessageSender.AI || message.content.isBlank() ||
             _isListening.value || _isVoiceTranscribing.value) return
         val localResourceId = FixedTriageAudioResolver.resolve(message.content, lang)
+        if (localResourceId == null && (scriptedDemo || MockDemoScript.containsMessage(message.content))) return
         val session = if (localResourceId == null) {
             ttsSession?.takeUnless { it.closed } ?: return
         } else {
@@ -572,6 +643,29 @@ class ChatViewModel(
     fun chooseRecommendation(onConfirmed: () -> Unit) {
         if (_isHistoryReadOnly.value || _isConfirmingRecommendation.value) return
 
+        if (scriptedDemo) {
+            if (!_isDemoComplete.value) return
+            _isConfirmingRecommendation.value = true
+            viewModelScope.launch {
+                _chatError.value = null
+                try {
+                    val result = repository.prepareMockDemoCase()
+                    caseId = result.caseId
+                    repository.setActiveCaseId(result.caseId)
+                    saveHistory(completed = true, summary = MockDemoScript.systemMessages.last())
+                    onConfirmed()
+                } catch (cancelled: CancellationException) {
+                    throw cancelled
+                } catch (error: Exception) {
+                    // Keep the final reply/buttons available so prepare can be retried.
+                    _chatError.value = error.message ?: "無法準備掛號案件，請稍後再試。"
+                } finally {
+                    _isConfirmingRecommendation.value = false
+                }
+            }
+            return
+        }
+
         val activeCase = caseId ?: repository.getActiveCaseId()
         if (activeCase.isNullOrBlank()) {
             repository.addMessage(
@@ -603,6 +697,10 @@ class ChatViewModel(
 
     fun continueEditing() {
         if (_isHistoryReadOnly.value || _isConfirmingRecommendation.value) return
+        if (scriptedDemo) {
+            resetMockDemo()
+            return
+        }
         _showDecisionButtons.value = false
         _showDoctorButton.value = false
         val activeCase = caseId ?: repository.getActiveCaseId()

@@ -20,6 +20,9 @@ class MedicalApiClient(
     suspend fun chat(request: ChatRequest): TriageResultDto =
         post("/chat", request.toJson(), ::parseTriageResult)
 
+    suspend fun prepareMockDemo(): TriageResultDto =
+        post("/mock-demo/prepare", "{}", ::parseTriageResult)
+
     suspend fun recommend(request: RecommendRequest): RecommendationResultDto =
         post("/recommend", request.toJson(), ::parseRecommendationResult)
 

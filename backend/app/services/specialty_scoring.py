@@ -75,6 +75,9 @@ async def score_doctor_specialties(
         for row in normalized_rows
     }
 
+    if case.case_id.startswith("case_mockdemo_"):
+        return deterministic
+
     settings = get_settings()
     if not bool(getattr(settings, "ai_doctor_scoring_enabled", False)):
         logger.info(
