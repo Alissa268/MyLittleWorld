@@ -40,8 +40,21 @@ class Phase2ConversationTest(unittest.TestCase):
         semantic = AsyncMock(return_value=json.dumps(
             {"semantic_extractions": extractions}, ensure_ascii=False,
         ))
+        clarification_responses = None
+        if isinstance(plan, dict) and triage_case and plan.get("answered_intent"):
+            classification = {
+                "answered_intent": plan.get("answered_intent"),
+                "answer_status": plan.get("answer_status"),
+                "answer_source_text": plan.get("answer_source_text"),
+                "answer_confidence": plan.get("answer_confidence"),
+            }
+            clarification_responses = [
+                json.dumps(classification, ensure_ascii=False),
+                json.dumps(plan, ensure_ascii=False),
+            ]
         clarification = AsyncMock(
-            side_effect=plan if isinstance(plan, Exception) else None,
+            side_effect=(clarification_responses if clarification_responses is not None else
+                         plan if isinstance(plan, Exception) else None),
             return_value=json.dumps(plan, ensure_ascii=False) if isinstance(plan, dict) else plan,
         )
         department = AsyncMock(return_value=None)

@@ -61,7 +61,21 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
     def post(self, message: str, extractions: list[dict], plan: dict, *, triage_case: dict | None = None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
         semantic = AsyncMock(return_value=json.dumps({"semantic_extractions": extractions}, ensure_ascii=False))
-        planner = AsyncMock(return_value=json.dumps(plan, ensure_ascii=False))
+        planner_responses = None
+        if triage_case and plan.get("answered_intent"):
+            planner_responses = [
+                json.dumps({
+                    "answered_intent": plan.get("answered_intent"),
+                    "answer_status": plan.get("answer_status"),
+                    "answer_source_text": plan.get("answer_source_text"),
+                    "answer_confidence": plan.get("answer_confidence"),
+                }, ensure_ascii=False),
+                json.dumps(plan, ensure_ascii=False),
+            ]
+        planner = AsyncMock(
+            side_effect=planner_responses,
+            return_value=json.dumps(plan, ensure_ascii=False),
+        )
         detector = AsyncMock()
 
         async def keep_resolved(case):
@@ -104,9 +118,9 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
              "answer_status": "answered", "answer_confidence": 0.95},
             triage_case=first["triage_case"],
         )
-        prompt = planner.await_args.args[0]
-        self.assertIn(SEVERITY_QUESTION, prompt)
-        self.assertIn('"pending_clarification_intent": "severity"', prompt)
+        classifier_prompt = planner.await_args_list[0].args[0]
+        self.assertIn(SEVERITY_QUESTION, classifier_prompt)
+        self.assertIn('"pending_clarification_intent": "severity"', classifier_prompt)
         self.assertIsNone(second["conversation_state"]["pending_clarification_intent"])
         self.assertEqual(second["conversation_state"]["clarification_evidence"]["severity"], "有血絲")
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])

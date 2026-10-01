@@ -58,7 +58,87 @@ class ClarificationSuggestion:
     answer_confidence: float | None = None
 
 
-async def request_clarification(case: TriageCase, user_sources: list[str]) -> ClarificationSuggestion | None:
+@dataclass(frozen=True)
+class PendingAnswerClassification:
+    answered_intent: str
+    answer_source_text: str
+    answer_status: str
+    answer_confidence: float
+
+
+def _pending_question(case: TriageCase) -> str | None:
+    return next(
+        (item.content for item in reversed(case.history_records) if item.role == "assistant"),
+        None,
+    )
+
+
+async def classify_pending_answer(
+    case: TriageCase,
+    current_user_text: list[str],
+) -> PendingAnswerClassification | None:
+    """Classify only whether the current turn answered the pending question."""
+    pending_intent = case.conversation_state.pending_clarification_intent
+    pending_question = _pending_question(case)
+    if not pending_intent or not pending_question or not current_user_text:
+        return None
+    payload = {
+        "pending_clarification_intent": pending_intent,
+        "pending_question": pending_question,
+        "current_user_text": current_user_text,
+    }
+    prompt = (
+        "你只負責判斷 current_user_text 是否回答 pending_question 與 pending_clarification_intent。"
+        "不要規劃下一題、不要做科別推理、不要診斷，也不要輸出或修改任何 workflow state。"
+        "明確否定仍然是 answered，不需要出現正向症狀。例如問題『有沒有腰部或腹部疼痛？』，"
+        "回答『沒有腰痛，也沒有腹痛』應輸出 answered_intent=pain_presence、"
+        "answer_status=answered，並以該段逐字回答作 answer_source_text。"
+        "程度問題『血尿的量多不多？』回答『只有一點點血絲』也應是 answered。"
+        "只判斷本輪 current_user_text，不得引用 prior history。answer_source_text 必須是本輪回答中"
+        "直接支持判定的最短連續逐字片段，不可改寫。"
+        "answer_status 只能是 answered、partial、unclear 或 null；answer_confidence 必須是 0 到 1 的數字。"
+        "若本輪沒有回答 pending question，四個欄位都輸出 null。"
+        "只輸出固定 JSON：answered_intent, answer_status, answer_source_text, answer_confidence。\n"
+        f"資料：{json.dumps(payload, ensure_ascii=False)}"
+    )
+    try:
+        raw = await complete_runtime_json(prompt, purpose="pending_answer_classification")
+        data = json.loads(str(raw).strip())
+        expected_keys = {
+            "answered_intent", "answer_status", "answer_source_text", "answer_confidence",
+        }
+        if not isinstance(data, dict) or set(data) != expected_keys:
+            return None
+        intent = data.get("answered_intent")
+        source = data.get("answer_source_text")
+        status = data.get("answer_status")
+        confidence = data.get("answer_confidence")
+        if not _grounded_clarification_answer(
+            intent, source, status, confidence, pending_intent, current_user_text,
+        ):
+            return None
+        return PendingAnswerClassification(
+            answered_intent=intent,
+            answer_source_text=source.strip(),
+            answer_status=status,
+            answer_confidence=float(confidence),
+        )
+    except Exception as exc:
+        logger.warning(
+            "pending answer classifier failed case_id=%s error_type=%s",
+            case.case_id,
+            type(exc).__name__,
+        )
+        return None
+
+
+async def request_clarification(
+    case: TriageCase,
+    user_sources: list[str],
+    *,
+    classify_answer_fields: bool = True,
+    focused_answer_status: str | None = None,
+) -> ClarificationSuggestion | None:
     """Treat the provider's JSON as a proposal, never a workflow transition."""
     state = case.conversation_state
     payload = {
@@ -70,9 +150,8 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "next_information_needed": state.next_information_needed,
         "asked_clarification_intents": state.asked_clarification_intents,
         "pending_clarification_intent": state.pending_clarification_intent,
-        "pending_question": next(
-            (item.content for item in reversed(case.history_records) if item.role == "assistant"), None,
-        ) if state.pending_clarification_intent else None,
+        "pending_question": _pending_question(case) if state.pending_clarification_intent else None,
+        "focused_pending_answer_status": focused_answer_status,
         "clarification_evidence": state.clarification_evidence,
         "department_status": state.department_status,
         "candidate_departments": [item.model_dump() for item in state.candidate_departments],
@@ -80,18 +159,24 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         "department_next_information_needed": state.department_next_information_needed,
         "required_next_question_intent": state.department_next_question_intent,
     }
-    prompt = (
-        "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
-        "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
-        "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向、一個聚焦問句、一次詢問要求；"
-        "不得用連接詞在同一問句追加第二個臨床面向，即使整句只有一個問號也不可以；"
-        "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
+    answer_contract = (
         "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
         "若本輪以具體描述回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
         "answer_source_text、answer_status (answered、partial 或 unclear) 與 0 到 1 的 "
         "answer_confidence 表示；例如程度問題回答『只有一點』『不是很多』『明顯變多』『影響活動』，"
         "即使沒有 canonical severity extraction，也可以是 answered。"
         "回答欄位與整體 status 獨立，status=clarification_needed 時也須標記已回答的 pending intent。"
+        if classify_answer_fields else
+        "本輪 pending answer 已由獨立 focused classifier 處理；你只規劃下一個問題，"
+        "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
+    )
+    prompt = (
+        "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
+        "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
+        "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向、一個聚焦問句、一次詢問要求；"
+        "不得用連接詞在同一問句追加第二個臨床面向，即使整句只有一個問號也不可以；"
+        "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
+        f"{answer_contract}"
         "partial 或 unclear 時維持同一 intent，提出一個更精確、不重複、只問同一面向的追問。"
         "department_status=ambiguous 時，優先問最能區分候選的一個自然問題；"
         "若有 required_next_question_intent，追問 intent 必須與它完全一致。"
@@ -135,11 +220,11 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         else:
             question = None
             intent = None
-        answered_intent = data.get("answered_intent")
-        answer_source = data.get("answer_source_text")
-        answer_status = data.get("answer_status")
-        answer_confidence = data.get("answer_confidence")
-        if not _grounded_clarification_answer(
+        answered_intent = data.get("answered_intent") if classify_answer_fields else None
+        answer_source = data.get("answer_source_text") if classify_answer_fields else None
+        answer_status = data.get("answer_status") if classify_answer_fields else None
+        answer_confidence = data.get("answer_confidence") if classify_answer_fields else None
+        if classify_answer_fields and not _grounded_clarification_answer(
             answered_intent, answer_source, answer_status, answer_confidence,
             state.pending_clarification_intent, user_sources,
         ):
@@ -151,7 +236,8 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
             if intent != state.department_next_question_intent:
                 if not (
                     state.pending_clarification_intent == intent
-                    and answer_status in {"partial", "unclear"}
+                    and (answer_status in {"partial", "unclear"}
+                         or focused_answer_status in {"partial", "unclear"})
                 ):
                     question = None
                     intent = None
@@ -165,7 +251,11 @@ async def request_clarification(case: TriageCase, user_sources: list[str]) -> Cl
         return None
 
 
-def capture_pending_answer(case: TriageCase, suggestion: ClarificationSuggestion | None, user_sources: list[str]) -> bool:
+def capture_pending_answer(
+    case: TriageCase,
+    suggestion: ClarificationSuggestion | PendingAnswerClassification | None,
+    user_sources: list[str],
+) -> bool:
     """Persist only a grounded, confident answer before candidate recomputation."""
     if not suggestion or suggestion.answer_status != "answered" or suggestion.answer_confidence is None:
         return False
