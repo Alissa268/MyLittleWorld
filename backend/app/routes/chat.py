@@ -254,9 +254,14 @@ async def chat(req: ChatRequest) -> TriageResult:
                     if ai_suggestion is not None and pending_before_turn
                     else None
                 )
+                turn_interpretation_complete = bool(
+                    ai_suggestion is None
+                    or getattr(ai_suggestion, "interpretation_complete", True)
+                )
                 capture_pending_answer(case, pending_interpretation, user_text_parts)
                 department_reasoning_allowed = bool(
                     has_user_input
+                    and turn_interpretation_complete
                     and (not safety_check_turn or safety_completed_this_turn)
                 )
                 if department_reasoning_allowed:

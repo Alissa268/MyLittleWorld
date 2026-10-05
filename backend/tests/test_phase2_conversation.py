@@ -309,14 +309,14 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertFalse(second["conversation_state"]["is_complete"])
         department.assert_not_awaited()
 
-    def test_free_form_answer_clears_pending_without_structured_extraction(self):
+    def test_answered_clinical_pending_without_structured_evidence_fails_closed(self):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
              "intent": "fracture_assessment", "reason": "承重情況未明"},
         )
         answer = "還能走路，但是踩地會痛"
-        second, _, _, department = self.post(
+        second, semantic, _, department = self.post(
             answer, [],
             {"status": "sufficient", "question": None, "intent": None,
              "reason": "已回答", "answered_intent": "fracture_assessment",
@@ -325,11 +325,12 @@ class Phase2ConversationTest(unittest.TestCase):
             triage_case=first["triage_case"],
         )
         self.assertTrue(second["needMoreInfo"])
-        self.assertIsNone(second["conversation_state"]["pending_clarification_intent"])
-        self.assertEqual(second["conversation_state"]["clarification_evidence"]["fracture_assessment"], answer)
-        self.assertEqual(second["conversation_state"]["clarification_status"], "safety_check")
+        self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
+        self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
+        self.assertEqual(second["conversation_state"]["clarification_status"], "clarifying")
         self.assertEqual(second["triage_case"]["patient_input"]["symptom"], "腳背腫痛")
         self.assertEqual(len(second["triage_case"]["semantic_extractions"]), 1)
+        self.assertEqual(semantic.await_count, 2)
         department.assert_not_awaited()
 
     def test_ungrounded_free_form_answer_cannot_clear_pending(self):

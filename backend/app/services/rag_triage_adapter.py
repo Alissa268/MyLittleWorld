@@ -15,12 +15,16 @@ from app.schemas import (
     UrgencyResult,
 )
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
+from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
 
 logger = logging.getLogger(__name__)
 _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
 _MEDICAL_ASSERTION_FIELDS = {"symptom", "accompanying_symptoms"}
+_CLINICAL_EVIDENCE_FIELDS = {
+    "symptom", "accompanying_symptoms", "body_part", "duration", "severity", "onset",
+}
 
 
 async def complete_prompt(prompt: str) -> str:
@@ -34,6 +38,7 @@ class RagTriageSuggestion:
     reply: str | None = None
     semantic_extractions: list[SemanticExtraction] | None = None
     pending_answer: PendingAnswerInterpretation | None = None
+    interpretation_complete: bool = True
 
 
 async def refine_case_with_ai(
@@ -59,15 +64,40 @@ async def refine_case_with_ai(
 
     if user_sources is None:
         user_sources = [message.content for message in case.history_records if message.role == "user"]
-    semantic_extractions = _semantic_extractions_from_ai(
-        data.get("semantic_extractions"),
-        user_sources=user_sources,
-    )
-    pending_answer = _pending_answer_from_ai(
-        data.get("pending_answer"),
+    semantic_extractions, pending_answer = _validated_turn_interpretation(
+        data,
         pending_intent=case.conversation_state.pending_clarification_intent,
         user_sources=user_sources,
     )
+    if _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+        repair_prompt = _build_turn_interpretation_repair_prompt(prompt)
+        try:
+            repair_raw = await complete_prompt(repair_prompt)
+            logger.debug(
+                "rag_triage_adapter repair response received case_id=%s chars=%s",
+                case.case_id,
+                len(repair_raw),
+            )
+            repair_data = _parse_json_object(repair_raw)
+            semantic_extractions, pending_answer = _validated_turn_interpretation(
+                repair_data,
+                pending_intent=case.conversation_state.pending_clarification_intent,
+                user_sources=user_sources,
+            )
+        except Exception as exc:
+            logger.warning(
+                "rag_triage_adapter repair failed case_id=%s error_type=%s",
+                case.case_id,
+                type(exc).__name__,
+            )
+            return RagTriageSuggestion(
+                semantic_extractions=[], pending_answer=None, interpretation_complete=False,
+            )
+        if _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+            logger.warning("rag_triage_adapter repair incomplete case_id=%s", case.case_id)
+            return RagTriageSuggestion(
+                semantic_extractions=[], pending_answer=None, interpretation_complete=False,
+            )
     if semantic_extractions:
         # Import locally to keep the adapter independent at module load time.
         # The rule engine performs field allow-listing, confidence checks and
@@ -95,6 +125,45 @@ async def refine_case_with_ai(
         semantic_extractions=semantic_extractions,
         pending_answer=pending_answer,
     )
+
+
+def _validated_turn_interpretation(
+    data: dict[str, Any],
+    *,
+    pending_intent: str | None,
+    user_sources: list[str],
+) -> tuple[list[SemanticExtraction], PendingAnswerInterpretation | None]:
+    return (
+        _semantic_extractions_from_ai(data.get("semantic_extractions"), user_sources=user_sources),
+        _pending_answer_from_ai(
+            data.get("pending_answer"),
+            pending_intent=pending_intent,
+            user_sources=user_sources,
+        ),
+    )
+
+
+def _answered_without_clinical_evidence(
+    pending_answer: PendingAnswerInterpretation | None,
+    extractions: list[SemanticExtraction],
+) -> bool:
+    return bool(
+        pending_answer is not None
+        and pending_answer.answer_status == "answered"
+        and pending_answer.answer_confidence >= ACCEPT_THRESHOLD
+        and not any(_is_accepted_clinical_evidence(item) for item in extractions)
+    )
+
+
+def _is_accepted_clinical_evidence(extraction: SemanticExtraction) -> bool:
+    if extraction.field not in _CLINICAL_EVIDENCE_FIELDS:
+        return False
+    if (
+        extraction.field in _MEDICAL_ASSERTION_FIELDS
+        and extraction.assertion in {"absent", "uncertain"}
+    ):
+        return extraction.confidence >= ACCEPT_THRESHOLD
+    return accepted(extraction.confidence, extraction.semantic_status)
 
 
 async def detect_department_with_ai(
@@ -401,6 +470,17 @@ def _case_text(case: TriageCase) -> str:
     return strip_negated_red_flags("；".join(part for part in parts if part))
 
 
+def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
+    return (
+        original_prompt
+        + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
+        "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
+        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions 與 pending_answer。"
+        "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
+        " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
+    )
+
+
 def _build_symptom_collection_prompt(
     case: TriageCase,
     current_user_text: list[str] | None = None,
@@ -445,22 +525,57 @@ def _build_symptom_collection_prompt(
 13. onset 為簡短的發作描述字串；accompanying_symptoms 為伴隨症狀字串陣列，可使用 grounded source_text 的語意正規化概念，不可添加原文未表達的症狀。
 14. 同一次 interpretation 也要判斷本輪是否回答 pending clarification。pending context 如下：
 {json.dumps(pending_context, ensure_ascii=False, indent=2)}
-15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 只能包含 answered_intent、answer_status、answer_source_text、answer_confidence；answered_intent 必須沿用 pending intent，answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
-16. pending_answer 與 semantic_extractions 是同一輪理解的兩個輸出面向。回答 pending question 時仍必須完整抽取本輪表達的 medical evidence；例如回答有耳鳴時要抽出耳鳴 present，否認胸痛與心悸時要分別抽出 absent evidence。不得因已填 pending_answer 就省略 semantic_extractions。
+15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 只能包含 answered_intent、answer_status、answer_source_text、answer_confidence；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
+16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
 
-請只輸出 JSON，不要輸出其他文字：
+以下是 clinical pending-answer contract 範例。實際 answered_intent 必須換成目前 pending_clarification_intent 的原值，所有 source_text 必須來自實際 current_user_text。請只輸出 JSON，不要輸出其他文字：
 {{
   "semantic_extractions": [
     {{
-      "field": "preferred_days",
-      "normalized_value": ["週一", "週二"],
-      "semantic_status": "partial",
+      "field": "accompanying_symptoms",
+      "normalized_value": ["聽力下降"],
+      "semantic_status": "available",
+      "assertion": "absent",
+      "confidence": 0.98,
+      "source_text": "沒有聽力下降",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "body_part",
+      "normalized_value": "右耳",
+      "semantic_status": "available",
       "assertion": null,
-      "confidence": 0.82,
-      "source_text": "週一週二可以",
+      "confidence": 0.98,
+      "source_text": "右耳",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "accompanying_symptoms",
+      "normalized_value": ["耳鳴"],
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.98,
+      "source_text": "右耳一直有耳鳴",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "accompanying_symptoms",
+      "normalized_value": ["眩暈"],
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.98,
+      "source_text": "眩暈",
       "needs_clarification": false,
       "follow_up_reason": null
     }}
   ],
-  "pending_answer": null
+  "pending_answer": {{
+    "answered_intent": "<current pending intent>",
+    "answer_status": "answered",
+    "answer_source_text": "沒有聽力下降",
+    "answer_confidence": 0.98
+  }}
 }}"""

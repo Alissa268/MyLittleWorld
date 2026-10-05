@@ -261,7 +261,9 @@ async def reason_about_departments(case: TriageCase) -> None:
             "輸出 JSON：status (resolved/ambiguous/unresolved), candidates (最多 3 個，每項 dept_id, "
             "confidence 0..1, supporting_evidence 陣列；每筆有逐字 patient_source_text, knowledge_source_id, "
             "knowledge_concept), uncertainty_reason, next_question_intent。"
-            "如目前仍不確定，提出可區分候選的英文 snake_case intent；不要直接向患者顯示科別。"
+            "如目前仍不確定，提出可區分候選的英文 snake_case next_question_intent。它是 Backend/AI 間的"
+            " opaque correlation key，只代表下一個 patient-answerable clinical dimension，不是 workflow 指令；"
+            "優先一個聚焦面向，避免產生含 _or_ 或 _and_ 的 compound key。不要直接向患者顯示科別。"
             f"\n資料：{json.dumps(payload, ensure_ascii=False)}"
         )
         proposal = json.loads((await complete_runtime_json(prompt, purpose="department_convergence")).strip())

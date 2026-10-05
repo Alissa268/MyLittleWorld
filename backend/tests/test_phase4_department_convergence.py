@@ -11,7 +11,14 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase, VisitType
+from app.schemas import (
+    DepartmentResult,
+    Message,
+    PendingAnswerInterpretation,
+    SemanticExtraction,
+    TriageCase,
+    VisitType,
+)
 from app.services import department_reasoning_service as reasoning
 from app.services import department_preference_service
 from app.services.appointment_service import DepartmentResolutionError
@@ -22,10 +29,12 @@ from app.services.conversation_service import (
     advance_conversation,
     request_clarification,
 )
-from app.services.department_knowledge import resolve_department_names
+from app.services.department_knowledge import load_department_knowledge, resolve_department_names
+from app.services.rag_triage_adapter import RagTriageSuggestion
 from app.services.rule_engine import (
     QUESTION_TEXTS,
     RED_FLAG_QUESTION_KEY,
+    apply_semantic_extractions,
     apply_user_message,
 )
 
@@ -617,6 +626,157 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             "ask_hearing_related_symptoms",
         )
 
+    def test_live_a1_a2_a3_keeps_new_evidence_and_uses_contextual_follow_up(self):
+        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        a1_text = "我這三天一直頭暈，會有眩暈、天旋地轉的感覺。"
+        a3_text = "沒有聽力下降，但我右耳一直有耳鳴，眩暈的時候耳鳴會更明顯。"
+        hearing_key = "ask_hearing_loss_or_chest_pain"
+        next_key = "ask_nausea_or_visual_disturbance"
+        initial = [
+            SemanticExtraction(
+                field="symptom", normalized_value="頭暈", semantic_status="available",
+                assertion="present", confidence=0.97, source_text="頭暈", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="duration", normalized_value="3天", semantic_status="available",
+                confidence=0.96, source_text="三天", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="accompanying_symptoms", normalized_value=["眩暈"],
+                semantic_status="available", assertion="present", confidence=0.96,
+                source_text="眩暈", extractor="ai",
+            ),
+        ]
+        a3_evidence = [
+            SemanticExtraction(
+                field="accompanying_symptoms", normalized_value=["聽力下降"],
+                semantic_status="available", assertion="absent", confidence=0.98,
+                source_text="沒有聽力下降", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="body_part", normalized_value="右耳", semantic_status="available",
+                confidence=0.98, source_text="右耳", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="accompanying_symptoms", normalized_value=["耳鳴"],
+                semantic_status="available", assertion="present", confidence=0.98,
+                source_text="右耳一直有耳鳴", extractor="ai",
+            ),
+            SemanticExtraction(
+                field="accompanying_symptoms", normalized_value=["眩暈"],
+                semantic_status="available", assertion="present", confidence=0.98,
+                source_text="眩暈", extractor="ai",
+            ),
+        ]
+        interpretation_calls = 0
+
+        async def interpret(case, **_):
+            nonlocal interpretation_calls
+            interpretation_calls += 1
+            if interpretation_calls == 1:
+                apply_semantic_extractions(case, initial, allow_red_flag_completion=False)
+                return RagTriageSuggestion(semantic_extractions=initial)
+            apply_semantic_extractions(case, a3_evidence, allow_red_flag_completion=False)
+            return RagTriageSuggestion(
+                semantic_extractions=a3_evidence,
+                pending_answer=PendingAnswerInterpretation(
+                    answered_intent=hearing_key,
+                    answer_status="answered",
+                    answer_source_text="沒有聽力下降",
+                    answer_confidence=0.98,
+                ),
+            )
+
+        semantic = AsyncMock(side_effect=interpret)
+        _, records = load_department_knowledge()
+        resolutions = resolve_department_names(records, [{
+            "dept_id": 1333, "parentDept": "五官科", "childDept": "耳科",
+        }])
+        retrieved_by_turn: list[list[dict]] = []
+
+        async def recompute(case):
+            retrieved_by_turn.append(
+                reasoning.retrieve_official_evidence(case, records, resolutions)
+            )
+            state = case.conversation_state
+            state.department_status = "ambiguous"
+            state.department_next_question_intent = (
+                next_key if len(retrieved_by_turn) == 3 else hearing_key
+            )
+
+        department = AsyncMock(side_effect=recompute)
+        hearing_question = "請問您是否有聽力下降的情形？"
+        nausea_question = "請問眩暈時會不會伴隨噁心或想吐？"
+
+        async def plan(case, *_args, **_kwargs):
+            key = case.conversation_state.department_next_question_intent
+            return ClarificationSuggestion(
+                "clarification_needed",
+                nausea_question if key == next_key else hearing_question,
+                key,
+                "需要進一步區分目前候選",
+            )
+
+        planner = AsyncMock(side_effect=plan)
+        legacy_classifier = AsyncMock(side_effect=AssertionError("legacy classifier must not run"))
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
+            chat_route, "refine_case_with_ai", new=semantic,
+        ), patch.object(chat_route, "reason_about_departments", new=department), patch.object(
+            chat_route, "request_clarification", new=planner,
+        ), patch(
+            "app.services.conversation_service.classify_pending_answer", new=legacy_classifier,
+        ), patch.object(
+            chat_route, "generate_triage_reply",
+            new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+        ):
+            client = TestClient(app)
+            a1 = client.post("/chat", json={"message": a1_text}).json()
+            self.assertEqual(a1["conversation_state"]["clarification_status"], "safety_check")
+
+            a2 = client.post("/chat", json={
+                "case_id": a1["case_id"],
+                "message": "都沒有，我沒有剛才提到的那些急迫症狀。",
+            }).json()
+            self.assertEqual(a2["next_question"], hearing_question)
+            self.assertEqual(a2["conversation_state"]["pending_clarification_intent"], hearing_key)
+
+            a3 = client.post("/chat", json={
+                "case_id": a1["case_id"],
+                "message": a3_text,
+            }).json()
+
+        self.assertEqual(semantic.await_count, 2)
+        legacy_classifier.assert_not_awaited()
+        self.assertEqual(department.await_count, 3)
+        self.assertEqual(planner.await_count, 3)
+        semantic_history = a3["triage_case"]["semantic_extractions"]
+        self.assertTrue(any(
+            item["normalized_value"] == ["聽力下降"] and item["assertion"] == "absent"
+            for item in semantic_history
+        ))
+        self.assertTrue(any(
+            item["normalized_value"] == ["耳鳴"] and item["assertion"] == "present"
+            for item in semantic_history
+        ))
+        self.assertTrue(any(item["field"] == "body_part" and item["normalized_value"] == "右耳" for item in semantic_history))
+        self.assertTrue(any(
+            item["normalized_value"] == ["眩暈"] and item["assertion"] == "present"
+            for item in semantic_history
+        ))
+        self.assertEqual(
+            a3["conversation_state"]["clarification_evidence"][hearing_key],
+            "沒有聽力下降",
+        )
+        tinnitus_support = [
+            item for item in retrieved_by_turn[-1]
+            if item["dept_id"] == 1333 and item["knowledge_concept"] == "耳鳴"
+        ]
+        self.assertTrue(tinnitus_support)
+        self.assertEqual(tinnitus_support[0]["patient_source_text"], "右耳一直有耳鳴")
+        self.assertEqual(a3["next_question"], nausea_question)
+        self.assertNotIn(a3["next_question"], NEUTRAL_PENDING_RETRIES)
+        self.assertEqual(a3["conversation_state"]["pending_clarification_intent"], next_key)
+
     async def test_safety_question_precedes_candidate_question(self):
         case = case_with_symptom()
         case.conversation_state.department_status = "ambiguous"
@@ -716,6 +876,58 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         raw = {"status": "clarification_needed", "question": "可以補充症狀如何變化嗎？", "intent": "wrong_intent", "reason": "待釐清"}
         with patch("app.services.conversation_service.complete_runtime_json", new=AsyncMock(return_value=json.dumps(raw, ensure_ascii=False))):
             suggestion = await request_clarification(case, ["我有症狀甲"])
+        self.assertIsNone(suggestion.question)
+        self.assertIsNone(suggestion.intent)
+
+    async def test_compound_required_key_accepts_single_focus_question_when_echoed(self):
+        case = case_with_symptom()
+        required = "ask_nausea_or_visual_disturbance"
+        case.conversation_state.department_status = "ambiguous"
+        case.conversation_state.department_next_question_intent = required
+        raw = {
+            "status": "clarification_needed",
+            "question": "請問眩暈時會不會伴隨噁心或想吐？",
+            "intent": required,
+            "reason": "需要區分目前候選",
+            "answered_intent": None,
+            "answer_source_text": None,
+            "answer_status": None,
+            "answer_confidence": None,
+        }
+        provider = AsyncMock(return_value=json.dumps(raw, ensure_ascii=False))
+        with patch("app.services.conversation_service.complete_runtime_json", new=provider):
+            suggestion = await request_clarification(
+                case, ["我有症狀甲"], classify_answer_fields=False,
+            )
+
+        self.assertEqual(suggestion.question, raw["question"])
+        self.assertEqual(suggestion.intent, required)
+        prompt = provider.await_args.args[0]
+        self.assertIn("opaque correlation key", prompt)
+        self.assertIn("原樣 echo", prompt)
+
+    async def test_compound_required_key_still_rejects_changed_correlation_key(self):
+        case = case_with_symptom()
+        case.conversation_state.department_status = "ambiguous"
+        case.conversation_state.department_next_question_intent = "ask_nausea_or_visual_disturbance"
+        raw = {
+            "status": "clarification_needed",
+            "question": "請問眩暈時會不會伴隨噁心或想吐？",
+            "intent": "ask_nausea",
+            "reason": "需要區分目前候選",
+            "answered_intent": None,
+            "answer_source_text": None,
+            "answer_status": None,
+            "answer_confidence": None,
+        }
+        with patch(
+            "app.services.conversation_service.complete_runtime_json",
+            new=AsyncMock(return_value=json.dumps(raw, ensure_ascii=False)),
+        ):
+            suggestion = await request_clarification(
+                case, ["我有症狀甲"], classify_answer_fields=False,
+            )
+
         self.assertIsNone(suggestion.question)
         self.assertIsNone(suggestion.intent)
 
