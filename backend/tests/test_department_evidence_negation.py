@@ -11,10 +11,12 @@ from app.services.department_reasoning_service import (
 from app.services.rule_engine import apply_semantic_extractions
 
 
-def _record(department: str, concept: str, source_id: str) -> dict:
+def _record(department: str, concept: str, source_id: str, dept_id: int = 1232) -> dict:
     return {
         "department_name": department,
         "concept": concept,
+        "canonical_dept_id": dept_id,
+        "evidence_type": "direct_routing_evidence",
         "source_id": source_id,
         "evidence_text": f"{department}：{concept}",
         "source_priority": 1,
@@ -23,7 +25,8 @@ def _record(department: str, concept: str, source_id: str) -> dict:
 
 def _resolution(department: str, dept_id: int) -> dict:
     return {
-        "knowledge_department_name": department,
+        "canonical_dept_id": dept_id,
+        "knowledge_department_names": [department],
         "status": "resolved",
         "db_dept_id": dept_id,
         "db_parent_dept": "測試系",
@@ -150,7 +153,7 @@ def test_grounded_source_surface_retrieves_when_normalized_concept_uses_english(
 
     retrieved = retrieve_official_evidence(
         case,
-        [_record("腎臟科", "血尿", "kidney_official")],
+        [_record("腎臟科", "血尿", "kidney_official", 1242)],
         [_resolution("腎臟科", 1242)],
     )
 
@@ -165,7 +168,7 @@ def test_absent_literal_source_surface_cannot_create_department_evidence():
 
     assert retrieve_official_evidence(
         case,
-        [_record("腎臟科", "血尿", "kidney_official")],
+        [_record("腎臟科", "血尿", "kidney_official", 1242)],
         [_resolution("腎臟科", 1242)],
     ) == []
 
@@ -180,7 +183,7 @@ def test_uncertain_literal_source_surface_cannot_create_department_evidence():
 
     assert retrieve_official_evidence(
         case,
-        [_record("腎臟科", "血尿", "kidney_official")],
+        [_record("腎臟科", "血尿", "kidney_official", 1242)],
         [_resolution("腎臟科", 1242)],
     ) == []
 
@@ -190,7 +193,7 @@ def test_matching_normalized_and_source_surfaces_are_deduplicated():
 
     retrieved = retrieve_official_evidence(
         case,
-        [_record("腎臟科", "血尿", "kidney_official")],
+        [_record("腎臟科", "血尿", "kidney_official", 1242)],
         [_resolution("腎臟科", 1242)],
     )
 
@@ -234,7 +237,7 @@ def test_mixed_statement_uses_ai_assertions_without_backend_polarity_parsing():
     ]
     records = [
         _record("一般內科", "胸痛", "chest_official"),
-        _record("測試甲科", "頭暈", "dizziness_official"),
+        _record("測試甲科", "頭暈", "dizziness_official", 101),
     ]
     resolutions = [
         _resolution("一般內科", 1232),
@@ -299,7 +302,7 @@ def test_live_hematuria_denial_uses_structured_assertions_only():
         ),
     ]
     records = [
-        _record("腎臟科", "血尿", "kidney_official"),
+        _record("腎臟科", "血尿", "kidney_official", 1242),
         _record("一般內科", "胸痛", "general_official"),
     ]
     resolutions = [
@@ -368,7 +371,7 @@ def test_hematuria_absent_revision_blocks_old_source_surface_retrieval():
 
     retrieved = retrieve_official_evidence(
         case,
-        [_record("腎臟科", "血尿", "kidney_official")],
+        [_record("腎臟科", "血尿", "kidney_official", 1242)],
         [_resolution("腎臟科", 1242)],
     )
 

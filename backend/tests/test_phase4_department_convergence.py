@@ -26,16 +26,27 @@ recommend_route = importlib.import_module("app.routes.recommend")
 
 def fixture():
     sources = [{"source_id": "official_one"}, {"source_id": "official_two"}]
+    def record(department, dept_id, concept, source_id, priority):
+        return {
+            "department_name": department,
+            "canonical_dept_id": dept_id,
+            "canonical_parent_dept": "測試系",
+            "canonical_child_dept": department,
+            "concept": concept,
+            "evidence_type": "direct_routing_evidence",
+            "source_id": source_id,
+            "evidence_text": f"{department}：{concept}",
+            "source_priority": priority,
+        }
     records = [
-        {"department_name": "測試甲科", "concept": "症狀甲", "source_id": "official_one", "evidence_text": "測試甲科：症狀甲", "source_priority": 1},
-        {"department_name": "測試乙科", "concept": "症狀甲", "source_id": "official_two", "evidence_text": "測試乙科：症狀甲", "source_priority": 2},
-        {"department_name": "測試乙科", "concept": "線索乙", "source_id": "official_two", "evidence_text": "測試乙科：線索乙", "source_priority": 2},
-        {"department_name": "近似測試科", "concept": "症狀甲", "source_id": "official_one", "evidence_text": "近似測試科：症狀甲", "source_priority": 1},
+        record("測試甲科", 101, "症狀甲", "official_one", 1),
+        record("測試乙科", 102, "症狀甲", "official_two", 2),
+        record("測試乙科", 102, "線索乙", "official_two", 2),
+        record("近似測試科", 103, "症狀甲", "official_one", 1),
     ]
     active = [
         {"dept_id": "101", "parent_dept": "測試系", "child_dept": "測試甲科"},
         {"dept_id": 102, "parent_dept": "測試系", "child_dept": "測試乙科"},
-        {"dept_id": 103, "parent_dept": "測試系", "child_dept": "近似測試科別"},
     ]
     return sources, records, active
 
@@ -217,7 +228,9 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
             ),
         ])
         nonconcept_records = [
-            {"department_name": "測試甲科", "concept": concept, "source_id": "official_one",
+            {"department_name": "測試甲科", "canonical_dept_id": 101,
+             "canonical_parent_dept": "測試系", "canonical_child_dept": "測試甲科",
+             "concept": concept, "evidence_type": "direct_routing_evidence", "source_id": "official_one",
              "evidence_text": f"測試甲科：{concept}", "source_priority": 1}
             for concept in ("右下腹", "2天", "moderate", "今天開始")
         ]
@@ -261,7 +274,9 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
         ]
         sources = [{"source_id": "kidney_official"}]
         records = [{
-            "department_name": "腎臟科", "concept": "血尿",
+            "department_name": "腎臟科", "canonical_dept_id": 1242,
+            "canonical_parent_dept": "內科部", "canonical_child_dept": "腎臟科",
+            "concept": "血尿", "evidence_type": "direct_routing_evidence",
             "source_id": "kidney_official", "evidence_text": "腎臟科：血尿",
             "source_priority": 1,
         }]

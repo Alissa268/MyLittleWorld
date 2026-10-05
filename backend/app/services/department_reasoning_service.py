@@ -104,7 +104,10 @@ def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
 
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
     """Match official concepts only against validated present semantic evidence."""
-    resolved = {entry["knowledge_department_name"]: entry for entry in resolutions if entry["status"] == "resolved"}
+    resolved = {
+        entry["canonical_dept_id"]: entry
+        for entry in resolutions if entry["status"] == "resolved"
+    }
     concepts = {record["concept"] for record in records}
     found: dict[tuple[int, str, str, str], dict] = {}
     for evidence in accepted_semantic_evidence(case):
@@ -124,7 +127,7 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
             if not any(normalized_concept in surface for surface in retrieval_surfaces):
                 continue
             for record in lookup_concept(concept, records):
-                resolution = resolved.get(record["department_name"])
+                resolution = resolved.get(record["canonical_dept_id"])
                 if resolution is None:
                     continue
                 key = (resolution["db_dept_id"], source, record["source_id"], record["concept"])

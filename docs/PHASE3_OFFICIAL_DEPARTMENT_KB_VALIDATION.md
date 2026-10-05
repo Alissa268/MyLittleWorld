@@ -101,3 +101,9 @@ Phase 3.1 在 `New_Android_Backend/backend` 再執行同一 `pytest -q`：`444 p
 ## 邊界
 
 未建立 Phase 4 candidate convergence 或 AI 依 KB 正式選科；未進行 Phase 5 TTAS、Phase 6 doctor scoring 或 Phase 7/8 Android 工作。此 KB 是公開頁面結構化索引，**不宣稱已做臨床驗證**。尚未 exact match 的 5 個科名與動態中榮查詢的逐筆證據仍需另行審核，不能由相似名稱、舊詞庫或 LLM 補猜。
+
+## 後續 migration package 整合註記
+
+本文件前述 21 筆初版 KB 與「官方科名必須 exact 等於 SQL child name」是 Phase 3/3.1 當時的歷史狀態，已由後續人工整理並驗證的 `phase3_kb_migration_package` 取代。正式 knowledge layer 現使用 package 提供的 18 個官方醫療來源、523 筆 production seed（展開逐來源 provenance 後為 541 筆 record）及 35 筆 reviewed canonical mappings。
+
+官方網站科別標籤現在只表示醫療 evidence provenance；APP/SQL runtime identity 由 reviewed `canonical_dept_id` 決定，並在執行時以 exact ID 向 live Department master 驗證，再採用 live `parentDept`／`childDept`。因此官方 `心臟科` 對 reviewed `dept_id=1241`、live `心臟內科` 是合法 mapping，不是 fuzzy name guess。`legacy_synonym` 未接入 routing，`legacy_unverified` 保持 production disabled。此整合仍不宣稱臨床驗證，也沒有修改 SQL 或開始 Phase 5。

@@ -1,8 +1,21 @@
 {
   "meta": {
-    "generated_from": "phase3_kb_migration_package/phase3_source_registry.json",
     "generated_at": "2026-10-05",
-    "medical_sources_only": true
+    "repo": "Alissa268/MyLittleWorld",
+    "legacy_branch": "AILogic",
+    "legacy_file": "dept_keywords.py",
+    "target_branch_reviewed": "New_Android_Backend",
+    "total_legacy_departments": 35,
+    "total_legacy_keyword_pairs": 763,
+    "classification_counts": {
+      "direct_routing_evidence": 229,
+      "legacy_unverified": 222,
+      "legacy_synonym": 18,
+      "department_specialty_evidence": 294
+    },
+    "method": "Official Taipei VGH direct routing first; Taipei VGH specialty/service evidence second; Taichung VGH only for gaps/subspecialty disambiguation; unsupported legacy terms disabled.",
+    "important_rule": "Official department label is medical provenance; APP/SQL dept_id + childDept is canonical system identity.",
+    "review_status": "research_migration_candidate_not_yet_committed"
   },
   "sources": [
     {
@@ -184,6 +197,16 @@
       "source_url": "https://www.vghtc.gov.tw/CP/1865",
       "retrieved_at": "2026-10-05",
       "note": "Fallback/subspecialty disambiguation: ear=tinnitus/vertigo/hearing; nose=sinus/allergy/smell; throat=head-neck/voice/swallow/sleep."
+    },
+    {
+      "source_id": "app_sql_inventory_2026_09_29",
+      "source_hospital": "app_sql",
+      "source_type": "canonical_department_inventory",
+      "source_priority": 0,
+      "source_title": "310 APP/SQL active Department inventory snapshot",
+      "source_url": "github://Alissa268/MyLittleWorld@New_Android_Backend/docs/PHASE3_310_DEPARTMENT_INVENTORY.json",
+      "retrieved_at": "2026-10-05",
+      "note": "System identity truth only; not a medical evidence source."
     }
   ]
 }
