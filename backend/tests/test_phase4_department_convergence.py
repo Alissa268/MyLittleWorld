@@ -15,8 +15,13 @@ from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCas
 from app.services import department_reasoning_service as reasoning
 from app.services import department_preference_service
 from app.services.appointment_service import DepartmentResolutionError
-from app.services.case_store import save_case
-from app.services.conversation_service import ClarificationSuggestion, advance_conversation, request_clarification
+from app.services.case_store import get_case, save_case
+from app.services.conversation_service import (
+    NEUTRAL_PENDING_RETRIES,
+    ClarificationSuggestion,
+    advance_conversation,
+    request_clarification,
+)
 from app.services.department_knowledge import resolve_department_names
 from app.services.rule_engine import (
     QUESTION_TEXTS,
@@ -520,6 +525,98 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(state["department_next_question_intent"], "cardiac_symptom")
         self.assertNotEqual(result["next_question"], "請問您近期有沒有感覺胸口悸動或胸痛？")
 
+    def test_completed_safety_turn_recomputes_department_and_plans_next_question(self):
+        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        symptom = SemanticExtraction(
+            field="symptom", normalized_value="頭暈", semantic_status="available",
+            assertion="present", confidence=0.96, source_text="頭暈", extractor="ai",
+        )
+        duration = SemanticExtraction(
+            field="duration", normalized_value="3天", semantic_status="available",
+            confidence=0.95, source_text="三天", extractor="ai",
+        )
+        accompanying = SemanticExtraction(
+            field="accompanying_symptoms", normalized_value=["眩暈"],
+            semantic_status="available", assertion="present", confidence=0.95,
+            source_text="眩暈", extractor="ai",
+        )
+
+        async def interpret(case, **_):
+            case.patient_input.symptom = "頭暈"
+            case.semantic_extractions.extend([symptom, duration, accompanying])
+            return SimpleNamespace(
+                semantic_extractions=[symptom, duration, accompanying],
+                pending_answer=None,
+            )
+
+        semantic = AsyncMock(side_effect=interpret)
+        intent_before_recompute: list[str | None] = []
+
+        async def recompute(case):
+            state = case.conversation_state
+            intent_before_recompute.append(state.department_next_question_intent)
+            state.department_status = "ambiguous"
+            state.department_next_question_intent = "ask_hearing_related_symptoms"
+
+        department = AsyncMock(side_effect=recompute)
+        question = "請問你頭暈時，有沒有伴隨耳鳴或聽力變化？"
+        planner_seen_intents: list[str | None] = []
+
+        async def plan(case, *_args, **_kwargs):
+            planner_seen_intents.append(case.conversation_state.department_next_question_intent)
+            return ClarificationSuggestion(
+                "clarification_needed",
+                question,
+                "ask_hearing_related_symptoms",
+                "需要區分目前的官方候選科別",
+            )
+
+        planner = AsyncMock(side_effect=plan)
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
+            chat_route, "refine_case_with_ai", new=semantic,
+        ), patch.object(chat_route, "reason_about_departments", new=department), patch.object(
+            chat_route, "request_clarification", new=planner,
+        ), patch.object(
+            chat_route, "generate_triage_reply",
+            new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+        ):
+            client = TestClient(app)
+            first_response = client.post("/chat", json={
+                "message": "我這三天一直頭暈，會有眩暈、天旋地轉的感覺。",
+            })
+            self.assertEqual(first_response.status_code, 200)
+            first = first_response.json()
+            self.assertEqual(first["conversation_state"]["clarification_status"], "safety_check")
+            self.assertEqual(first["next_question"], QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
+
+            stored = get_case(first["case_id"])
+            self.assertIsNotNone(stored)
+            stored.conversation_state.department_next_question_intent = "stale_before_safety"
+            save_case(stored)
+
+            second_response = client.post("/chat", json={
+                "case_id": first["case_id"],
+                "message": "都沒有，我沒有剛才提到的那些急迫症狀。",
+            })
+
+        self.assertEqual(second_response.status_code, 200)
+        second = second_response.json()
+        semantic.assert_awaited_once()
+        self.assertEqual(department.await_count, 2)
+        self.assertEqual(intent_before_recompute, [None, "stale_before_safety"])
+        self.assertEqual(planner.await_count, 2)
+        self.assertEqual(planner_seen_intents, [
+            "ask_hearing_related_symptoms", "ask_hearing_related_symptoms",
+        ])
+        self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(second["triage_case"]["patient_input"]["red_flags_status"], "negative")
+        self.assertEqual(second["next_question"], question)
+        self.assertNotIn(second["next_question"], NEUTRAL_PENDING_RETRIES)
+        self.assertEqual(
+            second["conversation_state"]["pending_clarification_intent"],
+            "ask_hearing_related_symptoms",
+        )
+
     async def test_safety_question_precedes_candidate_question(self):
         case = case_with_symptom()
         case.conversation_state.department_status = "ambiguous"
@@ -717,5 +814,5 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(third["conversation_state"]["stage"], "recommending")
         self.assertTrue(third["conversation_state"]["confirmed"])
         self.assertEqual(third["department_result"]["dept_id"], 101)
-        self.assertEqual(planner.await_count, 1)
+        self.assertEqual(planner.await_count, 2)
         old_detector.assert_not_awaited()

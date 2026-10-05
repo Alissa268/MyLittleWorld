@@ -134,7 +134,7 @@ class Phase2ConversationTest(unittest.TestCase):
             None, triage_case=first["triage_case"],
         )
         semantic.assert_not_awaited()
-        clarification.assert_not_awaited()
+        clarification.assert_awaited_once()
         department.assert_not_awaited()
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
@@ -167,7 +167,7 @@ class Phase2ConversationTest(unittest.TestCase):
             triage_case=eighth["triage_case"],
         )
         semantic.assert_not_awaited()
-        clarification.assert_not_awaited()
+        clarification.assert_awaited_once()
         department.assert_not_awaited()
         self.assertEqual(completed["conversation_state"]["turn_count"], 8)
         self.assertEqual(completed["conversation_state"]["clarification_status"], "unresolved")

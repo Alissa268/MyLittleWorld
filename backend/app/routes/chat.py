@@ -229,6 +229,12 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.triage = evaluate_urgency(
                 case, mark_next_question=None if conversational_mode else not batch_mode,
             )
+        safety_completed_this_turn = bool(
+            safety_check_turn
+            and has_user_input
+            and safety_screen_resolved(case)
+            and not case.patient_input.red_flags
+        )
         ai_attempted_override = (
             False if conversational_mode else merge_ai_next_question(case, ai_suggestion)
         )
@@ -249,10 +255,21 @@ async def chat(req: ChatRequest) -> TriageResult:
                     else None
                 )
                 capture_pending_answer(case, pending_interpretation, user_text_parts)
-                if has_user_input and not safety_check_turn:
+                department_reasoning_allowed = bool(
+                    has_user_input
+                    and (not safety_check_turn or safety_completed_this_turn)
+                )
+                if department_reasoning_allowed:
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
-                if has_user_input and semantic_ai_allowed:
+                clarification_planning_allowed = bool(
+                    has_user_input
+                    and (
+                        semantic_ai_allowed
+                        or (semantic_first and safety_completed_this_turn)
+                    )
+                )
+                if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
                         suggestion = await request_clarification(
                             case,
