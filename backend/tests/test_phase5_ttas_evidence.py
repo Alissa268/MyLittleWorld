@@ -1,19 +1,29 @@
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import math
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
-from app.schemas import Message, TriageCase
+from fastapi.testclient import TestClient
+
+from app.main import app
+from app.schemas import Message, PendingAnswerInterpretation, SemanticExtraction, TTASEvidence, TriageCase
+from app.services.case_store import sanitize_untrusted_snapshot, save_case
+from app.services.conversation_service import SAFETY_PENDING_INTENT
 from app.services.rag_triage_adapter import (
+    RagTriageSuggestion,
     _build_symptom_collection_prompt,
     _validated_turn_interpretation,
 )
 from app.services import rag_triage_adapter
 from app.services.rule_engine import apply_user_message
-from app.services.case_store import sanitize_untrusted_snapshot
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
+
+
+chat_route = importlib.import_module("app.routes.chat")
 
 
 def _item(field: str, value, source: str = "我喘得很嚴重", **updates):
@@ -106,6 +116,47 @@ def test_turn_interpreter_prompt_contains_ttas_contract_and_no_level_authority()
     assert "不得推算、提議或輸出任何 TTAS 級數" in prompt
     assert "不得假設正常" in prompt
     assert "source_text" in prompt
+    assert "answer_assertion" in _build_symptom_collection_prompt(
+        TriageCase.model_validate({
+            "case_id": "safety-prompt",
+            "conversation_state": {"clarification_status": "safety_check"},
+        }),
+        ["都沒有"],
+    )
+
+
+def test_safety_pending_answer_requires_grounded_structured_assertion() -> None:
+    _, accepted, _ = _validated_turn_interpretation(
+        {
+            "semantic_extractions": [],
+            "pending_answer": {
+                "answered_intent": SAFETY_PENDING_INTENT,
+                "answer_status": "answered",
+                "answer_source_text": "都沒有",
+                "answer_confidence": 0.98,
+                "answer_assertion": "absent",
+            },
+            "ttas_evidence": [],
+        },
+        pending_intent=SAFETY_PENDING_INTENT,
+        user_sources=["都沒有，我沒有剛才提到的那些急迫症狀。"],
+    )
+    _, missing_assertion, _ = _validated_turn_interpretation(
+        {
+            "semantic_extractions": [],
+            "pending_answer": {
+                "answered_intent": SAFETY_PENDING_INTENT,
+                "answer_status": "answered",
+                "answer_source_text": "都沒有",
+                "answer_confidence": 0.98,
+            },
+            "ttas_evidence": [],
+        },
+        pending_intent=SAFETY_PENDING_INTENT,
+        user_sources=["都沒有"],
+    )
+    assert accepted is not None and accepted.answer_assertion == "absent"
+    assert missing_assertion is None
 
 
 def test_ttas_evidence_uses_existing_turn_interpreter_call() -> None:
@@ -140,6 +191,80 @@ def test_ai_first_free_text_can_skip_legacy_safety_nlp() -> None:
     )
     assert case.patient_input.red_flags == []
     assert case.patient_input.red_flags_checked is False
+
+
+def test_safety_turn_uses_same_interpreter_and_ttas_for_positive_result() -> None:
+    case = TriageCase(case_id="phase5-safety-positive")
+    case.patient_input.symptom = "眼睛接觸化學藥劑"
+    case.history_records = [
+        Message(role="user", content="眼睛不舒服"),
+        Message(role="assistant", content="目前是否有安全篩檢所列的急迫症狀？"),
+    ]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom",
+        normalized_value="眼睛不舒服",
+        semantic_status="available",
+        assertion="present",
+        confidence=0.95,
+        source_text="眼睛不舒服",
+        extractor="ai",
+    )]
+    case.conversation_state.clarification_status = "safety_check"
+    case.conversation_state.last_question_key = "red_flags"
+    case.conversation_state.free_text_mode = True
+    save_case(case)
+
+    async def interpret(current, **_):
+        evidence = [TTASEvidence(
+            field="chemical_eye_injury",
+            value=True,
+            semantic_status="available",
+            confidence=0.98,
+            source_text="化學藥劑濺到我的眼睛",
+        )]
+        apply_ttas_evidence(current, evidence)
+        return RagTriageSuggestion(
+            semantic_extractions=[],
+            pending_answer=PendingAnswerInterpretation(
+                answered_intent=SAFETY_PENDING_INTENT,
+                answer_status="answered",
+                answer_source_text="化學藥劑濺到我的眼睛",
+                answer_confidence=0.98,
+                answer_assertion="present",
+            ),
+            ttas_evidence=evidence,
+        )
+
+    interpreter = AsyncMock(side_effect=interpret)
+    department = AsyncMock()
+    with patch.object(
+        chat_route,
+        "get_settings",
+        return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+    ), patch.object(
+        chat_route, "refine_case_with_ai", new=interpreter,
+    ), patch.object(
+        chat_route, "reason_about_departments", new=department,
+    ), patch.object(
+        chat_route, "apply_user_message", wraps=apply_user_message,
+    ) as apply_message, patch.object(
+        chat_route,
+        "generate_triage_reply",
+        new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+    ):
+        response = TestClient(app).post("/chat", json={
+            "case_id": case.case_id,
+            "message": "化學藥劑濺到我的眼睛",
+        })
+
+    assert response.status_code == 200
+    result = response.json()
+    interpreter.assert_awaited_once()
+    department.assert_not_awaited()
+    assert apply_message.call_args.kwargs["apply_legacy_safety"] is False
+    assert result["triage_case"]["ttas_result"]["level_candidate"] == 2
+    assert result["triage_case"]["patient_input"]["red_flags_status"] == "positive_ttas"
+    assert result["conversation_state"]["clarification_status"] == "urgent"
 
 
 def test_untrusted_snapshot_cannot_supply_ttas_conclusions() -> None:

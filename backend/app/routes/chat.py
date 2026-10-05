@@ -20,6 +20,7 @@ from app.services.conversation_service import (
     UNRESOLVED_REPLY,
     advance_conversation,
     capture_pending_answer,
+    capture_safety_screen_answer,
     request_clarification,
     safety_screen_resolved,
 )
@@ -142,9 +143,10 @@ async def chat(req: ChatRequest) -> TriageResult:
         semantic_first = runtime_ai_available(settings)
         if free_text_request:
             case.conversation_state.free_text_mode = True
-        semantic_ai_allowed = semantic_first and case.conversation_state.clarification_status not in {
-            "unresolved", "safety_check",
-        }
+        semantic_ai_allowed = (
+            semantic_first
+            and case.conversation_state.clarification_status != "unresolved"
+        )
         conversational_mode = (semantic_first or safety_check_turn) and not batch_mode
         user_text_parts: list[str] = []
         messages = req.messages or []
@@ -160,7 +162,12 @@ async def chat(req: ChatRequest) -> TriageResult:
         if req.answers and safety_check_turn:
             for answer in req.answers:
                 if answer.answer.strip():
-                    apply_user_message(case, answer.answer, semantic_first=True)
+                    apply_user_message(
+                        case,
+                        answer.answer,
+                        semantic_first=semantic_first,
+                        apply_legacy_safety=not semantic_first,
+                    )
                     user_text_parts.append(answer.answer)
                     has_user_input = True
         elif req.answers:
@@ -187,7 +194,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 case,
                 req.message,
                 semantic_first=semantic_first or safety_check_turn,
-                apply_legacy_safety=(not semantic_first or safety_check_turn),
+                apply_legacy_safety=not semantic_first,
             )
             user_text_parts.append(req.message)
             has_user_input = True
@@ -198,7 +205,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                         case,
                         message.content,
                         semantic_first=semantic_first or safety_check_turn,
-                        apply_legacy_safety=(not semantic_first or safety_check_turn),
+                        apply_legacy_safety=not semantic_first,
                     )
                     user_text_parts.append(message.content)
                     has_user_input = True
@@ -213,7 +220,7 @@ async def chat(req: ChatRequest) -> TriageResult:
             )
 
         _sync_confirmation_flags(case)
-    if has_user_input and not req.answers:
+    if has_user_input and (not req.answers or safety_check_turn):
         if semantic_ai_allowed:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
                 ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
@@ -243,6 +250,12 @@ async def chat(req: ChatRequest) -> TriageResult:
                 case.triage = evaluate_urgency(
                     case, mark_next_question=None if conversational_mode else not batch_mode,
                 )
+        safety_interpretation = (
+            ai_suggestion.pending_answer
+            if safety_check_turn and ai_suggestion is not None
+            else None
+        )
+        capture_safety_screen_answer(case, safety_interpretation, user_text_parts)
         safety_completed_this_turn = bool(
             safety_check_turn
             and has_user_input
@@ -256,7 +269,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             pass
         elif conversational_mode:
             ttas_immediate = semantic_first and ttas_requires_immediate_action(case)
-            controlled_legacy_positive = bool(safety_check_turn and case.patient_input.red_flags)
+            controlled_legacy_positive = bool(
+                safety_check_turn and not semantic_first and case.patient_input.red_flags
+            )
             if ttas_immediate or controlled_legacy_positive or (
                 not semantic_first and case.patient_input.red_flags
             ):
@@ -279,10 +294,14 @@ async def chat(req: ChatRequest) -> TriageResult:
                     else None
                 )
                 turn_interpretation_complete = bool(
-                    ai_suggestion is None
-                    or getattr(ai_suggestion, "interpretation_complete", True)
+                    not semantic_ai_allowed
+                    or (
+                        ai_suggestion is not None
+                        and getattr(ai_suggestion, "interpretation_complete", True)
+                    )
                 )
-                capture_pending_answer(case, pending_interpretation, user_text_parts)
+                if not safety_check_turn:
+                    capture_pending_answer(case, pending_interpretation, user_text_parts)
                 department_reasoning_allowed = bool(
                     has_user_input
                     and turn_interpretation_complete
@@ -293,10 +312,9 @@ async def chat(req: ChatRequest) -> TriageResult:
                         await reason_about_departments(case)
                 clarification_planning_allowed = bool(
                     has_user_input
-                    and (
-                        semantic_ai_allowed
-                        or (semantic_first and safety_completed_this_turn)
-                    )
+                    and turn_interpretation_complete
+                    and semantic_ai_allowed
+                    and (not safety_check_turn or safety_completed_this_turn)
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):

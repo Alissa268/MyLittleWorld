@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import TriageCase
 from app.services import conversation_service, rag_triage_adapter
+from app.services.conversation_service import SAFETY_PENDING_INTENT
 from app.services.case_store import save_case
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 
@@ -33,7 +34,10 @@ def extraction(field, value, source, confidence=0.95, assertion=None):
 
 
 class Phase2ConversationTest(unittest.TestCase):
-    def post(self, message, extractions, plan, *, triage_case=None, confirmed=False, ttas_evidence=None):
+    def post(
+        self, message, extractions, plan, *, triage_case=None, confirmed=False,
+        ttas_evidence=None, safety_assertion=None,
+    ):
         if triage_case:
             save_case(TriageCase.model_validate(triage_case))
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
@@ -44,6 +48,18 @@ class Phase2ConversationTest(unittest.TestCase):
                 "answer_status": plan.get("answer_status"),
                 "answer_source_text": plan.get("answer_source_text"),
                 "answer_confidence": plan.get("answer_confidence"),
+            }
+        if (
+            triage_case
+            and triage_case.get("conversation_state", {}).get("clarification_status") == "safety_check"
+            and safety_assertion is not None
+        ):
+            pending_answer = {
+                "answered_intent": SAFETY_PENDING_INTENT,
+                "answer_status": "answered",
+                "answer_source_text": message,
+                "answer_confidence": 0.98,
+                "answer_assertion": safety_assertion,
             }
         semantic = AsyncMock(return_value=json.dumps(
             {
@@ -131,16 +147,22 @@ class Phase2ConversationTest(unittest.TestCase):
         answer = "沒有胸痛，也沒有呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛"
         second, semantic, clarification, department = self.post(
             answer,
-            [extraction("accompanying_symptoms", ["胸痛", "呼吸困難"], answer)],
+            [
+                extraction("accompanying_symptoms", ["胸痛"], "沒有胸痛", assertion="absent"),
+                extraction("accompanying_symptoms", ["呼吸困難"], "沒有呼吸困難", assertion="absent"),
+            ],
             None, triage_case=first["triage_case"],
+            safety_assertion="absent",
         )
-        semantic.assert_not_awaited()
-        clarification.assert_awaited_once()
+        semantic.assert_awaited_once()
         department.assert_not_awaited()
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
         self.assertEqual(second["triage_case"]["patient_input"]["accompanying_symptoms"], ["走路越來越痛"])
-        self.assertEqual(len(second["triage_case"]["semantic_extractions"]), len(first["triage_case"]["semantic_extractions"]))
+        self.assertEqual(
+            len(second["triage_case"]["semantic_extractions"]),
+            len(first["triage_case"]["semantic_extractions"]) + 2,
+        )
         self.assertIn({"role": "user", "content": answer}, second["triage_case"]["history_records"])
         self.assertFalse(second["conversation_state"]["is_complete"])
         self.assertTrue(second["needMoreInfo"])
@@ -166,9 +188,9 @@ class Phase2ConversationTest(unittest.TestCase):
             "沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
             [extraction("symptom", "胸痛", "胸痛")], None,
             triage_case=eighth["triage_case"],
+            safety_assertion="absent",
         )
-        semantic.assert_not_awaited()
-        clarification.assert_awaited_once()
+        semantic.assert_awaited_once()
         department.assert_not_awaited()
         self.assertEqual(completed["conversation_state"]["turn_count"], 8)
         self.assertEqual(completed["conversation_state"]["clarification_status"], "unresolved")
@@ -204,19 +226,13 @@ class Phase2ConversationTest(unittest.TestCase):
 
     def test_positive_red_flag_keeps_urgent_path(self):
         result, _, clarification, department = self.post(
-            "我30歲而且突然胸痛", [extraction("symptom", "胸痛", "胸痛")], None,
+            "化學藥劑濺到我的眼睛", [extraction("symptom", "眼睛灼傷", "眼睛")], None,
             ttas_evidence=[{
-                "field": "cardiac_chest_pain_suspected",
+                "field": "chemical_eye_injury",
                 "value": True,
                 "semantic_status": "available",
                 "confidence": 0.95,
-                "source_text": "突然胸痛",
-            }, {
-                "field": "age_years",
-                "value": 30,
-                "semantic_status": "available",
-                "confidence": 0.95,
-                "source_text": "30歲",
+                "source_text": "化學藥劑濺到我的眼睛",
             }],
         )
         clarification.assert_not_awaited()

@@ -146,8 +146,14 @@
     "history_severe_allergic_reaction": {
       "type": "true|false|unknown"
     },
+    "insect_sting_exposure": {
+      "type": "true|false|unknown"
+    },
     "open_fracture": {
       "type": "true|false|unknown"
+    },
+    "injury_region": {
+      "type": "upper_limb|lower_limb|head_neck|trunk|pelvis|perineum|unknown"
     },
     "suspected_fracture_or_dislocation_deformity": {
       "type": "true|false|unknown"

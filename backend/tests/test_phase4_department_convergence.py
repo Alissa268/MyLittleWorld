@@ -25,6 +25,7 @@ from app.services.appointment_service import DepartmentResolutionError
 from app.services.case_store import get_case, save_case
 from app.services.conversation_service import (
     NEUTRAL_PENDING_RETRIES,
+    SAFETY_PENDING_INTENT,
     ClarificationSuggestion,
     advance_conversation,
     request_clarification,
@@ -550,12 +551,27 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             source_text="眩暈", extractor="ai",
         )
 
+        interpretation_calls = 0
+
         async def interpret(case, **_):
-            case.patient_input.symptom = "頭暈"
-            case.semantic_extractions.extend([symptom, duration, accompanying])
+            nonlocal interpretation_calls
+            interpretation_calls += 1
+            if interpretation_calls == 1:
+                case.patient_input.symptom = "頭暈"
+                case.semantic_extractions.extend([symptom, duration, accompanying])
+                return SimpleNamespace(
+                    semantic_extractions=[symptom, duration, accompanying],
+                    pending_answer=None,
+                )
             return SimpleNamespace(
-                semantic_extractions=[symptom, duration, accompanying],
-                pending_answer=None,
+                semantic_extractions=[],
+                pending_answer=PendingAnswerInterpretation(
+                    answered_intent=SAFETY_PENDING_INTENT,
+                    answer_status="answered",
+                    answer_source_text="都沒有，我沒有剛才提到的那些急迫症狀。",
+                    answer_confidence=0.98,
+                    answer_assertion="absent",
+                ),
             )
 
         semantic = AsyncMock(side_effect=interpret)
@@ -583,6 +599,11 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         planner = AsyncMock(side_effect=plan)
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             chat_route, "refine_case_with_ai", new=semantic,
+        ), patch.object(
+            chat_route, "apply_user_message", wraps=apply_user_message,
+        ) as apply_message, patch(
+            "app.services.conversation_service.classify_pending_answer",
+            new=AsyncMock(side_effect=AssertionError("standalone classifier must not run")),
         ), patch.object(chat_route, "reason_about_departments", new=department), patch.object(
             chat_route, "request_clarification", new=planner,
         ), patch.object(
@@ -610,7 +631,8 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(second_response.status_code, 200)
         second = second_response.json()
-        semantic.assert_awaited_once()
+        self.assertEqual(semantic.await_count, 2)
+        self.assertFalse(apply_message.call_args_list[-1].kwargs["apply_legacy_safety"])
         self.assertEqual(department.await_count, 2)
         self.assertEqual(intent_before_recompute, [None, "stale_before_safety"])
         self.assertEqual(planner.await_count, 2)
@@ -676,6 +698,17 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             if interpretation_calls == 1:
                 apply_semantic_extractions(case, initial, allow_red_flag_completion=False)
                 return RagTriageSuggestion(semantic_extractions=initial)
+            if interpretation_calls == 2:
+                return RagTriageSuggestion(
+                    semantic_extractions=[],
+                    pending_answer=PendingAnswerInterpretation(
+                        answered_intent=SAFETY_PENDING_INTENT,
+                        answer_status="answered",
+                        answer_source_text="都沒有，我沒有剛才提到的那些急迫症狀。",
+                        answer_confidence=0.98,
+                        answer_assertion="absent",
+                    ),
+                )
             apply_semantic_extractions(case, a3_evidence, allow_red_flag_completion=False)
             return RagTriageSuggestion(
                 semantic_extractions=a3_evidence,
@@ -745,7 +778,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
                 "message": a3_text,
             }).json()
 
-        self.assertEqual(semantic.await_count, 2)
+        self.assertEqual(semantic.await_count, 3)
         legacy_classifier.assert_not_awaited()
         self.assertEqual(department.await_count, 3)
         self.assertEqual(planner.await_count, 3)
@@ -935,7 +968,9 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
         async def semantic(case, **_):
             case.patient_input.symptom = "症狀甲"
-            return None
+            return SimpleNamespace(
+                semantic_extractions=[], pending_answer=None, interpretation_complete=True,
+            )
         async def converge(case):
             case.conversation_state.department_status = "ambiguous"
         planner = ClarificationSuggestion("clarification_needed", "可以補充症狀如何變化嗎？", "differentiate_signal", "待釐清")
@@ -993,13 +1028,31 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_resolved_case_safety_then_confirmation_keeps_validated_result(self):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        interpretation_calls = 0
+
         async def semantic(case, **_):
+            nonlocal interpretation_calls
+            interpretation_calls += 1
+            if interpretation_calls == 2:
+                return SimpleNamespace(
+                    semantic_extractions=[],
+                    pending_answer=PendingAnswerInterpretation(
+                        answered_intent=SAFETY_PENDING_INTENT,
+                        answer_status="answered",
+                        answer_source_text="沒有胸痛、呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛",
+                        answer_confidence=0.98,
+                        answer_assertion="absent",
+                    ),
+                    interpretation_complete=True,
+                )
             case.patient_input.symptom = "頭暈"
             case.semantic_extractions.append(SemanticExtraction(
                 field="duration", normalized_value="一週", source_text="上禮拜",
                 confidence=0.9, semantic_status="available",
             ))
-            return None
+            return SimpleNamespace(
+                semantic_extractions=[], pending_answer=None, interpretation_complete=True,
+            )
         async def converge(case):
             case.conversation_state.department_status = "resolved"
             case.department_result = DepartmentResult(

@@ -31,10 +31,39 @@ def test_reference_only_hypertension_rules_are_not_executable() -> None:
     assert reference_ids.isdisjoint(enabled_ids)
 
 
+def test_clinical_modifier_and_untraceable_context_rules_are_reference_only() -> None:
+    ruleset = load_ttas_rules()
+    reference_ids = {
+        rule["rule_id"]
+        for rule in ruleset.rules
+        if rule["implementation_status"] == "reference_only"
+    }
+    assert {
+        "TTAS-MOD-RESP-SEVERE",
+        "TTAS-MOD-RESP-MODERATE",
+        "TTAS-MOD-RESP-MILD",
+        "TTAS-MOD-SHOCK",
+        "TTAS-MOD-HEMODYNAMIC-INSUFFICIENT",
+        "TTAS-MOD-ADULT-HIGH-RISK-MECHANISM",
+        "TTAS-A020210",
+        "TTAS-A041011",
+        "TTAS-A041017",
+        "TTAS-A130409",
+        "TTAS-A130413",
+        "TTAS-E010809",
+        "TTAS-T010109",
+        "TTAS-T010110",
+        "TTAS-T120207",
+        "TTAS-T120707",
+    } <= reference_ids
+
+
 def test_stroke_rules_use_official_six_hour_boundary() -> None:
-    rules = {rule["official_code"]: rule for rule in load_ttas_rules().enabled_rules}
+    rules = {rule["official_code"]: rule for rule in load_ttas_rules().rules}
     assert rules["A041011"]["predicate"]["all"][1] == {"lt": ["stroke_onset_hours", 6]}
     assert rules["A041017"]["predicate"]["all"][1] == {"gte": ["stroke_onset_hours", 6]}
+    assert rules["A041011"]["implementation_status"] == "reference_only"
+    assert rules["A041017"]["implementation_status"] == "reference_only"
 
 
 def test_malformed_rules_fail_closed(tmp_path, monkeypatch) -> None:

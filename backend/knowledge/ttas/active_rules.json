@@ -26,7 +26,8 @@
       "required_fields": [
         "respiratory_distress"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "respiratory distress severity requires clinical modifier assessment; no official numeric derivation threshold is available in the Phase 5 package"
     },
     {
       "rule_id": "TTAS-MOD-RESP-MODERATE",
@@ -44,7 +45,8 @@
       "required_fields": [
         "respiratory_distress"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "respiratory distress severity requires clinical modifier assessment; no official numeric derivation threshold is available in the Phase 5 package"
     },
     {
       "rule_id": "TTAS-MOD-RESP-MILD",
@@ -62,7 +64,8 @@
       "required_fields": [
         "respiratory_distress"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "respiratory distress severity requires clinical modifier assessment; no official numeric derivation threshold is available in the Phase 5 package"
     },
     {
       "rule_id": "TTAS-MOD-SHOCK",
@@ -80,7 +83,8 @@
       "required_fields": [
         "hemodynamic_status"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "shock is a clinical modifier and the package does not provide a complete objective derivation predicate"
     },
     {
       "rule_id": "TTAS-MOD-HEMODYNAMIC-INSUFFICIENT",
@@ -98,7 +102,8 @@
       "required_fields": [
         "hemodynamic_status"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "hemodynamic insufficiency is a clinical modifier and the package does not provide a complete objective derivation predicate"
     },
     {
       "rule_id": "TTAS-MOD-UNCONSCIOUS",
@@ -108,26 +113,17 @@
       "source_id": "mohw_ttas_105_general",
       "official_locator": "成人總表表一意識；兒童現行總表亦同級",
       "predicate": {
-        "any": [
-          {
-            "eq": [
-              "consciousness",
-              "unconscious"
-            ]
-          },
-          {
-            "between": [
-              "gcs",
-              3,
-              8
-            ]
-          }
+        "between": [
+          "gcs",
+          3,
+          8
         ]
       },
       "required_fields": [
-        "consciousness|gcs"
+        "gcs"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "enabled",
+      "hardening_reason": "runtime execution is restricted to the package's objective GCS range; AI-classified consciousness is not authoritative"
     },
     {
       "rule_id": "TTAS-MOD-ALTERED-CONSCIOUSNESS",
@@ -137,26 +133,17 @@
       "source_id": "mohw_ttas_105_general",
       "official_locator": "成人總表表一意識；兒童現行總表亦同級",
       "predicate": {
-        "any": [
-          {
-            "eq": [
-              "consciousness",
-              "altered"
-            ]
-          },
-          {
-            "between": [
-              "gcs",
-              9,
-              13
-            ]
-          }
+        "between": [
+          "gcs",
+          9,
+          13
         ]
       },
       "required_fields": [
-        "consciousness|gcs"
+        "gcs"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "enabled",
+      "hardening_reason": "runtime execution is restricted to the package's objective GCS range; AI-classified consciousness is not authoritative"
     },
     {
       "rule_id": "TTAS-MOD-TEMP-HIGH-EXTREME",
@@ -250,7 +237,8 @@
         "fever",
         "ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "ill_appearing is a clinical assessment rather than an objective patient fact"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-FEVER-WELL",
@@ -279,7 +267,8 @@
         "fever",
         "ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "ill_appearing is a clinical assessment rather than an objective patient fact"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-CENTRAL-PAIN-SEVERE",
@@ -309,7 +298,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-PERIPHERAL-PAIN-SEVERE",
@@ -339,7 +329,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-CENTRAL-PAIN-MODERATE",
@@ -369,7 +360,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-PERIPHERAL-PAIN-MODERATE",
@@ -399,7 +391,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-CENTRAL-PAIN-MILD",
@@ -428,7 +421,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-PERIPHERAL-PAIN-MILD",
@@ -457,7 +451,8 @@
         "pain_score_0_10",
         "pain_location_class"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "central/peripheral pain classification is a clinical modifier not deterministically derived by this ruleset"
     },
     {
       "rule_id": "TTAS-MOD-ADULT-HIGH-RISK-MECHANISM",
@@ -475,7 +470,8 @@
       "required_fields": [
         "high_risk_injury_mechanism"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "high-risk mechanism is a clinical classification without a complete package predicate"
     },
     {
       "rule_id": "TTAS-PED-FEVER-LT3M",
@@ -561,7 +557,8 @@
         "temperature_c",
         "immune_compromised|ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "the combined predicate permits AI-supplied ill_appearing to determine level"
     },
     {
       "rule_id": "TTAS-PED-FEVER-GT3Y-IMMUNE",
@@ -634,7 +631,8 @@
         "temperature_c",
         "ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "ill_appearing is a clinical assessment rather than an objective patient fact"
     },
     {
       "rule_id": "TTAS-PED-FEVER-GT3Y-ILL",
@@ -670,7 +668,8 @@
         "temperature_c",
         "ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "ill_appearing is a clinical assessment rather than an objective patient fact"
     },
     {
       "rule_id": "TTAS-PED-FEVER-GT3Y-WELL",
@@ -706,7 +705,8 @@
         "temperature_c",
         "ill_appearing"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "ill_appearing is a clinical assessment rather than an objective patient fact"
     },
     {
       "rule_id": "TTAS-A020210",
@@ -724,7 +724,8 @@
       "required_fields": [
         "cardiac_chest_pain_suspected"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "cardiac chest pain suspected is a clinical conclusion, not a directly observable fact"
     },
     {
       "rule_id": "TTAS-A020211",
@@ -1132,7 +1133,8 @@
         "stroke_symptoms",
         "stroke_onset_hours"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "stroke_symptoms is a clinical grouping without a Backend-verifiable official evidence definition"
     },
     {
       "rule_id": "TTAS-A041017",
@@ -1161,7 +1163,8 @@
         "stroke_symptoms",
         "stroke_onset_hours"
       ],
-      "implementation_status": "enabled",
+      "implementation_status": "reference_only",
+      "hardening_reason": "stroke_symptoms is a clinical grouping without a Backend-verifiable official evidence definition",
       "note": "官方同列亦包含症狀已緩解；若要支援需新增 grounded resolved_stroke_symptoms evidence。"
     },
     {
@@ -1259,7 +1262,8 @@
         "blood_glucose_mg_dl",
         "hypoglycemia_symptoms"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "hypoglycemia_symptoms is a clinical association without a Backend-verifiable official symptom definition"
     },
     {
       "rule_id": "TTAS-A130413",
@@ -1288,7 +1292,8 @@
         "blood_glucose_mg_dl",
         "hypoglycemia_symptoms"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "hypoglycemia_symptoms is a clinical association without a Backend-verifiable official symptom definition"
     },
     {
       "rule_id": "TTAS-E010107",
@@ -1298,12 +1303,13 @@
       "source_id": "mohw_ttas_105_environment",
       "official_locator": "E0101 昆蟲螫傷",
       "predicate": {
-        "eq": [
-          "history_severe_allergic_reaction",
-          true
+        "all": [
+          {"eq": ["insect_sting_exposure", true]},
+          {"eq": ["history_severe_allergic_reaction", true]}
         ]
       },
       "required_fields": [
+        "insect_sting_exposure",
         "history_severe_allergic_reaction"
       ],
       "implementation_status": "enabled"
@@ -1316,12 +1322,13 @@
       "source_id": "mohw_ttas_105_environment",
       "official_locator": "E0101 昆蟲螫傷",
       "predicate": {
-        "eq": [
-          "face_lip_tongue_swelling",
-          true
+        "all": [
+          {"eq": ["insect_sting_exposure", true]},
+          {"eq": ["face_lip_tongue_swelling", true]}
         ]
       },
       "required_fields": [
+        "insect_sting_exposure",
         "face_lip_tongue_swelling"
       ],
       "implementation_status": "enabled"
@@ -1334,12 +1341,13 @@
       "source_id": "mohw_ttas_105_environment",
       "official_locator": "E0101 昆蟲螫傷",
       "predicate": {
-        "eq": [
-          "generalized_rash_or_blisters",
-          true
+        "all": [
+          {"eq": ["insect_sting_exposure", true]},
+          {"eq": ["generalized_rash_or_blisters", true]}
         ]
       },
       "required_fields": [
+        "insect_sting_exposure",
         "generalized_rash_or_blisters"
       ],
       "implementation_status": "enabled",
@@ -1390,7 +1398,8 @@
         "toxic_gas_exposure",
         "respiratory_distress"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "the rule depends on AI-classified respiratory_distress=none without an official deterministic derivation"
     },
     {
       "rule_id": "TTAS-T010109",
@@ -1408,7 +1417,8 @@
       "required_fields": [
         "high_risk_injury_mechanism"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "high-risk mechanism is a clinical classification without a complete package predicate"
     },
     {
       "rule_id": "TTAS-T010110",
@@ -1426,7 +1436,8 @@
       "required_fields": [
         "penetrating_injury_high_region"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "the evidence contract cannot prove the exact multi-trauma/penetration complaint context"
     },
     {
       "rule_id": "TTAS-T010111",
@@ -1454,13 +1465,14 @@
       "source_id": "mohw_ttas_105_trauma",
       "official_locator": "T1201 上肢鈍傷",
       "predicate": {
-        "eq": [
-          "open_fracture",
-          true
+        "all": [
+          {"eq": ["open_fracture", true]},
+          {"eq": ["injury_region", "upper_limb"]}
         ]
       },
       "required_fields": [
-        "open_fracture"
+        "open_fracture",
+        "injury_region"
       ],
       "implementation_status": "enabled"
     },
@@ -1472,13 +1484,14 @@
       "source_id": "mohw_ttas_105_trauma",
       "official_locator": "T1201 上肢鈍傷",
       "predicate": {
-        "eq": [
-          "suspected_fracture_or_dislocation_deformity",
-          true
+        "all": [
+          {"eq": ["suspected_fracture_or_dislocation_deformity", true]},
+          {"eq": ["injury_region", "upper_limb"]}
         ]
       },
       "required_fields": [
-        "suspected_fracture_or_dislocation_deformity"
+        "suspected_fracture_or_dislocation_deformity",
+        "injury_region"
       ],
       "implementation_status": "enabled"
     },
@@ -1490,13 +1503,14 @@
       "source_id": "mohw_ttas_105_trauma",
       "official_locator": "T1206 下肢鈍傷",
       "predicate": {
-        "eq": [
-          "open_fracture",
-          true
+        "all": [
+          {"eq": ["open_fracture", true]},
+          {"eq": ["injury_region", "lower_limb"]}
         ]
       },
       "required_fields": [
-        "open_fracture"
+        "open_fracture",
+        "injury_region"
       ],
       "implementation_status": "enabled"
     },
@@ -1508,13 +1522,14 @@
       "source_id": "mohw_ttas_105_trauma",
       "official_locator": "T1206 下肢鈍傷",
       "predicate": {
-        "eq": [
-          "suspected_fracture_or_dislocation_deformity",
-          true
+        "all": [
+          {"eq": ["suspected_fracture_or_dislocation_deformity", true]},
+          {"eq": ["injury_region", "lower_limb"]}
         ]
       },
       "required_fields": [
-        "suspected_fracture_or_dislocation_deformity"
+        "suspected_fracture_or_dislocation_deformity",
+        "injury_region"
       ],
       "implementation_status": "enabled"
     },
@@ -1534,7 +1549,8 @@
       "required_fields": [
         "penetrating_injury_high_region"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "the package evidence field does not safely establish the exact upper-limb penetration context"
     },
     {
       "rule_id": "TTAS-T120707",
@@ -1552,7 +1568,8 @@
       "required_fields": [
         "penetrating_injury_high_region"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "the package evidence field does not safely establish the exact lower-limb penetration context"
     },
     {
       "rule_id": "TTAS-T110107",

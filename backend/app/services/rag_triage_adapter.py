@@ -17,6 +17,7 @@ from app.schemas import (
 )
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
+from app.services.conversation_service import SAFETY_PENDING_INTENT
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
@@ -68,12 +69,15 @@ async def refine_case_with_ai(
 
     if user_sources is None:
         user_sources = [message.content for message in case.history_records if message.role == "user"]
+    pending_intent = _active_pending_intent(case)
     semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
         data,
-        pending_intent=case.conversation_state.pending_clarification_intent,
+        pending_intent=pending_intent,
         user_sources=user_sources,
     )
-    if _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+    if _answered_without_clinical_evidence(
+        pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
+    ):
         repair_prompt = _build_turn_interpretation_repair_prompt(prompt)
         try:
             repair_raw = await complete_prompt(repair_prompt)
@@ -85,7 +89,7 @@ async def refine_case_with_ai(
             repair_data = _parse_json_object(repair_raw)
             semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
                 repair_data,
-                pending_intent=case.conversation_state.pending_clarification_intent,
+                pending_intent=pending_intent,
                 user_sources=user_sources,
             )
         except Exception as exc:
@@ -97,7 +101,9 @@ async def refine_case_with_ai(
             return RagTriageSuggestion(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
-        if _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+        if _answered_without_clinical_evidence(
+            pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
+        ):
             logger.warning("rag_triage_adapter repair incomplete case_id=%s", case.case_id)
             return RagTriageSuggestion(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
@@ -146,13 +152,22 @@ def _validated_turn_interpretation(
 def _answered_without_clinical_evidence(
     pending_answer: PendingAnswerInterpretation | None,
     extractions: list[SemanticExtraction],
+    *,
+    safety_context: bool = False,
 ) -> bool:
     return bool(
         pending_answer is not None
         and pending_answer.answer_status == "answered"
         and pending_answer.answer_confidence >= ACCEPT_THRESHOLD
+        and not (safety_context and pending_answer.answer_assertion in _EVIDENCE_ASSERTIONS)
         and not any(_is_accepted_clinical_evidence(item) for item in extractions)
     )
+
+
+def _active_pending_intent(case: TriageCase) -> str | None:
+    if case.conversation_state.clarification_status == "safety_check":
+        return SAFETY_PENDING_INTENT
+    return case.conversation_state.pending_clarification_intent
 
 
 def _is_accepted_clinical_evidence(extraction: SemanticExtraction) -> bool:
@@ -386,14 +401,14 @@ def _pending_answer_from_ai(
 ) -> PendingAnswerInterpretation | None:
     if pending_intent is None or not isinstance(value, dict):
         return None
-    if set(value) != {
-        "answered_intent", "answer_status", "answer_source_text", "answer_confidence",
-    }:
+    base_keys = {"answered_intent", "answer_status", "answer_source_text", "answer_confidence"}
+    if set(value) not in {frozenset(base_keys), frozenset(base_keys | {"answer_assertion"})}:
         return None
     intent = value.get("answered_intent")
     status = value.get("answer_status")
     source = value.get("answer_source_text")
     confidence = value.get("answer_confidence")
+    assertion = value.get("answer_assertion")
     if (
         intent != pending_intent
         or status not in {"answered", "partial", "unclear"}
@@ -403,6 +418,8 @@ def _pending_answer_from_ai(
         or type(confidence) not in {int, float}
         or not math.isfinite(confidence)
         or not 0.0 <= confidence <= 1.0
+        or (assertion is not None and assertion not in _EVIDENCE_ASSERTIONS)
+        or (pending_intent == SAFETY_PENDING_INTENT and assertion not in _EVIDENCE_ASSERTIONS)
     ):
         return None
     return PendingAnswerInterpretation(
@@ -410,6 +427,7 @@ def _pending_answer_from_ai(
         answer_status=status,
         answer_source_text=source.strip(),
         answer_confidence=float(confidence),
+        answer_assertion=assertion,
     )
 
 
@@ -474,7 +492,7 @@ def _build_symptom_collection_prompt(
         for message in case.history_records
     )
     current_input = case.patient_input.model_dump()
-    pending_intent = case.conversation_state.pending_clarification_intent
+    pending_intent = _active_pending_intent(case)
     pending_question = next(
         (message.content for message in reversed(case.history_records) if message.role == "assistant"),
         None,
@@ -516,7 +534,8 @@ def _build_symptom_collection_prompt(
 13. onset 為簡短的發作描述字串；accompanying_symptoms 為伴隨症狀字串陣列，可使用 grounded source_text 的語意正規化概念，不可添加原文未表達的症狀。
 14. 同一次 interpretation 也要判斷本輪是否回答 pending clarification。pending context 如下：
 {json.dumps(pending_context, ensure_ascii=False, indent=2)}
-15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 只能包含 answered_intent、answer_status、answer_source_text、answer_confidence；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
+15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 包含 answered_intent、answer_status、answer_source_text、answer_confidence，並可包含 answer_assertion；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
+  15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報 safety 問題中的一項或多項狀況，absent 表示患者明確否認整份 safety 問題，uncertain 表示無法確定。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為 safety negative。
   16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
   17. 同一次 interpretation 輸出 ttas_evidence；每筆只能包含 field、value、semantic_status、confidence、source_text。field/value allow-list 如下：
   {json.dumps(ttas_fields, ensure_ascii=False, indent=2)}
@@ -524,6 +543,8 @@ def _build_symptom_collection_prompt(
   19. 使用者未提供的血壓、心率、SpO2、GCS、體溫、血糖或年齡等資料不得假設正常，也不得輸出 available；未知就省略，或只有在本輪明確表示不知道時輸出 grounded unknown/null。
   20. age_years/age_months 只在本輪有逐字年齡證據時抽取。不要猜成人、兒童或月齡。
   21. 你只抽 TTAS evidence，不得推算、提議或輸出任何 TTAS 級數；不同 evidence 各自使用直接支持它的最短 source_text。
+  22. 不得把患者的主觀形容直接升格為臨床 modifier：例如「喘得很嚴重」不能自行產生 respiratory_distress=severe，「看起來不舒服」不能自行產生 ill_appearing，也不得自行判定 shock、cardiac_chest_pain_suspected、high_risk_injury_mechanism 或 pain_location_class。只有患者明確提供可觀察事實、數值、既有診斷/狀態時才可抽對應 evidence。
+  23. insect_sting_exposure 與 injury_region 只可在 current_user_text 有直接、逐字支持時抽取；不得從症狀推測暴露原因或受傷部位。
 
 以下是 clinical pending-answer contract 範例。實際 answered_intent 必須換成目前 pending_clarification_intent 的原值，所有 source_text 必須來自實際 current_user_text。請只輸出 JSON，不要輸出其他文字：
 {{
@@ -573,7 +594,8 @@ def _build_symptom_collection_prompt(
     "answered_intent": "<current pending intent>",
     "answer_status": "answered",
     "answer_source_text": "沒有聽力下降",
-    "answer_confidence": 0.98
+    "answer_confidence": 0.98,
+    "answer_assertion": "absent"
   }},
   "ttas_evidence": []
 }}"""

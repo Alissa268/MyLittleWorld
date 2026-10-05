@@ -15,6 +15,7 @@ from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark
 
 logger = logging.getLogger(__name__)
 HARD_TURN_CAP = 8
+SAFETY_PENDING_INTENT = "safety_screen"
 FALLBACK_QUESTIONS = (
     "可以再描述一下目前最困擾你的不舒服，以及它什麼情況下會變嚴重嗎？",
     "剛才提到的不舒服，還有什麼變化或細節是你覺得重要的？",
@@ -270,6 +271,43 @@ def capture_pending_answer(
     state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
     state.pending_clarification_intent = None
     state.next_information_needed = []
+    return True
+
+
+def capture_safety_screen_answer(
+    case: TriageCase,
+    suggestion: PendingAnswerInterpretation | None,
+    user_sources: list[str],
+) -> bool:
+    """Complete a negative safety screen from validated AI interpretation only."""
+    if (
+        case.conversation_state.clarification_status != "safety_check"
+        or suggestion is None
+        or suggestion.answer_status != "answered"
+        or suggestion.answer_assertion != "absent"
+        or suggestion.answer_confidence < ACCEPT_THRESHOLD
+        or not _grounded_clarification_answer(
+            suggestion.answered_intent,
+            suggestion.answer_source_text,
+            suggestion.answer_status,
+            suggestion.answer_confidence,
+            SAFETY_PENDING_INTENT,
+            user_sources,
+        )
+    ):
+        return False
+
+    patient = case.patient_input
+    state = case.conversation_state
+    patient.red_flags = []
+    patient.red_flags_checked = True
+    patient.red_flags_status = "negative"
+    if RED_FLAG_QUESTION_KEY not in patient.collected_fields:
+        patient.collected_fields.append(RED_FLAG_QUESTION_KEY)
+    if RED_FLAG_QUESTION_KEY not in state.consumed_fields:
+        state.consumed_fields.append(RED_FLAG_QUESTION_KEY)
+    state.field_statuses[RED_FLAG_QUESTION_KEY] = "unavailable"
+    state.field_confidence[RED_FLAG_QUESTION_KEY] = suggestion.answer_confidence
     return True
 
 

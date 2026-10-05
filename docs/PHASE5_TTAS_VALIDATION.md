@@ -8,7 +8,7 @@ This implementation is a preliminary screening subset defined by `phase5_ttas_so
 
 ## Source Package
 
-The installed knowledge files are exact copies of the provided package:
+The installed knowledge files originate only from the provided package:
 
 - `backend/knowledge/ttas/source_manifest.json`
 - `backend/knowledge/ttas/ttas_evidence_schema.json`
@@ -16,6 +16,8 @@ The installed knowledge files are exact copies of the provided package:
 - `backend/knowledge/ttas/old_ailogic_crosswalk.json`
 
 Only rules marked `implementation_status=enabled` execute. `reference_only` rules remain audit data and cannot affect a level candidate.
+
+The runtime copy adds no medical source or threshold. Phase 5 hardening narrows execution where the package cannot support a trustworthy automatic predicate: clinical modifier fields are retained for provenance but their dependent rules are `reference_only`; official complaint codes additionally require explicit structured complaint/region context where that context is available from the official locator.
 
 ## Runtime Flow
 
@@ -26,6 +28,8 @@ The existing Turn Interpreter returns one JSON object containing:
 3. `ttas_evidence`
 
 No fixed second TTAS AI call was added. Backend validation enforces the field allow-list, field-specific value type/range, finite confidence, acceptance threshold, semantic status, and current-turn verbatim grounding. AI-provided level, score, warning, or workflow fields are ignored.
+
+AI-first free-text safety turns use this same Turn Interpreter. A safety pending answer adds a validated `answer_assertion` (`present`, `absent`, or `uncertain`). Backend completes a negative safety screen only for a grounded, high-confidence `answered + absent` proposal tied to the opaque `safety_screen` intent. A no-match TTAS result alone never completes the screen. Legacy phrase/keyword safety parsing remains only for AI-unavailable and legacy/batch compatibility paths.
 
 Validated evidence is stored as history and reduced to current field state by latest accepted evidence. The evaluator reads that structured state and trusted age facts only; it never reads raw user text.
 
@@ -38,19 +42,24 @@ Validated evidence is stored as history and reduced to current field state by la
 - No complete enabled match returns `insufficient_information` and `level_candidate=null`.
 - No path defaults to level 4 or 5.
 - Age-dependent rules do not execute unless trusted or grounded age evidence establishes the population.
+- `respiratory_distress`, `hemodynamic_status`, `ill_appearing`, `pain_location_class`, `high_risk_injury_mechanism`, and `cardiac_chest_pain_suspected` cannot independently drive an enabled rule where the package lacks an objective deterministic derivation.
+- The package supplies no executable SpO2-to-respiratory-modifier threshold, so no threshold was invented; SpO2 alone remains insufficient information.
+- E0101 insect-sting rules require `insect_sting_exposure=true` in addition to their criterion evidence.
+- T1201/T1206 upper/lower-limb fracture traces require matching `injury_region`; one fact cannot emit both limb codes.
+- T010110, T120207, and T120707 remain reference-only because the packaged penetration evidence cannot prove the exact official complaint context.
 
 Each match records `rule_id`, `official_code`, `source_id`, `official_locator`, level, and grounded evidence references.
 
 ## Legacy Differences
 
 - The prototype 90/50/20 urgency score no longer drives the AI-first free-text route; `urgency_score` remains null.
-- The old `<40` glucose threshold was not retained. A130409/A130413 use `<60` with symptom status and produce levels 2/3 respectively.
+- The old `<40` glucose threshold was not retained. A130409/A130413 preserve the official `<60` criteria and provenance, but are `reference_only` until `hypoglycemia_symptoms` can be established without an unverified AI clinical grouping.
 - Blanket high-blood-pressure behavior is not executed because those package rules are `reference_only`.
-- A041011/A041017 use the official six-hour boundary.
+- A041011/A041017 retain the official six-hour boundary in audit data, but are `reference_only` until stroke-symptom evidence has a Backend-verifiable official definition.
 - No-match is insufficient information, not low urgency.
 
-Legacy deterministic safety parsing remains only for the existing controlled safety-question compatibility path. It is not invoked for ordinary AI-first free-text urgency interpretation and was not expanded in Phase 5.
+Legacy deterministic safety parsing remains only for AI-unavailable or legacy/batch compatibility. It is not invoked for AI-first ordinary or safety-check free text and was not expanded in Phase 5.
 
 ## Tests
 
-Focused tests cover package integrity, grounding and type validation, unknown vitals, age handling, all required modifier/official-code regressions, reference-only exclusion, multiple-match priority, evidence trace, no-match behavior, single Turn Interpreter call, and Phase 4 conversational regressions.
+Focused tests cover package integrity, grounding and type validation, unknown vitals, age handling, reference-only exclusion, multiple-match priority, evidence trace, no-match behavior, the single Turn Interpreter safety path, subjective respiratory fail-closed behavior, insect complaint context, upper/lower trauma trace isolation, penetration reference-only behavior, and Phase 4 conversational regressions.

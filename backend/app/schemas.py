@@ -80,6 +80,7 @@ class PendingAnswerInterpretation(BaseModel):
     answer_status: PendingAnswerStatus
     answer_source_text: str
     answer_confidence: float
+    answer_assertion: Optional[EvidenceAssertion] = None
 
 
 class TTASEvidence(BaseModel):
