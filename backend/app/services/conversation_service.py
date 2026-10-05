@@ -319,11 +319,14 @@ def advance_conversation(
         and state.field_confidence.get(field, 1.0) < ACCEPT_THRESHOLD
         for field, reason in state.clarification_reasons.items()
     )
+    safety_ready = grounded_symptom and grounded_detail and not low_confidence
+    if safety_ready and not safety_screen_resolved(case):
+        _enter_safety_check(case)
+        return
+
     sufficient = (
         (state.clarification_status == "safety_check" or (suggestion is not None and suggestion.status == "sufficient"))
-        and grounded_symptom
-        and grounded_detail
-        and not low_confidence
+        and safety_ready
         and state.pending_clarification_intent is None
     )
     if sufficient:
@@ -337,17 +340,6 @@ def advance_conversation(
             case.triage.next_question = None
             case.triage.is_final = True
             case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
-            return
-        if not safety_screen_resolved(case):
-            state.clarification_status = "safety_check"
-            state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
-            state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
-            state.is_complete = False
-            mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
-            case.triage.need_more_info = True
-            case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
-            case.triage.is_final = False
-            case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
             return
 
     if state.turn_count >= HARD_TURN_CAP:
@@ -426,6 +418,19 @@ def advance_conversation(
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append(f"自然對話澄清中：{reason}")
+
+
+def _enter_safety_check(case: TriageCase) -> None:
+    state = case.conversation_state
+    state.clarification_status = "safety_check"
+    state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
+    state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
+    state.is_complete = False
+    mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
+    case.triage.need_more_info = True
+    case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+    case.triage.is_final = False
+    case.triage.reasons.append("症狀描述已足夠，仍須完成既有急迫症狀篩檢。")
 
 
 def _asks_filled_duration(case: TriageCase, intent: str | None, question: str | None) -> bool:

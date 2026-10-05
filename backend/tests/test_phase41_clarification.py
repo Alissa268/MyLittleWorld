@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase
 from app.services import conversation_service, rag_triage_adapter
+from app.services.case_store import save_case
 from app.services.conversation_service import (
     ClarificationSuggestion, advance_conversation, capture_pending_answer, request_clarification,
 )
@@ -100,11 +101,16 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
         return response.json(), planner
 
     def test_real_hematuria_two_turn_grounded_answer_clears_pending(self):
+        initial = TriageCase(case_id="phase41-route-after-safety")
+        initial.patient_input.red_flags_checked = True
+        initial.patient_input.red_flags_status = "negative"
+        save_case(initial)
         first, _ = self.post(
             "我最近有血尿，已經兩天了",
             [extraction("symptom", "血尿", "血尿"), extraction("duration", "2天", "兩天")],
             {"status": "clarification_needed", "question": SEVERITY_QUESTION,
              "intent": "severity", "reason": "血尿的程度仍不清楚"},
+            triage_case=initial.model_dump(mode="json"),
         )
         self.assertEqual(first["conversation_state"]["pending_clarification_intent"], "severity")
         self.assertEqual(first["department_result"]["dept_id"], 1242)

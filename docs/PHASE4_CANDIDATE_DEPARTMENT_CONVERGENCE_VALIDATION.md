@@ -235,3 +235,15 @@ $env:CEREBRAS_API_KEY=''
 ```
 
 Result: **554 passed, 7 warnings, 324 subtests passed**. The warnings are existing FastAPI/Starlette deprecations. No real provider or live DB write was used. Android, SQL schema/data, TTAS, urgency/red-flag policy, doctor scoring, and Schedule contracts were not modified. Phase 5 was not started.
+
+## Phase 4 live fix: deterministic safety precedence
+
+A live dizziness conversation exposed two safety-state gaps. First, an accepted deterministic urgency normalization with `semantic_status=unavailable` could complete a negative red-flag screen even when the current turn was not answering the controlled red-flag question. Second, `advance_conversation()` inserted the safety question only after a clarification proposal of `sufficient`, allowing an `ambiguous` Department's AI-generated question to appear before the unresolved safety screen.
+
+Negative safety completion is now context-bound. `_apply_semantic_result()`, `_is_red_flag_screen_answer()`, and `_is_negative_red_flag_answer()` require `last_question_key == RED_FLAG_QUESTION_KEY` before a negative answer can set `red_flags_checked`. Thus `沒有胸痛，也沒有心悸` outside the controlled safety turn remains `not_checked`. A positive deterministic red flag remains immediately actionable regardless of the current question. The generative semantic path remains unable to complete red-flag workflow state.
+
+Conversation advancement now computes a Backend-owned `safety_ready` gate from grounded symptom evidence, grounded detail, and the absence of a low-confidence blocker. When that gate is met but safety is unresolved, Backend enters `safety_check` before evaluating either `sufficient` or `clarification_needed`, installs the canonical deterministic safety question, and returns. A proposed Department clarification intent is preserved as future reasoning input but is not copied into `pending_clarification_intent` or `asked_clarification_intents`, because that question was not shown to the patient.
+
+Regressions include the live dizziness wording with an AI-proposed chest-pain clarification, direct ambiguous-candidate precedence, partial negative text outside a safety turn, a negative answer to the actual safety question, and immediate positive-red-flag handling. The Phase 4.1 hematuria pending-answer test now explicitly starts after a server-authoritative completed safety screen, preserving its original clarification-state purpose under the corrected ordering.
+
+Focused safety/conversation validation passed **127 tests with 155 subtests**. The complete Backend suite, with `CEREBRAS_API_KEY` blank, passed **559 tests, 7 warnings, and 324 subtests**. No Android, SQL, official KB, Department scoring, TTAS, urgency policy, red-flag definitions, doctor scoring, or Schedule contract was changed. Phase 5 was not started.

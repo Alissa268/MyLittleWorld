@@ -18,7 +18,11 @@ from app.services.appointment_service import DepartmentResolutionError
 from app.services.case_store import save_case
 from app.services.conversation_service import ClarificationSuggestion, advance_conversation, request_clarification
 from app.services.department_knowledge import resolve_department_names
-from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
+from app.services.rule_engine import (
+    QUESTION_TEXTS,
+    RED_FLAG_QUESTION_KEY,
+    apply_user_message,
+)
 
 chat_route = importlib.import_module("app.routes.chat")
 recommend_route = importlib.import_module("app.routes.recommend")
@@ -459,6 +463,63 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result["triage"]["urgency_level"], "high")
         self.assertIsNone(result["department_result"])
 
+    def test_live_dizziness_department_question_is_preempted_by_safety(self):
+        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        symptom = SemanticExtraction(
+            field="symptom", normalized_value="頭暈", semantic_status="available",
+            assertion="present", confidence=0.96, source_text="頭暈", extractor="ai",
+        )
+        duration = SemanticExtraction(
+            field="duration", normalized_value="3天", semantic_status="available",
+            confidence=0.95, source_text="三天", extractor="ai",
+        )
+        accompanying = SemanticExtraction(
+            field="accompanying_symptoms", normalized_value=["眩暈"],
+            semantic_status="available", assertion="present", confidence=0.95,
+            source_text="眩暈", extractor="ai",
+        )
+
+        async def semantic(case, **_):
+            case.patient_input.symptom = "頭暈"
+            case.semantic_extractions.extend([symptom, duration, accompanying])
+            return SimpleNamespace(semantic_extractions=[symptom, duration, accompanying])
+
+        async def converge(case):
+            state = case.conversation_state
+            state.department_status = "ambiguous"
+            state.department_next_question_intent = "cardiac_symptom"
+
+        planner = AsyncMock(return_value=ClarificationSuggestion(
+            "clarification_needed",
+            "請問您近期有沒有感覺胸口悸動或胸痛？",
+            "cardiac_symptom",
+            "需要區分候選科別",
+        ))
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
+            chat_route, "refine_case_with_ai", new=semantic,
+        ), patch.object(chat_route, "reason_about_departments", new=converge), patch.object(
+            chat_route, "request_clarification", new=planner,
+        ), patch.object(
+            chat_route, "generate_triage_reply",
+            new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+        ):
+            response = TestClient(app).post("/chat", json={
+                "message": "我這三天一直頭暈，會有眩暈、天旋地轉的感覺。",
+            })
+
+        self.assertEqual(response.status_code, 200)
+        result = response.json()
+        state = result["conversation_state"]
+        planner.assert_awaited_once()
+        self.assertEqual(state["clarification_status"], "safety_check")
+        self.assertEqual(state["last_question_key"], RED_FLAG_QUESTION_KEY)
+        self.assertEqual(result["next_question"], QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
+        self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertIsNone(state["pending_clarification_intent"])
+        self.assertEqual(state["asked_clarification_intents"], [])
+        self.assertEqual(state["department_next_question_intent"], "cardiac_symptom")
+        self.assertNotEqual(result["next_question"], "請問您近期有沒有感覺胸口悸動或胸痛？")
+
     async def test_safety_question_precedes_candidate_question(self):
         case = case_with_symptom()
         case.conversation_state.department_status = "ambiguous"
@@ -474,6 +535,65 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.conversation_state.clarification_status, "safety_check")
         self.assertEqual(case.triage.next_question, QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
         self.assertEqual(case.conversation_state.asked_clarification_intents, [])
+
+    async def test_ambiguous_department_clarification_cannot_skip_safety(self):
+        case = case_with_symptom()
+        state = case.conversation_state
+        state.department_status = "ambiguous"
+        state.department_next_question_intent = "differentiate_signal"
+        case.semantic_extractions.append(SemanticExtraction(
+            field="body_part", normalized_value="症狀甲", semantic_status="available",
+            confidence=0.95, source_text="症狀甲", extractor="ai",
+        ))
+        proposal = ClarificationSuggestion(
+            "clarification_needed",
+            "請問是否還有其他可區分症狀的細節？",
+            "differentiate_signal",
+            "需要區分候選科別",
+        )
+
+        advance_conversation(
+            case,
+            proposal,
+            user_sources=["我有症狀甲"],
+            current_extractions=[],
+        )
+
+        self.assertEqual(state.clarification_status, "safety_check")
+        self.assertEqual(case.triage.next_question, QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
+        self.assertEqual(state.last_question_key, RED_FLAG_QUESTION_KEY)
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertIsNone(state.pending_clarification_intent)
+        self.assertEqual(state.asked_clarification_intents, [])
+        self.assertEqual(state.department_next_question_intent, "differentiate_signal")
+
+    def test_partial_negative_outside_safety_question_does_not_complete_screen(self):
+        case = TriageCase(case_id="phase4-partial-negative-outside-safety")
+
+        apply_user_message(case, "沒有胸痛，也沒有心悸。", semantic_first=True)
+
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
+        self.assertEqual(case.patient_input.red_flags, [])
+
+    def test_negative_answer_to_actual_safety_question_completes_screen(self):
+        case = TriageCase(case_id="phase4-negative-safety-answer")
+        case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
+
+        apply_user_message(case, "都沒有。", semantic_first=True)
+
+        self.assertTrue(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "negative")
+        self.assertEqual(case.patient_input.red_flags, [])
+
+    def test_positive_red_flag_outside_safety_question_remains_immediate(self):
+        case = TriageCase(case_id="phase4-positive-safety-signal")
+
+        apply_user_message(case, "我突然胸痛", semantic_first=True)
+
+        self.assertTrue(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "positive_specific")
+        self.assertIn("突發胸痛", case.patient_input.red_flags)
 
     async def test_hard_cap_with_ambiguous_candidates_stays_unresolved(self):
         case = case_with_symptom()

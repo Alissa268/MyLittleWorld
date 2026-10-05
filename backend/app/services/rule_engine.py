@@ -530,7 +530,11 @@ def _apply_semantic_result(case: TriageCase, result: NormalizationResult) -> Non
 
     if result.urgency is not None:
         patient.urgency_normalized = result.urgency
-        if result.urgency.semantic_status == "unavailable" and accepted(result.urgency.confidence, result.urgency.semantic_status):
+        if (
+            result.urgency.semantic_status == "unavailable"
+            and case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
+            and accepted(result.urgency.confidence, result.urgency.semantic_status)
+        ):
             patient.red_flags_checked = True
             patient.red_flags = []
             patient.red_flags_status = "negative"
@@ -944,9 +948,10 @@ def _is_red_flag_screen_answer(
         return True
     if answer_classification in {"ambiguous", "positive_unspecified"}:
         return False
-    if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY and _has_negation(text):
-        return True
-    return _mentions_red_flag_screen(text) and _has_negation(text)
+    return (
+        case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
+        and _has_negation(text)
+    )
 
 
 def _is_negative_red_flag_answer(
@@ -958,9 +963,7 @@ def _is_negative_red_flag_answer(
         return False
     if not _has_negation(text):
         return False
-    if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY:
-        return True
-    return _mentions_red_flag_screen(text)
+    return case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
 
 
 def _mentions_red_flag_screen(text: str) -> bool:
