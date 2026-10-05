@@ -40,6 +40,8 @@ DepartmentQuestionKey = Literal["department_clarification"]
 DepartmentStateField = Literal["department_context"]
 EvidenceAssertion = Literal["present", "absent", "uncertain"]
 PendingAnswerStatus = Literal["answered", "partial", "unclear"]
+TTASSemanticStatus = Literal["available", "unknown", "ambiguous"]
+TTASEvaluationStatus = Literal["matched", "insufficient_information"]
 
 
 class QuestionItem(BaseModel):
@@ -78,6 +80,37 @@ class PendingAnswerInterpretation(BaseModel):
     answer_status: PendingAnswerStatus
     answer_source_text: str
     answer_confidence: float
+
+
+class TTASEvidence(BaseModel):
+    field: str
+    value: Any = None
+    semantic_status: TTASSemanticStatus
+    confidence: float
+    source_text: str
+
+
+class TTASRuleEvidenceReference(BaseModel):
+    field: str
+    value: Any = None
+    source_text: str
+
+
+class TTASMatchedRule(BaseModel):
+    rule_id: str
+    official_code: Optional[str] = None
+    source_id: str
+    official_locator: str
+    level: int
+    evidence_references: List[TTASRuleEvidenceReference] = Field(default_factory=list)
+
+
+class TTASEvaluationResult(BaseModel):
+    status: TTASEvaluationStatus = "insufficient_information"
+    level_candidate: Optional[int] = None
+    matched_rules: List[TTASMatchedRule] = Field(default_factory=list)
+    missing_evidence: List[str] = Field(default_factory=list)
+    warnings: List[str] = Field(default_factory=list)
 
 
 class SeverityNormalization(BaseModel):
@@ -119,6 +152,8 @@ class PatientInput(BaseModel):
     red_flags_status: str = "not_checked"
     severity_normalized: SeverityNormalization = Field(default_factory=SeverityNormalization)
     urgency_normalized: UrgencyNormalization = Field(default_factory=UrgencyNormalization)
+    age_years: Optional[float] = None
+    age_months: Optional[float] = None
 
 
 class Availability(BaseModel):
@@ -221,6 +256,8 @@ class TriageCase(BaseModel):
     conversation_state: ConversationState = Field(default_factory=ConversationState)
     department_result: Optional[DepartmentResult] = None
     semantic_extractions: List[SemanticExtraction] = Field(default_factory=list)
+    ttas_evidence: List[TTASEvidence] = Field(default_factory=list)
+    ttas_result: TTASEvaluationResult = Field(default_factory=TTASEvaluationResult)
     confirmed: bool = False
     recommendation_generated: bool = False
     script_generated: bool = False

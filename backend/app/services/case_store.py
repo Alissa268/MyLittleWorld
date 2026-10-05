@@ -65,12 +65,16 @@ def sanitize_untrusted_snapshot(snapshot: TriageCase) -> TriageCase:
     case.selected_recommendation_id = None
     case.department_result = None
     case.semantic_extractions = []
+    case.ttas_evidence = []
+    case.ttas_result = type(case.ttas_result)()
     case.patient_input.red_flags = []
     case.patient_input.red_flags_checked = False
     case.patient_input.red_flags_status = "not_checked"
     case.patient_input.severity_normalized = SeverityNormalization()
     case.patient_input.urgency_normalized = UrgencyNormalization()
     case.patient_input.collected_fields = []
+    case.patient_input.age_years = None
+    case.patient_input.age_months = None
     case.triage = UrgencyResult()
     case.conversation_state = ConversationState()
     return case

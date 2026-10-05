@@ -11,6 +11,7 @@ from app.schemas import (
     DepartmentResult,
     PendingAnswerInterpretation,
     SemanticExtraction,
+    TTASEvidence,
     TriageCase,
     UrgencyResult,
 )
@@ -18,6 +19,8 @@ from app.services.ai_service import complete_runtime_json as _complete_runtime_j
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
+from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
+from app.services.ttas_rule_loader import TTASRuleLoadError, load_ttas_rules
 
 logger = logging.getLogger(__name__)
 _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
@@ -38,6 +41,7 @@ class RagTriageSuggestion:
     reply: str | None = None
     semantic_extractions: list[SemanticExtraction] | None = None
     pending_answer: PendingAnswerInterpretation | None = None
+    ttas_evidence: list[TTASEvidence] | None = None
     interpretation_complete: bool = True
 
 
@@ -64,7 +68,7 @@ async def refine_case_with_ai(
 
     if user_sources is None:
         user_sources = [message.content for message in case.history_records if message.role == "user"]
-    semantic_extractions, pending_answer = _validated_turn_interpretation(
+    semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
         data,
         pending_intent=case.conversation_state.pending_clarification_intent,
         user_sources=user_sources,
@@ -79,7 +83,7 @@ async def refine_case_with_ai(
                 len(repair_raw),
             )
             repair_data = _parse_json_object(repair_raw)
-            semantic_extractions, pending_answer = _validated_turn_interpretation(
+            semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
                 repair_data,
                 pending_intent=case.conversation_state.pending_clarification_intent,
                 user_sources=user_sources,
@@ -91,12 +95,12 @@ async def refine_case_with_ai(
                 type(exc).__name__,
             )
             return RagTriageSuggestion(
-                semantic_extractions=[], pending_answer=None, interpretation_complete=False,
+                semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
         if _answered_without_clinical_evidence(pending_answer, semantic_extractions):
             logger.warning("rag_triage_adapter repair incomplete case_id=%s", case.case_id)
             return RagTriageSuggestion(
-                semantic_extractions=[], pending_answer=None, interpretation_complete=False,
+                semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
     if semantic_extractions:
         # Import locally to keep the adapter independent at module load time.
@@ -109,21 +113,16 @@ async def refine_case_with_ai(
             semantic_extractions,
             allow_red_flag_completion=False,
         )
-
-    triage = None
-    triage_data = data.get("triage")
-    if isinstance(triage_data, dict):
-        try:
-            triage = _urgency_result_from_ai(triage_data)
-        except (TypeError, ValueError):
-            logger.warning("rag_triage_adapter ignored invalid AI triage case_id=%s", case.case_id)
+    if ttas_evidence:
+        apply_ttas_evidence(case, ttas_evidence)
 
     reply = data.get("reply")
     return RagTriageSuggestion(
-        triage=triage,
+        triage=None,
         reply=str(reply).strip() if isinstance(reply, str) and reply.strip() else None,
         semantic_extractions=semantic_extractions,
         pending_answer=pending_answer,
+        ttas_evidence=ttas_evidence,
     )
 
 
@@ -132,7 +131,7 @@ def _validated_turn_interpretation(
     *,
     pending_intent: str | None,
     user_sources: list[str],
-) -> tuple[list[SemanticExtraction], PendingAnswerInterpretation | None]:
+) -> tuple[list[SemanticExtraction], PendingAnswerInterpretation | None, list[TTASEvidence]]:
     return (
         _semantic_extractions_from_ai(data.get("semantic_extractions"), user_sources=user_sources),
         _pending_answer_from_ai(
@@ -140,6 +139,7 @@ def _validated_turn_interpretation(
             pending_intent=pending_intent,
             user_sources=user_sources,
         ),
+        validate_ttas_evidence_items(data.get("ttas_evidence"), user_sources=user_sources),
     )
 
 
@@ -431,22 +431,6 @@ def _semantic_value_valid(field: str, value: Any, status: str, source_text: str)
     return ai_normalized_value_valid(field, value, status, source_text)
 
 
-def _urgency_result_from_ai(data: dict[str, Any]) -> UrgencyResult:
-    reasons = data.get("reasons", [])
-    if not isinstance(reasons, list):
-        reasons = []
-    return UrgencyResult(
-        urgency_score=_optional_int(data.get("urgency_score")),
-        urgency_level=str(data.get("urgency_level") or "") or None,
-        warning_required=bool(data.get("warning_required", False)),
-        warning_message=data.get("warning_message"),
-        need_more_info=bool(data.get("need_more_info", True)),
-        next_question=data.get("next_question"),
-        reasons=[str(item) for item in reasons if str(item).strip()],
-        is_final=bool(data.get("is_final", False)),
-    )
-
-
 def _optional_int(value: Any) -> int | None:
     if value is None:
         return None
@@ -475,7 +459,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
         original_prompt
         + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
         "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
-        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions 與 pending_answer。"
+        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer 與 ttas_evidence。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
         " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
     )
@@ -500,6 +484,13 @@ def _build_symptom_collection_prompt(
         "pending_question": pending_question,
         "current_user_text": current_user_text or [],
     }
+    try:
+        ttas_fields = {
+            field: spec.get("type")
+            for field, spec in load_ttas_rules().evidence_fields.items()
+        }
+    except TTASRuleLoadError:
+        ttas_fields = {}
 
     return f"""你是醫療問診的語意抽取器。你只能做 extraction、normalization、confidence estimation。
 不要在這個 extraction 回應中決定 next_question、stage、waiting_confirmation 或流程轉移；追問由獨立 clarification call 提議，狀態由 Backend 控制。
@@ -515,8 +506,8 @@ def _build_symptom_collection_prompt(
 3. confidence 使用 0 到 1。
 4. 若信心不足，設定 needs_clarification=true 與 follow_up_reason。
 5. 只輸出使用者本輪實際表達的欄位；若本輪明確修正舊值，可輸出新值，不得猜測。
-6. 不得輸出 red_flags；急迫症狀由 deterministic safety parser 獨立處理。
-7. 不要輸出 patient_input、triage、next_question、stage、科別或掛號資訊。
+  6. 不得輸出 red_flags。急迫性只能抽成 ttas_evidence，由 Backend 依正式規則判斷。
+  7. 不要輸出 patient_input、triage、TTAS level、urgency_score、warning_required、red_flags_checked、next_question、stage、科別、確認狀態或掛號資訊。
 8. duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 9. source_text 必須是直接支持該 extraction 的最短連續逐字原文（患者原話），不可改寫；不得包含無關的前後症狀、否定句或其他子句。
 10. symptom 與 accompanying_symptoms 只要 normalized_value 含有 medical concept，就必須輸出 assertion：present 表示患者陳述存在、absent 表示患者否認、uncertain 表示患者不確定；其他欄位可省略 assertion 或輸出 null。
@@ -526,7 +517,13 @@ def _build_symptom_collection_prompt(
 14. 同一次 interpretation 也要判斷本輪是否回答 pending clarification。pending context 如下：
 {json.dumps(pending_context, ensure_ascii=False, indent=2)}
 15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 只能包含 answered_intent、answer_status、answer_source_text、answer_confidence；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
-16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
+  16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
+  17. 同一次 interpretation 輸出 ttas_evidence；每筆只能包含 field、value、semantic_status、confidence、source_text。field/value allow-list 如下：
+  {json.dumps(ttas_fields, ensure_ascii=False, indent=2)}
+  18. ttas_evidence.semantic_status 只能是 available、unknown、ambiguous。source_text 必須是 current_user_text 中最短的連續逐字片段。不得從 prior history 為本輪製造 evidence。
+  19. 使用者未提供的血壓、心率、SpO2、GCS、體溫、血糖或年齡等資料不得假設正常，也不得輸出 available；未知就省略，或只有在本輪明確表示不知道時輸出 grounded unknown/null。
+  20. age_years/age_months 只在本輪有逐字年齡證據時抽取。不要猜成人、兒童或月齡。
+  21. 你只抽 TTAS evidence，不得推算、提議或輸出任何 TTAS 級數；不同 evidence 各自使用直接支持它的最短 source_text。
 
 以下是 clinical pending-answer contract 範例。實際 answered_intent 必須換成目前 pending_clarification_intent 的原值，所有 source_text 必須來自實際 current_user_text。請只輸出 JSON，不要輸出其他文字：
 {{
@@ -577,5 +574,6 @@ def _build_symptom_collection_prompt(
     "answer_status": "answered",
     "answer_source_text": "沒有聽力下降",
     "answer_confidence": 0.98
-  }}
+  }},
+  "ttas_evidence": []
 }}"""

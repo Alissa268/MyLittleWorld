@@ -301,7 +301,8 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(case.patient_input.duration)
         self.assertNotIn("爬樓梯吃力", case.patient_input.accompanying_symptoms)
         self.assertTrue(case.semantic_extractions)
-        self.assertEqual(suggestion.triage.next_question, "是否有紅腫熱痛或發燒？")
+        self.assertIsNone(suggestion.triage)
+        self.assertIsNone(case.triage.urgency_score)
 
     async def test_ai_semantic_extraction_cannot_replace_explicit_value_or_complete_red_flags(self):
         class FakeSettings:

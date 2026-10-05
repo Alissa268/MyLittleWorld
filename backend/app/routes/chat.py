@@ -27,6 +27,7 @@ from app.services.department_reasoning_service import reason_about_departments
 from app.services.department_preference_service import capture_department_preference, resolve_requested_department
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import apply_user_message, evaluate_urgency
+from app.services.ttas_evaluator import apply_ttas_evaluation, ttas_requires_immediate_action
 from app.services.ai_service import runtime_ai_available
 
 router = APIRouter(prefix="/chat", tags=["chat"])
@@ -182,13 +183,23 @@ async def chat(req: ChatRequest) -> TriageResult:
                 batch_outcome.fallback_reason,
             )
         elif req.message and req.message.strip():
-            apply_user_message(case, req.message, semantic_first=semantic_first or safety_check_turn)
+            apply_user_message(
+                case,
+                req.message,
+                semantic_first=semantic_first or safety_check_turn,
+                apply_legacy_safety=(not semantic_first or safety_check_turn),
+            )
             user_text_parts.append(req.message)
             has_user_input = True
         elif messages:
             for message in messages:
                 if message.role == "user" and message.content.strip():
-                    apply_user_message(case, message.content, semantic_first=semantic_first or safety_check_turn)
+                    apply_user_message(
+                        case,
+                        message.content,
+                        semantic_first=semantic_first or safety_check_turn,
+                        apply_legacy_safety=(not semantic_first or safety_check_turn),
+                    )
                     user_text_parts.append(message.content)
                     has_user_input = True
         if has_user_input:
@@ -226,9 +237,12 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("rule_engine"):
         confirmation_only = conversational_mode and not has_user_input and case.conversation_state.is_complete
         if not confirmation_only:
-            case.triage = evaluate_urgency(
-                case, mark_next_question=None if conversational_mode else not batch_mode,
-            )
+            if conversational_mode and semantic_first:
+                case.triage = apply_ttas_evaluation(case)
+            else:
+                case.triage = evaluate_urgency(
+                    case, mark_next_question=None if conversational_mode else not batch_mode,
+                )
         safety_completed_this_turn = bool(
             safety_check_turn
             and has_user_input
@@ -241,11 +255,21 @@ async def chat(req: ChatRequest) -> TriageResult:
         if confirmation_only:
             pass
         elif conversational_mode:
-            if case.patient_input.red_flags:
+            ttas_immediate = semantic_first and ttas_requires_immediate_action(case)
+            controlled_legacy_positive = bool(safety_check_turn and case.patient_input.red_flags)
+            if ttas_immediate or controlled_legacy_positive or (
+                not semantic_first and case.patient_input.red_flags
+            ):
+                if ttas_immediate:
+                    case.patient_input.red_flags_checked = True
+                    case.patient_input.red_flags_status = "positive_ttas"
                 if not safety_check_turn:
                     case.conversation_state.turn_count += len(user_text_parts)
                 case.conversation_state.clarification_status = "urgent"
                 case.conversation_state.is_complete = True
+                case.triage.need_more_info = False
+                case.triage.next_question = None
+                case.triage.is_final = True
             else:
                 suggestion = None
                 pending_before_turn = case.conversation_state.pending_clarification_intent

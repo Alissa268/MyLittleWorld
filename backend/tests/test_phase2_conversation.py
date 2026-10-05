@@ -33,7 +33,7 @@ def extraction(field, value, source, confidence=0.95, assertion=None):
 
 
 class Phase2ConversationTest(unittest.TestCase):
-    def post(self, message, extractions, plan, *, triage_case=None, confirmed=False):
+    def post(self, message, extractions, plan, *, triage_case=None, confirmed=False, ttas_evidence=None):
         if triage_case:
             save_case(TriageCase.model_validate(triage_case))
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
@@ -49,6 +49,7 @@ class Phase2ConversationTest(unittest.TestCase):
             {
                 "semantic_extractions": extractions,
                 "pending_answer": pending_answer,
+                "ttas_evidence": ttas_evidence or [],
             },
             ensure_ascii=False,
         ))
@@ -203,12 +204,27 @@ class Phase2ConversationTest(unittest.TestCase):
 
     def test_positive_red_flag_keeps_urgent_path(self):
         result, _, clarification, department = self.post(
-            "我突然胸痛", [extraction("symptom", "胸痛", "胸痛")], None,
+            "我30歲而且突然胸痛", [extraction("symptom", "胸痛", "胸痛")], None,
+            ttas_evidence=[{
+                "field": "cardiac_chest_pain_suspected",
+                "value": True,
+                "semantic_status": "available",
+                "confidence": 0.95,
+                "source_text": "突然胸痛",
+            }, {
+                "field": "age_years",
+                "value": 30,
+                "semantic_status": "available",
+                "confidence": 0.95,
+                "source_text": "30歲",
+            }],
         )
         clarification.assert_not_awaited()
         department.assert_not_awaited()
-        self.assertTrue(result["triage_case"]["patient_input"]["red_flags"])
+        self.assertEqual(result["triage_case"]["ttas_result"]["level_candidate"], 2)
+        self.assertEqual(result["triage"]["urgency_score"], None)
         self.assertTrue(result["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(result["triage_case"]["patient_input"]["red_flags_status"], "positive_ttas")
         self.assertEqual(result["conversation_state"]["clarification_status"], "urgent")
         self.assertFalse(result["needMoreInfo"])
         self.assertIsNone(result["next_question"])

@@ -15,7 +15,8 @@ from app.services.conversation_service import safety_screen_resolved
 from app.services.department_preference_service import resolve_requested_department
 from app.services.ai_service import runtime_ai_available
 from app.services.rag_triage_adapter import refine_case_with_ai
-from app.services.rule_engine import apply_user_message, evaluate_urgency
+from app.services.rule_engine import apply_user_message
+from app.services.ttas_evaluator import apply_ttas_evaluation
 
 router = APIRouter(prefix="/recommend", tags=["recommend"])
 
@@ -38,10 +39,15 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
     if case is None and req.userQuery and req.userQuery.strip():
         case = create_case(req.case_id)
         semantic_first = runtime_ai_available(get_settings())
-        apply_user_message(case, req.userQuery, semantic_first=semantic_first)
+        apply_user_message(
+            case,
+            req.userQuery,
+            semantic_first=True,
+            apply_legacy_safety=False,
+        )
         if semantic_first:
             await refine_case_with_ai(case, user_sources=[req.userQuery])
-        case.triage = evaluate_urgency(case)
+        case.triage = apply_ttas_evaluation(case)
         case.conversation_state.is_complete = not case.triage.need_more_info
 
     if case is None:

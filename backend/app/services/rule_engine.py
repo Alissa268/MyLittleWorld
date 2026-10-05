@@ -96,7 +96,12 @@ RED_FLAG_UNCERTAINTY_WARNING = (
 
 
 def apply_user_message(
-    case: TriageCase, message: str, *, semantic_first: bool = False, record_history: bool = True,
+    case: TriageCase,
+    message: str,
+    *,
+    semantic_first: bool = False,
+    record_history: bool = True,
+    apply_legacy_safety: bool = True,
 ) -> TriageCase:
     text = message.strip()
     if not text:
@@ -114,7 +119,8 @@ def apply_user_message(
             for field in ("symptom", "body_part"):
                 if field in case.conversation_state.consumed_fields:
                     case.conversation_state.consumed_fields.remove(field)
-        _apply_free_text_safety(case, text)
+        if apply_legacy_safety:
+            _apply_free_text_safety(case, text)
         return case
     patient = case.patient_input
     previous_red_flag_status = patient.red_flags_status
@@ -866,6 +872,8 @@ def _reset_symptom_dependent_fields(case: TriageCase) -> None:
     patient.red_flags_status = "not_checked"
     patient.severity_normalized = type(patient.severity_normalized)()
     patient.urgency_normalized = type(patient.urgency_normalized)()
+    case.ttas_evidence = []
+    case.ttas_result = type(case.ttas_result)()
     for field in [RED_FLAG_QUESTION_KEY, "duration", "severity"]:
         if field in case.conversation_state.consumed_fields:
             case.conversation_state.consumed_fields.remove(field)
