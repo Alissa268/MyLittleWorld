@@ -7,7 +7,13 @@ from dataclasses import dataclass
 from typing import Any
 
 from app.config import get_settings
-from app.schemas import DepartmentResult, SemanticExtraction, TriageCase, UrgencyResult
+from app.schemas import (
+    DepartmentResult,
+    PendingAnswerInterpretation,
+    SemanticExtraction,
+    TriageCase,
+    UrgencyResult,
+)
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
@@ -27,6 +33,7 @@ class RagTriageSuggestion:
     triage: UrgencyResult | None = None
     reply: str | None = None
     semantic_extractions: list[SemanticExtraction] | None = None
+    pending_answer: PendingAnswerInterpretation | None = None
 
 
 async def refine_case_with_ai(
@@ -37,7 +44,7 @@ async def refine_case_with_ai(
         logger.info("rag_triage_adapter refine skipped: AI key is not configured")
         return None
 
-    prompt = _build_symptom_collection_prompt(case)
+    prompt = _build_symptom_collection_prompt(case, user_sources or [])
     try:
         raw = await complete_prompt(prompt)
         logger.debug("rag_triage_adapter response received case_id=%s chars=%s", case.case_id, len(raw))
@@ -54,6 +61,11 @@ async def refine_case_with_ai(
         user_sources = [message.content for message in case.history_records if message.role == "user"]
     semantic_extractions = _semantic_extractions_from_ai(
         data.get("semantic_extractions"),
+        user_sources=user_sources,
+    )
+    pending_answer = _pending_answer_from_ai(
+        data.get("pending_answer"),
+        pending_intent=case.conversation_state.pending_clarification_intent,
         user_sources=user_sources,
     )
     if semantic_extractions:
@@ -81,6 +93,7 @@ async def refine_case_with_ai(
         triage=triage,
         reply=str(reply).strip() if isinstance(reply, str) and reply.strip() else None,
         semantic_extractions=semantic_extractions,
+        pending_answer=pending_answer,
     )
 
 
@@ -296,6 +309,41 @@ def _semantic_extractions_from_ai(
     return extractions
 
 
+def _pending_answer_from_ai(
+    value: Any,
+    *,
+    pending_intent: str | None,
+    user_sources: list[str],
+) -> PendingAnswerInterpretation | None:
+    if pending_intent is None or not isinstance(value, dict):
+        return None
+    if set(value) != {
+        "answered_intent", "answer_status", "answer_source_text", "answer_confidence",
+    }:
+        return None
+    intent = value.get("answered_intent")
+    status = value.get("answer_status")
+    source = value.get("answer_source_text")
+    confidence = value.get("answer_confidence")
+    if (
+        intent != pending_intent
+        or status not in {"answered", "partial", "unclear"}
+        or not isinstance(source, str)
+        or not source.strip()
+        or not any(source.strip() in user_text for user_text in user_sources)
+        or type(confidence) not in {int, float}
+        or not math.isfinite(confidence)
+        or not 0.0 <= confidence <= 1.0
+    ):
+        return None
+    return PendingAnswerInterpretation(
+        answered_intent=intent,
+        answer_status=status,
+        answer_source_text=source.strip(),
+        answer_confidence=float(confidence),
+    )
+
+
 def _has_nonempty_medical_concept(field: str, value: Any) -> bool:
     if field == "symptom":
         return isinstance(value, str) and bool(value.strip())
@@ -353,12 +401,25 @@ def _case_text(case: TriageCase) -> str:
     return strip_negated_red_flags("；".join(part for part in parts if part))
 
 
-def _build_symptom_collection_prompt(case: TriageCase) -> str:
+def _build_symptom_collection_prompt(
+    case: TriageCase,
+    current_user_text: list[str] | None = None,
+) -> str:
     history = "\n".join(
         f"{'使用者' if message.role == 'user' else '助理'}: {message.content}"
         for message in case.history_records
     )
     current_input = case.patient_input.model_dump()
+    pending_intent = case.conversation_state.pending_clarification_intent
+    pending_question = next(
+        (message.content for message in reversed(case.history_records) if message.role == "assistant"),
+        None,
+    ) if pending_intent else None
+    pending_context = {
+        "pending_clarification_intent": pending_intent,
+        "pending_question": pending_question,
+        "current_user_text": current_user_text or [],
+    }
 
     return f"""你是醫療問診的語意抽取器。你只能做 extraction、normalization、confidence estimation。
 不要在這個 extraction 回應中決定 next_question、stage、waiting_confirmation 或流程轉移；追問由獨立 clarification call 提議，狀態由 Backend 控制。
@@ -382,6 +443,10 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
 11. 同一 extraction 中的所有 normalized concept 必須具有相同 assertion；若同一句包含不同 polarity，必須拆成多筆 extraction，且每筆各自引用最短的 grounded source_text。不得把 mixed-polarity 整句共用為單一 medical extraction。
 12. severity 的 normalized_value 只能輸出字串 "mild"、"moderate" 或 "severe"：輕微／還好 → mild，普通／中等／中度 → moderate，嚴重／很嚴重／痛到無法睡覺 → severe；不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
 13. onset 為簡短的發作描述字串；accompanying_symptoms 為伴隨症狀字串陣列，可使用 grounded source_text 的語意正規化概念，不可添加原文未表達的症狀。
+14. 同一次 interpretation 也要判斷本輪是否回答 pending clarification。pending context 如下：
+{json.dumps(pending_context, ensure_ascii=False, indent=2)}
+15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 只能包含 answered_intent、answer_status、answer_source_text、answer_confidence；answered_intent 必須沿用 pending intent，answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
+16. pending_answer 與 semantic_extractions 是同一輪理解的兩個輸出面向。回答 pending question 時仍必須完整抽取本輪表達的 medical evidence；例如回答有耳鳴時要抽出耳鳴 present，否認胸痛與心悸時要分別抽出 absent evidence。不得因已填 pending_answer 就省略 semantic_extractions。
 
 請只輸出 JSON，不要輸出其他文字：
 {{
@@ -396,5 +461,6 @@ def _build_symptom_collection_prompt(case: TriageCase) -> str:
       "needs_clarification": false,
       "follow_up_reason": null
     }}
-  ]
+  ],
+  "pending_answer": null
 }}"""

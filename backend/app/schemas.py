@@ -39,6 +39,7 @@ ChecklistField = Literal[
 DepartmentQuestionKey = Literal["department_clarification"]
 DepartmentStateField = Literal["department_context"]
 EvidenceAssertion = Literal["present", "absent", "uncertain"]
+PendingAnswerStatus = Literal["answered", "partial", "unclear"]
 
 
 class QuestionItem(BaseModel):
@@ -70,6 +71,13 @@ class SemanticExtraction(BaseModel):
     needs_clarification: bool = False
     follow_up_reason: Optional[str] = None
     extractor: str = "deterministic"
+
+
+class PendingAnswerInterpretation(BaseModel):
+    answered_intent: str
+    answer_status: PendingAnswerStatus
+    answer_source_text: str
+    answer_confidence: float
 
 
 class SeverityNormalization(BaseModel):

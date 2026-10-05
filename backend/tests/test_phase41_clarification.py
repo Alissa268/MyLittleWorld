@@ -61,22 +61,16 @@ def pending_case() -> TriageCase:
 class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
     def post(self, message: str, extractions: list[dict], plan: dict, *, triage_case: dict | None = None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
-        semantic = AsyncMock(return_value=json.dumps({"semantic_extractions": extractions}, ensure_ascii=False))
-        planner_responses = None
+        semantic_payload = {"semantic_extractions": extractions, "pending_answer": None}
         if triage_case and plan.get("answered_intent"):
-            planner_responses = [
-                json.dumps({
-                    "answered_intent": plan.get("answered_intent"),
-                    "answer_status": plan.get("answer_status"),
-                    "answer_source_text": plan.get("answer_source_text"),
-                    "answer_confidence": plan.get("answer_confidence"),
-                }, ensure_ascii=False),
-                json.dumps(plan, ensure_ascii=False),
-            ]
-        planner = AsyncMock(
-            side_effect=planner_responses,
-            return_value=json.dumps(plan, ensure_ascii=False),
-        )
+            semantic_payload["pending_answer"] = {
+                "answered_intent": plan.get("answered_intent"),
+                "answer_status": plan.get("answer_status"),
+                "answer_source_text": plan.get("answer_source_text"),
+                "answer_confidence": plan.get("answer_confidence"),
+            }
+        semantic = AsyncMock(return_value=json.dumps(semantic_payload, ensure_ascii=False))
+        planner = AsyncMock(return_value=json.dumps(plan, ensure_ascii=False))
         detector = AsyncMock()
 
         async def keep_resolved(case):
@@ -98,14 +92,14 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
             })
         self.assertEqual(response.status_code, 200)
         detector.assert_not_awaited()
-        return response.json(), planner
+        return response.json(), planner, semantic
 
     def test_real_hematuria_two_turn_grounded_answer_clears_pending(self):
         initial = TriageCase(case_id="phase41-route-after-safety")
         initial.patient_input.red_flags_checked = True
         initial.patient_input.red_flags_status = "negative"
         save_case(initial)
-        first, _ = self.post(
+        first, _, _ = self.post(
             "我最近有血尿，已經兩天了",
             [extraction("symptom", "血尿", "血尿"), extraction("duration", "2天", "兩天")],
             {"status": "clarification_needed", "question": SEVERITY_QUESTION,
@@ -115,7 +109,7 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(first["conversation_state"]["pending_clarification_intent"], "severity")
         self.assertEqual(first["department_result"]["dept_id"], 1242)
 
-        second, planner = self.post(
+        second, planner, semantic = self.post(
             SECOND_USER_TEXT,
             [extraction("accompanying_symptoms", ["灼熱感"], "灼熱感")],
             {"status": "sufficient", "question": None, "intent": None,
@@ -124,9 +118,10 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
              "answer_status": "answered", "answer_confidence": 0.95},
             triage_case=first["triage_case"],
         )
-        classifier_prompt = planner.await_args_list[0].args[0]
-        self.assertIn(SEVERITY_QUESTION, classifier_prompt)
-        self.assertIn('"pending_clarification_intent": "severity"', classifier_prompt)
+        interpretation_prompt = semantic.await_args.args[0]
+        self.assertIn(SEVERITY_QUESTION, interpretation_prompt)
+        self.assertIn('"pending_clarification_intent": "severity"', interpretation_prompt)
+        self.assertEqual(planner.await_count, 1)
         self.assertIsNone(second["conversation_state"]["pending_clarification_intent"])
         self.assertEqual(second["conversation_state"]["clarification_evidence"]["severity"], "有血絲")
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])

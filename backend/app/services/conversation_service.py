@@ -8,7 +8,7 @@ import math
 import re
 from dataclasses import dataclass
 
-from app.schemas import SemanticExtraction, TriageCase
+from app.schemas import PendingAnswerInterpretation, SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark_questions_asked
@@ -167,7 +167,7 @@ async def request_clarification(
         "即使沒有 canonical severity extraction，也可以是 answered。"
         "回答欄位與整體 status 獨立，status=clarification_needed 時也須標記已回答的 pending intent。"
         if classify_answer_fields else
-        "本輪 pending answer 已由獨立 focused classifier 處理；你只規劃下一個問題，"
+        "本輪 pending answer 已由 Turn Interpreter 與 semantic evidence 一併處理；你只規劃下一個問題，"
         "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
     )
     prompt = (
@@ -253,7 +253,7 @@ async def request_clarification(
 
 def capture_pending_answer(
     case: TriageCase,
-    suggestion: ClarificationSuggestion | PendingAnswerClassification | None,
+    suggestion: ClarificationSuggestion | PendingAnswerClassification | PendingAnswerInterpretation | None,
     user_sources: list[str],
 ) -> bool:
     """Persist only a grounded, confident answer before candidate recomputation."""

@@ -20,7 +20,6 @@ from app.services.conversation_service import (
     UNRESOLVED_REPLY,
     advance_conversation,
     capture_pending_answer,
-    classify_pending_answer,
     request_clarification,
     safety_screen_resolved,
 )
@@ -244,11 +243,12 @@ async def chat(req: ChatRequest) -> TriageResult:
             else:
                 suggestion = None
                 pending_before_turn = case.conversation_state.pending_clarification_intent
-                pending_classification = None
-                if has_user_input and semantic_ai_allowed and pending_before_turn:
-                    with perf.measure("pending_answer_classification"), ai_phase("pending_answer_classification"):
-                        pending_classification = await classify_pending_answer(case, user_text_parts)
-                    capture_pending_answer(case, pending_classification, user_text_parts)
+                pending_interpretation = (
+                    ai_suggestion.pending_answer
+                    if ai_suggestion is not None and pending_before_turn
+                    else None
+                )
+                capture_pending_answer(case, pending_interpretation, user_text_parts)
                 if has_user_input and not safety_check_turn:
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
@@ -257,10 +257,10 @@ async def chat(req: ChatRequest) -> TriageResult:
                         suggestion = await request_clarification(
                             case,
                             user_text_parts,
-                            classify_answer_fields=not bool(pending_before_turn),
+                            classify_answer_fields=False,
                             focused_answer_status=(
-                                pending_classification.answer_status
-                                if pending_classification is not None else None
+                                pending_interpretation.answer_status
+                                if pending_interpretation is not None else None
                             ),
                         )
                 advance_conversation(

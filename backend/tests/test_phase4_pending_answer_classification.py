@@ -9,8 +9,14 @@ import pytest
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase
-from app.services import conversation_service
+from app.schemas import (
+    DepartmentResult,
+    Message,
+    PendingAnswerInterpretation,
+    SemanticExtraction,
+    TriageCase,
+)
+from app.services import conversation_service, rag_triage_adapter
 from app.services.case_store import save_case
 from app.services.conversation_service import (
     PendingAnswerClassification,
@@ -20,6 +26,8 @@ from app.services.conversation_service import (
     request_clarification,
 )
 from app.services.rag_triage_adapter import RagTriageSuggestion
+from app.services.department_knowledge import load_department_knowledge, resolve_department_names
+from app.services.department_reasoning_service import retrieve_official_evidence
 
 
 PENDING_QUESTION = "請問您是否有腰部或腹部的疼痛感？"
@@ -185,13 +193,19 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
     save_case(case)
     events: list[str] = []
     semantic = AsyncMock(side_effect=lambda *_args, **_kwargs: (
-        events.append("semantic") or RagTriageSuggestion(semantic_extractions=[])
+        events.append("semantic") or RagTriageSuggestion(
+            semantic_extractions=[],
+            pending_answer=PendingAnswerInterpretation(
+                answered_intent="pain_presence",
+                answer_status="answered",
+                answer_source_text="沒有腰痛，也沒有腹痛",
+                answer_confidence=0.95,
+            ),
+        )
     ))
 
     async def provider(_prompt: str, *, purpose: str) -> str:
         events.append(purpose)
-        if purpose == "pending_answer_classification":
-            return classifier_json(source="沒有腰痛，也沒有腹痛")
         assert purpose == "conversation_clarification"
         return json.dumps({
             "status": "sufficient",
@@ -212,8 +226,11 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
         )
 
     settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+    legacy_classifier = AsyncMock(side_effect=AssertionError("primary flow must not classify twice"))
     with patch("app.routes.chat.get_settings", return_value=settings), patch(
         "app.routes.chat.refine_case_with_ai", new=semantic,
+    ), patch(
+        "app.services.conversation_service.classify_pending_answer", new=legacy_classifier,
     ), patch(
         "app.services.conversation_service.complete_runtime_json", new=provider,
     ), patch(
@@ -231,12 +248,198 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
     data = response.json()
     assert events == [
         "semantic",
-        "pending_answer_classification",
         "department",
         "conversation_clarification",
     ]
+    legacy_classifier.assert_not_awaited()
     assert data["conversation_state"]["pending_clarification_intent"] is None
     assert data["conversation_state"]["clarification_evidence"]["pain_presence"] == "沒有腰痛，也沒有腹痛"
     assert len(data["triage_case"]["semantic_extractions"]) == 1
     assert data["next_question"] is None
     assert data["reply"] != "可以再補充和剛才問題相關的症狀細節嗎？"
+
+
+def _turn_interpretation_case(case_id: str, intent: str, question: str, current_text: str) -> TriageCase:
+    case = TriageCase(case_id=case_id)
+    case.history_records = [
+        Message(role="user", content="我最近會眩暈"),
+        Message(role="assistant", content=question),
+        Message(role="user", content=current_text),
+    ]
+    case.patient_input.symptom = "眩暈"
+    case.patient_input.red_flags_checked = True
+    case.conversation_state.pending_clarification_intent = intent
+    case.conversation_state.asked_clarification_intents = [intent]
+    return case
+
+
+def _run_turn_interpreter(case: TriageCase, current_text: str, payload: dict):
+    provider = AsyncMock(return_value=json.dumps(payload, ensure_ascii=False))
+    with patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
+        rag_triage_adapter, "complete_prompt", new=provider,
+    ):
+        result = asyncio.run(rag_triage_adapter.refine_case_with_ai(
+            case,
+            user_sources=[current_text],
+        ))
+    return result, provider
+
+
+def test_single_turn_interpretation_captures_tinnitus_evidence_and_pending_answer():
+    intent = "ask_about_hearing_loss_or_tinnitus"
+    question = "請問您有沒有聽力下降或耳鳴的情況？"
+    text = "有，我右耳一直有耳鳴，眩暈的時候耳鳴會更明顯。"
+    case = _turn_interpretation_case("phase4-tinnitus-turn", intent, question, text)
+    payload = {
+        "semantic_extractions": [
+            {
+                "field": "body_part", "normalized_value": "右耳",
+                "semantic_status": "available", "assertion": None,
+                "confidence": 0.96, "source_text": "右耳",
+            },
+            {
+                "field": "accompanying_symptoms", "normalized_value": ["耳鳴"],
+                "semantic_status": "available", "assertion": "present",
+                "confidence": 0.97, "source_text": "右耳一直有耳鳴",
+            },
+            {
+                "field": "accompanying_symptoms", "normalized_value": ["眩暈"],
+                "semantic_status": "available", "assertion": "present",
+                "confidence": 0.96, "source_text": "眩暈",
+            },
+        ],
+        "pending_answer": {
+            "answered_intent": intent,
+            "answer_status": "answered",
+            "answer_source_text": "有，我右耳一直有耳鳴",
+            "answer_confidence": 0.97,
+        },
+    }
+
+    result, provider = _run_turn_interpreter(case, text, payload)
+
+    assert result is not None
+    assert provider.await_count == 1
+    assert any(
+        item.field == "accompanying_symptoms"
+        and item.normalized_value == ["耳鳴"]
+        and item.assertion == "present"
+        for item in result.semantic_extractions or []
+    )
+    assert capture_pending_answer(case, result.pending_answer, [text]) is True
+    assert case.conversation_state.pending_clarification_intent is None
+    assert case.conversation_state.clarification_evidence[intent] == "有，我右耳一直有耳鳴"
+    prompt = provider.await_args.args[0]
+    assert intent in prompt
+    assert question in prompt
+    assert text in prompt
+
+
+def test_single_turn_interpretation_preserves_absent_cardiac_evidence_without_positive_retrieval():
+    intent = "cardiac_symptom"
+    question = "請問您近期有沒有感覺胸口悸動或胸痛？"
+    text = "沒有胸痛，也沒有心悸。"
+    case = _turn_interpretation_case("phase4-cardiac-negative-turn", intent, question, text)
+    payload = {
+        "semantic_extractions": [
+            {
+                "field": "accompanying_symptoms", "normalized_value": ["胸痛"],
+                "semantic_status": "available", "assertion": "absent",
+                "confidence": 0.97, "source_text": "沒有胸痛",
+            },
+            {
+                "field": "accompanying_symptoms", "normalized_value": ["心悸"],
+                "semantic_status": "available", "assertion": "absent",
+                "confidence": 0.96, "source_text": "沒有心悸",
+            },
+        ],
+        "pending_answer": {
+            "answered_intent": intent,
+            "answer_status": "answered",
+            "answer_source_text": text,
+            "answer_confidence": 0.97,
+        },
+    }
+
+    result, _ = _run_turn_interpreter(case, text, payload)
+
+    assert result is not None
+    assert capture_pending_answer(case, result.pending_answer, [text]) is True
+    absent = [item for item in case.semantic_extractions if item.assertion == "absent"]
+    assert {tuple(item.normalized_value) for item in absent} == {("胸痛",), ("心悸",)}
+    sources, records = load_department_knowledge()
+    assert sources
+    resolutions = resolve_department_names(records, [
+        {"dept_id": 1232, "parentDept": "內科", "childDept": "一般內科"},
+        {"dept_id": 1241, "parentDept": "內科", "childDept": "心臟內科"},
+    ])
+    assert retrieve_official_evidence(case, records, resolutions) == []
+
+
+def test_present_tinnitus_reaches_production_official_kb_and_canonical_ear_department():
+    case = TriageCase(case_id="phase4-production-tinnitus")
+    text = "右耳一直有耳鳴"
+    case.history_records = [Message(role="user", content=text)]
+    case.semantic_extractions = [SemanticExtraction(
+        field="accompanying_symptoms",
+        normalized_value=["耳鳴"],
+        semantic_status="available",
+        assertion="present",
+        confidence=0.97,
+        source_text=text,
+        extractor="ai",
+    )]
+    _, records = load_department_knowledge()
+    resolutions = resolve_department_names(records, [{
+        "dept_id": 1333, "parentDept": "五官科", "childDept": "耳科",
+    }])
+
+    retrieved = retrieve_official_evidence(case, records, resolutions)
+
+    tinnitus = [item for item in retrieved if item["knowledge_concept"] == "耳鳴"]
+    assert tinnitus
+    assert tinnitus[0]["dept_id"] == 1333
+    assert tinnitus[0]["childDept"] == "耳科"
+    assert tinnitus[0]["patient_source_text"] == text
+
+
+def test_turn_interpreter_rejects_ungrounded_tinnitus_source():
+    intent = "ask_about_hearing_loss_or_tinnitus"
+    question = "請問您有沒有聽力下降或耳鳴的情況？"
+    text = "右耳有聲音"
+    case = _turn_interpretation_case("phase4-ungrounded-tinnitus", intent, question, text)
+    payload = {
+        "semantic_extractions": [{
+            "field": "accompanying_symptoms", "normalized_value": ["耳鳴"],
+            "semantic_status": "available", "assertion": "present",
+            "confidence": 0.97, "source_text": "耳朵嗡嗡叫",
+        }],
+        "pending_answer": None,
+    }
+
+    result, _ = _run_turn_interpreter(case, text, payload)
+
+    assert result is not None
+    assert result.semantic_extractions == []
+    assert case.semantic_extractions == []
+
+
+@pytest.mark.parametrize("failure", [TimeoutError(), "{bad json"])
+def test_turn_interpreter_failure_keeps_pending_and_adds_no_evidence(failure):
+    intent = "ask_about_hearing_loss_or_tinnitus"
+    question = "請問您有沒有聽力下降或耳鳴的情況？"
+    text = "有，我右耳一直有耳鳴"
+    case = _turn_interpretation_case(f"phase4-turn-failure-{type(failure).__name__}", intent, question, text)
+    provider = AsyncMock(
+        side_effect=failure if isinstance(failure, Exception) else None,
+        return_value=failure if isinstance(failure, str) else None,
+    )
+    with patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
+        rag_triage_adapter, "complete_prompt", new=provider,
+    ):
+        result = asyncio.run(rag_triage_adapter.refine_case_with_ai(case, user_sources=[text]))
+
+    assert result is None
+    assert case.semantic_extractions == []
+    assert case.conversation_state.pending_clarification_intent == intent
+    assert case.conversation_state.department_status == "unresolved"
