@@ -43,6 +43,10 @@ DEPARTMENT_UNRESOLVED_REPLY = (
     "目前仍無法安全地自動判定唯一科別，系統沒有替你套用預設科別。"
     "請改用手動選科，或洽醫院掛號服務協助。"
 )
+URGENT_WARNING_FALLBACK = (
+    "目前初步急迫性篩檢結果較急迫，請儘速由醫療人員評估；"
+    "若症狀持續惡化，請立即尋求緊急醫療協助。"
+)
 
 
 @router.post("", response_model=TriageResult)
@@ -282,6 +286,10 @@ async def chat(req: ChatRequest) -> TriageResult:
                     case.conversation_state.turn_count += len(user_text_parts)
                 case.conversation_state.clarification_status = "urgent"
                 case.conversation_state.is_complete = True
+                case.conversation_state.stage = ConversationStage.DONE
+                case.conversation_state.awaiting_confirmation = False
+                case.conversation_state.confirmed = False
+                case.confirmed = False
                 case.triage.need_more_info = False
                 case.triage.next_question = None
                 case.triage.is_final = True
@@ -379,6 +387,8 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("department_detection"), ai_phase("department_detection"):
         department_status = case.conversation_state.field_statuses.get("department")
         if (
+            not _is_urgent_terminal(case)
+            and
             not conversational_mode
             and not free_text_flow
             and case.conversation_state.turn_count == 0
@@ -397,7 +407,16 @@ async def chat(req: ChatRequest) -> TriageResult:
                 )
 
     with perf.measure("rule_engine"):
-        if case.conversation_state.field_statuses.get("department") == "unresolved_final":
+        if _is_urgent_terminal(case):
+            case.confirmed = False
+            case.conversation_state.stage = ConversationStage.DONE
+            case.conversation_state.awaiting_confirmation = False
+            case.conversation_state.confirmed = False
+            case.conversation_state.is_complete = True
+            case.triage.need_more_info = False
+            case.triage.next_question = None
+            case.triage.is_final = True
+        elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
             case.confirmed = False
             case.conversation_state.stage = ConversationStage.COLLECTING
             case.conversation_state.awaiting_confirmation = False
@@ -467,7 +486,10 @@ async def chat(req: ChatRequest) -> TriageResult:
             department_preference_name,
             case.triage.next_question,
         )
-    if case.conversation_state.field_statuses.get("department") == "unresolved_final":
+    urgent_terminal = _is_urgent_terminal(case)
+    if urgent_terminal:
+        reply = case.triage.warning_message or URGENT_WARNING_FALLBACK
+    elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
         reply = DEPARTMENT_UNRESOLVED_REPLY
     elif conversational_mode and case.conversation_state.clarification_status == "unresolved":
         reply = UNRESOLVED_REPLY
@@ -476,7 +498,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     elif reply is None and case.conversation_state.confirmed:
         reply = "已確認分診結果，可呼叫 /recommend 取得推薦掛號方案。"
 
-    if not batch_mode:
+    if not batch_mode and not urgent_terminal:
         with perf.measure("ai_reply_total"), ai_phase("ai_reply"):
             reply = await generate_triage_reply(
                 case=case,
@@ -503,6 +525,14 @@ async def chat(req: ChatRequest) -> TriageResult:
     )
     finish_chat_perf(perf, perf_token)
     return response
+
+
+def _is_urgent_terminal(case: TriageCase) -> bool:
+    return bool(
+        case.conversation_state.clarification_status == "urgent"
+        and case.triage.warning_required
+        and case.triage.is_final
+    )
 
 
 def _sync_confirmation_flags(case: TriageCase) -> None:

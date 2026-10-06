@@ -24,6 +24,7 @@ from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_eviden
 
 
 chat_route = importlib.import_module("app.routes.chat")
+recommend_route = importlib.import_module("app.routes.recommend")
 
 
 def _item(field: str, value, source: str = "我喘得很嚴重", **updates):
@@ -265,6 +266,59 @@ def test_safety_turn_uses_same_interpreter_and_ttas_for_positive_result() -> Non
     assert result["triage_case"]["ttas_result"]["level_candidate"] == 2
     assert result["triage_case"]["patient_input"]["red_flags_status"] == "positive_ttas"
     assert result["conversation_state"]["clarification_status"] == "urgent"
+    assert result["conversation_state"]["stage"] == "done"
+    assert result["conversation_state"]["is_complete"] is True
+    assert result["conversation_state"]["awaiting_confirmation"] is False
+    assert result["conversation_state"]["confirmed"] is False
+    assert result["triage_case"]["confirmed"] is False
+    assert result["triage"]["warning_required"] is True
+    assert result["triage"]["is_final"] is True
+    assert result["triage"]["need_more_info"] is False
+    assert result["triage"]["next_question"] is None
+    assert result["next_question"] is None
+    assert result["department_result"] is None
+    assert result["reply"] == result["triage"]["warning_message"]
+    assert result["reply"]
+
+    recommender = AsyncMock()
+    with patch.object(recommend_route, "recommend_appointments", new=recommender):
+        recommendation = TestClient(app).post("/recommend", json={
+            "case_id": case.case_id,
+            "visit_type": "initial",
+            "confirmed": True,
+        })
+    assert recommendation.status_code == 400
+    assert "急迫性篩檢" in recommendation.json()["detail"]
+    recommender.assert_not_awaited()
+
+
+def test_urgent_reply_uses_backend_fallback_without_ai_when_warning_is_empty() -> None:
+    case = TriageCase(case_id="phase5-urgent-fallback")
+    case.conversation_state.free_text_mode = True
+    case.conversation_state.clarification_status = "urgent"
+    case.conversation_state.is_complete = True
+    case.patient_input.red_flags_checked = True
+    case.patient_input.red_flags_status = "positive_ttas"
+    case.triage.warning_required = True
+    case.triage.warning_message = None
+    case.triage.need_more_info = False
+    case.triage.is_final = True
+    save_case(case)
+
+    ai_reply = AsyncMock(side_effect=AssertionError("urgent warning must not use AI"))
+    with patch.object(
+        chat_route,
+        "get_settings",
+        return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+    ), patch.object(chat_route, "generate_triage_reply", new=ai_reply):
+        response = TestClient(app).post("/chat", json={"case_id": case.case_id})
+
+    assert response.status_code == 200
+    result = response.json()
+    assert result["conversation_state"]["stage"] == "done"
+    assert result["conversation_state"]["is_complete"] is True
+    assert result["reply"] == chat_route.URGENT_WARNING_FALLBACK
+    ai_reply.assert_not_awaited()
 
 
 def test_untrusted_snapshot_cannot_supply_ttas_conclusions() -> None:

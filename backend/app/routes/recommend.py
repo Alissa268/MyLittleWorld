@@ -57,6 +57,18 @@ async def recommend(req: RecommendRequest) -> RecommendationResult:
     # Validation and DB work happen on a detached copy; only success is committed.
     case = case.model_copy(deep=True)
 
+    if (
+        case.conversation_state.clarification_status == "urgent"
+        or (
+            case.ttas_result.status == "matched"
+            and case.ttas_result.level_candidate in {1, 2}
+        )
+    ):
+        raise HTTPException(
+            status_code=400,
+            detail="目前急迫性篩檢結果不適合繼續一般掛號推薦，請優先尋求醫療評估。",
+        )
+
     request_visit_type = normalize_visit_type(req.visit_type) if req.visit_type is not None else None
     if case.visit_type is not None and request_visit_type is not None and case.visit_type != request_visit_type:
         raise HTTPException(
