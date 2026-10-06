@@ -252,7 +252,11 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.conversation_state.candidate_departments = []
 
     with perf.measure("rule_engine"):
-        confirmation_only = conversational_mode and not has_user_input and case.conversation_state.is_complete
+        confirmation_only = bool(
+    req.confirmed
+    and not has_user_input
+    and case.conversation_state.is_complete
+)
         if not confirmation_only:
             case.triage = apply_ttas_evaluation(case)
             if not conversational_mode and not case.triage.warning_required:
