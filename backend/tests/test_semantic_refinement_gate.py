@@ -73,7 +73,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         semantic.assert_not_awaited()
         contextual.assert_awaited_once()
 
-    async def test_complete_red_flag_denial_skips_semantic_provider(self):
+    async def test_red_flag_denial_fails_closed_without_ai(self):
         case = self._case_waiting_for("red_flags")
         response, semantic, _ = self._post_with_mocked_ai(
             {
@@ -83,10 +83,12 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["triage_case"]["patient_input"]["red_flags_checked"])
+        patient = response.json()["triage_case"]["patient_input"]
+        self.assertFalse(patient["red_flags_checked"])
+        self.assertEqual(patient["red_flags_status"], "not_checked")
         semantic.assert_not_awaited()
 
-    async def test_ambiguous_red_flag_answer_also_skips_semantic_provider(self):
+    async def test_ambiguous_red_flag_answer_fails_closed_without_ai(self):
         case = self._case_waiting_for("red_flags")
         response, semantic, _ = self._post_with_mocked_ai(
             {
@@ -97,7 +99,10 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertFalse(response.json()["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(response.json()["conversation_state"]["field_statuses"]["red_flags"], "ambiguous")
+        self.assertEqual(
+            response.json()["triage_case"]["patient_input"]["red_flags_status"],
+            "not_checked",
+        )
         semantic.assert_not_awaited()
 
     async def test_clear_severity_skips_semantic_provider(self):
@@ -295,7 +300,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(response.json()["next_question"])
         provider.assert_awaited_once()
 
-    async def test_controlled_question_variant_uses_zero_ai_when_semantic_is_skipped(self):
+    async def test_controlled_question_variant_keeps_reply_ai_disabled(self):
         contextual = (
             "了解你頭暈兩天。請問是否有胸痛、呼吸困難、意識不清、大量出血、"
             "半邊無力或劇烈頭痛？"
@@ -354,10 +359,9 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["reply"], response.json()["next_question"])
-        semantic.assert_not_awaited()
+        semantic.assert_awaited_once()
         self.assertEqual(models.call_count, 0)
         self.assertEqual(len(summaries), 1)
-        self.assertFalse(summaries[0]["semantic_ai_called"])
         self.assertFalse(summaries[0]["ai_reply_ai_called"])
         self.assertEqual(summaries[0]["gemini_call_count"], 0)
 

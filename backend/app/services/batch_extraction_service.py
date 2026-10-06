@@ -28,11 +28,7 @@ from app.services.rule_engine import (
     apply_user_message,
     missing_checklist_fields,
 )
-from app.services.semantic_normalizer import (
-    SESSION_ALIASES,
-    is_ambiguous_red_flag_answer,
-    normalize_urgency,
-)
+from app.services.semantic_normalizer import SESSION_ALIASES
 
 logger = logging.getLogger(__name__)
 
@@ -169,6 +165,13 @@ async def extract_batch_answers(
         preference = capture_department_preference(case, text)
         if preference and preference.resolved and "requested_department" not in outcome.accepted_fields:
             outcome.accepted_fields.append("requested_department")
+        if key == "red_flags":
+            case.conversation_state.field_statuses[key] = "unknown"
+            case.conversation_state.field_confidence[key] = 0.0
+            case.conversation_state.clarification_reasons[key] = (
+                "free-text safety answers require validated Turn Interpreter evidence"
+            )
+            continue
         if (
             semantic_first
             and runtime_ai_available(settings)
@@ -194,15 +197,12 @@ async def extract_batch_answers(
         accepted_extractions: list[SemanticExtraction] = []
         for extraction in extractions:
             is_primary = extraction.field == key
-            if key == "red_flags":
-                accepted_fast_path, fast_path_reason = True, "red_flags_turn_deterministic_only"
-            else:
-                accepted_fast_path, fast_path_reason = _deterministic_fast_path_decision(
-                    extraction.field,
-                    text,
-                    extraction,
-                    is_primary=is_primary,
-                )
+            accepted_fast_path, fast_path_reason = _deterministic_fast_path_decision(
+                extraction.field,
+                text,
+                extraction,
+                is_primary=is_primary,
+            )
             logger.info(
                 "[SEMANTIC_FAST_PATH] case_id=%s current_field=%s field=%s "
                 "accepted=%s reason=%s",
@@ -235,13 +235,6 @@ async def extract_batch_answers(
             case.conversation_state.field_statuses[key] = "unknown"
             case.conversation_state.field_confidence[key] = 0.0
             case.conversation_state.clarification_reasons[key] = "answer did not pass strict field validation"
-        if key == "red_flags":
-            logger.info(
-                "[RED_FLAGS] classification=%s attempt=%s resolved_status=%s",
-                case.patient_input.urgency_normalized.answer_classification,
-                case.conversation_state.question_attempts.get("red_flags", 0),
-                case.patient_input.red_flags_status,
-            )
         after_missing = set(missing_checklist_fields(case, apply_attempt_fallback=False))
         resolved_now = [field_name for field_name in before_missing if field_name not in after_missing]
         for field_name in resolved_now:
@@ -412,21 +405,8 @@ def _deterministic_extraction_for_answer(
     *,
     allow_ambiguous: bool = False,
 ) -> SemanticExtraction | None:
-    if (
-        key == "red_flags"
-        and case.patient_input.red_flags_status == "ambiguous"
-        and is_ambiguous_red_flag_answer(normalize_urgency(text, "red_flags"))
-    ):
-        return SemanticExtraction(
-            field=key,
-            normalized_value=[],
-            semantic_status="uncertain",
-            confidence=1.0,
-            source_text=text,
-            needs_clarification=False,
-            follow_up_reason="clarification 後使用者仍無法判斷急迫症狀",
-            extractor="deterministic_batch",
-        )
+    if key == "red_flags":
+        return None
     temporary = TriageCase(case_id=case.case_id)
     temporary.conversation_state.last_question_key = key
     apply_user_message(temporary, text)
@@ -459,25 +439,6 @@ def _deterministic_extraction_for_answer(
         value = temporary.availability.preferred_sessions
         status = temporary.availability.semantic_status.get(key, status)
         confidence = temporary.availability.confidence.get(key, confidence)
-    elif key == "red_flags":
-        case.patient_input.urgency_normalized = temporary.patient_input.urgency_normalized
-        if not temporary.patient_input.red_flags_checked:
-            urgency = temporary.patient_input.urgency_normalized
-            if urgency.semantic_status in {"ambiguous", "unknown", "partial"}:
-                return SemanticExtraction(
-                    field=key,
-                    normalized_value=[],
-                    semantic_status="ambiguous",
-                    confidence=urgency.confidence,
-                    source_text=text,
-                    needs_clarification=True,
-                    follow_up_reason=urgency.follow_up_reason or "急迫症狀回答不明確",
-                    extractor="deterministic_batch",
-                )
-            return None
-        value = temporary.patient_input.red_flags
-        status = "available" if value else "unavailable"
-        confidence = max(confidence, 0.9)
 
     if value is None or (isinstance(value, list) and not value and status != "unavailable"):
         return None
@@ -551,13 +512,6 @@ def _deterministic_extractions_for_answer(
             temporary.availability.semantic_status.get("preferred_sessions", "partial"),
             temporary.availability.confidence.get("preferred_sessions", 0.86),
         )
-    if temporary.patient_input.red_flags_checked:
-        add(
-            "red_flags",
-            temporary.patient_input.red_flags,
-            "available" if temporary.patient_input.red_flags else "unavailable",
-            0.9,
-        )
     return results
 
 
@@ -574,7 +528,7 @@ def _deterministic_fast_path_decision(
 ) -> tuple[bool, str]:
     """Keep only high-confidence, low-interpretation answers on the zero-AI path."""
     if field_name == "red_flags":
-        return True, "red_flags_deterministic_only"
+        return False, "free_text_safety_requires_turn_interpreter"
     if requires_semantic_refinement(text):
         return False, "semantic_refinement_required"
     if extraction.confidence < ACCEPT_THRESHOLD:

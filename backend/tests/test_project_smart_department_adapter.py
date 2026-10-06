@@ -238,8 +238,10 @@ class ProjectSmartDepartmentAdapterTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("皮膚科", {hint.childDept for hint in skin_hints})
         self.assertTrue({"骨科", "復健醫學"} & {hint.childDept for hint in knee_hints})
         self.assertTrue({"心臟內科", "胸腔內科"} & {hint.childDept for hint in chest_hints})
-        self.assertEqual(chest_case.triage.urgency_level, "high")
-        self.assertTrue(chest_case.triage.warning_required)
+        self.assertIsNone(chest_case.triage.urgency_level)
+        self.assertIsNone(chest_case.triage.urgency_score)
+        self.assertFalse(chest_case.triage.warning_required)
+        self.assertEqual(chest_case.ttas_result.status, "insufficient_information")
 
     def test_keyword_hints_ignore_negated_red_flags(self):
         hints = keyword_department_hints(

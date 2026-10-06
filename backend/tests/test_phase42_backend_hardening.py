@@ -231,11 +231,18 @@ def test_db_unavailable_is_globally_503_for_chat_preference(monkeypatch):
 
 def test_db_unavailable_is_globally_503_for_structured_department_detection(monkeypatch):
     case = TriageCase(case_id="case_db_detection", visit_type=VisitType.INITIAL)
+    case.patient_input.symptom = "grounded symptom"
+    case.patient_input.body_part = "頭部"
+    case.patient_input.duration = "2天"
+    case.patient_input.severity = "中度"
     case.patient_input.red_flags_checked = True
+    case.patient_input.red_flags_status = "negative"
+    case.availability.preferred_days = ["週一"]
+    case.availability.preferred_sessions = ["上午"]
     save_case(case)
     monkeypatch.setattr("app.routes.chat.runtime_ai_available", lambda _settings: False)
     monkeypatch.setattr(
-        "app.routes.chat.evaluate_urgency",
+        "app.routes.chat.apply_ttas_evaluation",
         lambda *_args, **_kwargs: UrgencyResult(need_more_info=False, is_final=True),
     )
     monkeypatch.setattr(

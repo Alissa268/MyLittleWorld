@@ -36,8 +36,8 @@ def test_official_ttas_package_integrity() -> None:
 def test_loader_builds_enabled_prompt_evidence_catalog() -> None:
     ruleset = load_ttas_rules()
     catalog = ruleset.prompt_evidence_catalog
-    assert len(ruleset.enabled_rules) == 32
-    assert len(catalog) == 28
+    assert len(ruleset.enabled_rules) == 28
+    assert len(catalog) == 24
     assert catalog["chemical_eye_injury"] == {
         "field": "chemical_eye_injury",
         "type": "true|false|unknown",
@@ -85,6 +85,10 @@ def test_clinical_modifier_and_untraceable_context_rules_are_reference_only() ->
         "TTAS-MOD-HEMODYNAMIC-INSUFFICIENT",
         "TTAS-MOD-ADULT-HIGH-RISK-MECHANISM",
         "TTAS-A020210",
+        "TTAS-A020211",
+        "TTAS-A030712",
+        "TTAS-A040411",
+        "TTAS-T110107",
         "TTAS-A041011",
         "TTAS-A041017",
         "TTAS-A130409",

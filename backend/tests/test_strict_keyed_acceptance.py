@@ -8,10 +8,11 @@ from unittest.mock import AsyncMock, patch
 from fastapi.testclient import TestClient
 
 from app.main import app
+from app.routes import chat as chat_route
 from app.schemas import BatchAnswer, Message, TriageCase, VisitType
 from app.services import batch_extraction_service, department_preference_service, rag_triage_adapter
 from app.services.batch_extraction_service import extract_batch_answers
-from app.services.case_store import save_case
+from app.services.case_store import get_case, save_case
 from app.services.field_acceptance import has_duration_semantics, normalize_body_part
 from app.services.rule_engine import apply_user_message, mark_questions_asked, missing_checklist_fields
 
@@ -44,6 +45,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             side_effect=AssertionError("explicit deterministic/off-topic text must not call Cerebras")
         )
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             department_preference_service,
             "fetch_active_departments",
             return_value=DEPARTMENTS,
@@ -80,6 +85,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         case_id = f"strict-route-{uuid4().hex}"
         provider = self._semantic_provider()
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             department_preference_service,
             "fetch_active_departments",
             return_value=DEPARTMENTS,
@@ -167,10 +176,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         case, provider = await self._extract("red_flags", "我說我想要看皮膚科禮拜三下午")
 
         self.assertFalse(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
         self.assertIn("red_flags", missing_checklist_fields(case))
-        self.assertEqual(case.availability.preferred_days, ["週三"])
-        self.assertEqual(case.availability.preferred_sessions, ["下午"])
+        self.assertEqual(case.availability.preferred_days, [])
+        self.assertEqual(case.availability.preferred_sessions, [])
         self.assertEqual(case.patient_input.requested_department_id, 204)
         provider.assert_not_awaited()
 
@@ -306,6 +315,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         provider = AsyncMock(side_effect=AssertionError("meta reply must not call Cerebras"))
 
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             batch_extraction_service,
             "runtime_ai_available",
             return_value=True,
@@ -335,6 +348,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         provider = self._semantic_provider()
 
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             batch_extraction_service,
             "runtime_ai_available",
             return_value=True,
@@ -614,6 +631,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
             side_effect=AssertionError("buttock extraction must not call Cerebras")
         )
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             batch_extraction_service,
             "runtime_ai_available",
             return_value=True,
@@ -631,6 +652,11 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                     "answers": [{"key": "symptom", "answer": "屁股痛"}],
                 },
             )
+            stored_case = get_case(case_id)
+            self.assertIsNotNone(stored_case)
+            stored_case.patient_input.red_flags_checked = True
+            stored_case.patient_input.red_flags_status = "negative"
+            save_case(stored_case)
             red_flag_response = client.post(
                 "/chat",
                 json={
@@ -840,6 +866,10 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
         )
 
         with patch.object(
+            chat_route,
+            "runtime_ai_available",
+            return_value=False,
+        ), patch.object(
             batch_extraction_service,
             "runtime_ai_available",
             return_value=True,
@@ -962,15 +992,15 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(accepted(case))
                 provider.assert_not_awaited()
 
-    async def test_uncertain_red_flags_remain_deterministic_only(self):
+    async def test_uninterpreted_red_flags_fail_closed(self):
         case, provider = await self._extract("red_flags", "不知道有沒有")
 
         provider.assert_not_awaited()
         self.assertFalse(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
         self.assertIn("red_flags", missing_checklist_fields(case))
 
-    async def test_second_uncertain_red_flag_answer_uses_safety_completion(self):
+    async def test_repeated_uninterpreted_red_flag_answers_stay_open(self):
         examples = (
             ("不知道有沒有", "真的不知道"),
             ("可能吧", "可能吧"),
@@ -999,7 +1029,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                         [BatchAnswer(key="red_flags", answer=first)],
                     )
                     self.assertFalse(case.patient_input.red_flags_checked)
-                    self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+                    self.assertEqual(case.patient_input.red_flags_status, "not_checked")
                     case.conversation_state.last_question_key = "red_flags"
                     await extract_batch_answers(
                         case,
@@ -1007,21 +1037,17 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                     )
 
                 provider.assert_not_awaited()
-                self.assertTrue(case.patient_input.red_flags_checked)
-                self.assertEqual(case.patient_input.red_flags_status, "uncertain")
-                self.assertNotIn("red_flags", missing_checklist_fields(case))
-                self.assertEqual(
-                    case.patient_input.urgency_normalized.answer_classification,
-                    "uncertain_after_clarification",
-                )
+                self.assertFalse(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags_status, "not_checked")
+                self.assertIn("red_flags", missing_checklist_fields(case))
 
-    async def test_second_definitive_red_flag_answer_overrides_prior_ambiguity(self):
+    async def test_keyed_red_flag_phrases_do_not_create_medical_state(self):
         examples = (
-            ("有胸痛", "positive_specific", ["突發胸痛"]),
-            ("可能有胸痛", "positive_specific", ["突發胸痛"]),
-            ("都沒有", "negative", []),
+            "有胸痛",
+            "可能有胸痛",
+            "都沒有",
         )
-        for second, expected_status, expected_flags in examples:
+        for second in examples:
             with self.subTest(second=second):
                 case = TriageCase(
                     case_id=f"strict-red-flag-definitive-{second}",
@@ -1042,7 +1068,7 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                         case,
                         [BatchAnswer(key="red_flags", answer="不知道有沒有")],
                     )
-                    self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+                    self.assertEqual(case.patient_input.red_flags_status, "not_checked")
                     case.conversation_state.last_question_key = "red_flags"
                     await extract_batch_answers(
                         case,
@@ -1050,43 +1076,39 @@ class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
                     )
 
                 provider.assert_not_awaited()
-                self.assertTrue(case.patient_input.red_flags_checked)
-                self.assertEqual(case.patient_input.red_flags_status, expected_status)
-                self.assertEqual(case.patient_input.red_flags, expected_flags)
+                self.assertFalse(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags_status, "not_checked")
+                self.assertEqual(case.patient_input.red_flags, [])
 
-    def test_rule_engine_repeated_ambiguous_red_flag_answer_completes_uncertain(self):
+    def test_rule_engine_does_not_interpret_repeated_red_flag_text(self):
         case = TriageCase(case_id="strict-rule-red-flag", visit_type=VisitType.INITIAL)
         case.conversation_state.last_question_key = "red_flags"
 
         apply_user_message(case, "可能吧")
         self.assertFalse(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "ambiguous")
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
 
         apply_user_message(case, "可能吧")
-        self.assertTrue(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "uncertain")
-        self.assertEqual(
-            case.patient_input.urgency_normalized.answer_classification,
-            "uncertain_after_clarification",
-        )
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
 
-    async def test_red_flag_negative_and_positive_answers_keep_safe_meaning(self):
+    async def test_red_flag_phrases_require_ai_ttas_interpretation(self):
         examples = (
-            ("都沒有", "negative", []),
-            ("沒有以上症狀", "negative", []),
-            ("沒有胸痛也沒有呼吸困難", "negative", []),
-            ("無上述情形", "negative", []),
-            ("有胸痛", "positive_specific", ["突發胸痛"]),
-            ("有一點喘", "positive_specific", ["嚴重呼吸困難"]),
+            "都沒有",
+            "沒有以上症狀",
+            "沒有胸痛也沒有呼吸困難",
+            "無上述情形",
+            "有胸痛",
+            "有一點喘",
         )
-        for answer, expected_status, expected_flags in examples:
+        for answer in examples:
             with self.subTest(answer=answer):
                 case, provider = await self._extract("red_flags", answer)
 
                 provider.assert_not_awaited()
-                self.assertTrue(case.patient_input.red_flags_checked)
-                self.assertEqual(case.patient_input.red_flags_status, expected_status)
-                self.assertEqual(case.patient_input.red_flags, expected_flags)
+                self.assertFalse(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags_status, "not_checked")
+                self.assertEqual(case.patient_input.red_flags, [])
 
     async def test_morning_wakeup_symptom_does_not_fill_duration_or_session(self):
         case = TriageCase(case_id="strict-morning-symptom", visit_type=VisitType.INITIAL)

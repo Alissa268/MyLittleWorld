@@ -133,6 +133,26 @@ def test_subjective_respiratory_modifier_cannot_assign_level() -> None:
     assert result.level_candidate is None
 
 
+@pytest.mark.parametrize(
+    ("field", "official_code"),
+    [
+        ("tearing_pain", "A020211"),
+        ("acute_visual_disturbance", "A040411"),
+        ("genital_swelling_deformity", "T110107"),
+        ("coffee_ground_emesis_or_melena", "A030712"),
+    ],
+)
+def test_complaint_context_gaps_are_reference_only(field: str, official_code: str) -> None:
+    """A fact without its official complaint context cannot emit that code.
+
+    A030712 is also unsafe because the stored crosswalk distinguishes the
+    A0307 nausea/vomiting complaint from black-stool rules under A0310, while
+    the current evidence field merges coffee-ground emesis and melena.
+    """
+    result = evaluate_ttas(_case((field, True), age=30))
+    assert all(item.official_code != official_code for item in result.matched_rules)
+
+
 def test_spo2_has_no_invented_threshold_when_package_does_not_supply_one() -> None:
     result = evaluate_ttas(_case(("spo2_pct", 82)))
     assert result.status == "insufficient_information"

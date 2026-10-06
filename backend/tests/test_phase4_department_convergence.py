@@ -431,7 +431,6 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(second["department_result"])
         self.assertEqual(second["conversation_state"]["stage"], "collecting")
         self.assertFalse(second["conversation_state"]["confirmed"])
-        self.assertIn("無法安全地自動判定", second["reply"])
 
     def test_missing_ai_key_explicit_preference_uses_exact_live_db(self):
         row = {"dept_id": 1234, "parent_dept": "內科系", "child_dept": "感染科"}
@@ -444,11 +443,13 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("使用者明確指定", result["department_result"]["reason"][0])
         self.assertNotIn("官方 KB", result["department_result"]["reason"][0])
 
-    def test_missing_ai_key_keeps_safety_question_ahead_of_department(self):
+    def test_missing_ai_key_free_text_safety_fails_closed(self):
         result = self.no_ai_chat("我最近一直頭暈")
         self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(result["conversation_state"]["last_question_key"], RED_FLAG_QUESTION_KEY)
-        self.assertIn("胸痛", result["next_question"])
+        self.assertEqual(result["triage_case"]["ttas_result"]["status"], "insufficient_information")
+        self.assertIsNone(result["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(result["triage"]["urgency_score"])
+        self.assertIsNone(result["triage"]["urgency_level"])
         self.assertIsNone(result["department_result"])
         self.assertEqual(result["conversation_state"]["stage"], "collecting")
 
@@ -471,11 +472,14 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["department_result"])
         self.assertEqual(result["conversation_state"]["stage"], "collecting")
 
-    def test_missing_ai_key_positive_red_flag_keeps_urgent_warning(self):
+    def test_missing_ai_key_medical_phrase_does_not_trigger_legacy_urgency(self):
         result = self.no_ai_chat("我突然胸痛")
-        self.assertTrue(result["triage_case"]["patient_input"]["red_flags"])
-        self.assertTrue(result["triage"]["warning_required"])
-        self.assertEqual(result["triage"]["urgency_level"], "high")
+        self.assertEqual(result["triage_case"]["patient_input"]["red_flags"], [])
+        self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertFalse(result["triage"]["warning_required"])
+        self.assertIsNone(result["triage"]["urgency_score"])
+        self.assertIsNone(result["triage"]["urgency_level"])
+        self.assertEqual(result["triage_case"]["ttas_result"]["status"], "insufficient_information")
         self.assertIsNone(result["department_result"])
 
     def test_live_dizziness_department_question_is_preempted_by_safety(self):
@@ -866,24 +870,24 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case.patient_input.red_flags_status, "not_checked")
         self.assertEqual(case.patient_input.red_flags, [])
 
-    def test_negative_answer_to_actual_safety_question_completes_screen(self):
+    def test_uninterpreted_negative_answer_to_safety_question_fails_closed(self):
         case = TriageCase(case_id="phase4-negative-safety-answer")
         case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
 
         apply_user_message(case, "都沒有。", semantic_first=True)
 
-        self.assertTrue(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "negative")
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
         self.assertEqual(case.patient_input.red_flags, [])
 
-    def test_positive_red_flag_outside_safety_question_remains_immediate(self):
+    def test_uninterpreted_positive_phrase_does_not_bypass_ttas(self):
         case = TriageCase(case_id="phase4-positive-safety-signal")
 
         apply_user_message(case, "我突然胸痛", semantic_first=True)
 
-        self.assertTrue(case.patient_input.red_flags_checked)
-        self.assertEqual(case.patient_input.red_flags_status, "positive_specific")
-        self.assertIn("突發胸痛", case.patient_input.red_flags)
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags_status, "not_checked")
+        self.assertEqual(case.patient_input.red_flags, [])
 
     async def test_hard_cap_with_ambiguous_candidates_stays_unresolved(self):
         case = case_with_symptom()

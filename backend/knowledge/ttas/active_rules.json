@@ -743,7 +743,8 @@
       "required_fields": [
         "tearing_pain"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "A0202 is the chest pain/tightness complaint; tearing pain alone does not establish that complaint context"
     },
     {
       "rule_id": "TTAS-A020407",
@@ -924,7 +925,8 @@
       "required_fields": [
         "coffee_ground_emesis_or_melena"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "A0307 is the nausea/vomiting complaint and the merged evidence field cannot distinguish coffee-ground emesis from isolated melena"
     },
     {
       "rule_id": "TTAS-A030713",
@@ -1050,7 +1052,8 @@
       "required_fields": [
         "acute_visual_disturbance"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "A0404 is the headache complaint; acute visual disturbance alone does not establish headache context"
     },
     {
       "rule_id": "TTAS-A040504",
@@ -1587,7 +1590,8 @@
       "required_fields": [
         "genital_swelling_deformity"
       ],
-      "implementation_status": "enabled"
+      "implementation_status": "reference_only",
+      "hardening_reason": "T1101 is perineal/genital blunt trauma; swelling or deformity alone does not establish trauma context"
     }
   ]
 }

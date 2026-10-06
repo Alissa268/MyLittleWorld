@@ -67,8 +67,22 @@ def _department() -> DepartmentResult:
     return DepartmentResult(dept_id=7, parentDept="外科系", childDept="一般骨科", confidence=1.0)
 
 
+def _prescreen_new_route_cases(test_case: unittest.TestCase) -> None:
+    original = chat_route.create_case
+
+    def create_pre_screened_case(case_id=None):
+        case = original(case_id)
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
+        return case
+
+    chat_route.create_case = create_pre_screened_case
+    test_case.addCleanup(setattr, chat_route, "create_case", original)
+
+
 class BatchQuestionFlowTest(unittest.TestCase):
     def setUp(self):
+        _prescreen_new_route_cases(self)
         self.settings = _settings(cerebras_key="")
         self.settings_patch = patch("app.routes.chat.get_settings", return_value=self.settings)
         self.batch_settings_patch = patch.object(
@@ -165,88 +179,48 @@ class BatchQuestionFlowTest(unittest.TestCase):
             ["preferred_sessions"],
         )
 
-    def test_negative_red_flag_is_deterministically_consumed(self):
-        case_id = _case_id("negative_red")
-        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
-        response = TestClient(app).post(
-            "/chat",
-            json={
-                "case_id": case_id,
-                "answers": [{"key": "red_flags", "answer": "都沒有上述症狀"}],
-            },
-        )
+    def test_ai_unavailable_keyed_red_flag_answer_fails_closed(self):
+        case = TriageCase(case_id=_case_id("negative_red"), visit_type=VisitType.INITIAL)
+        asyncio.run(extract_batch_answers(
+            case,
+            [BatchAnswer(key="red_flags", answer="都沒有上述症狀")],
+            semantic_first=False,
+        ))
 
-        patient = response.json()["triage_case"]["patient_input"]
-        state = response.json()["conversation_state"]
-        self.assertTrue(patient["red_flags_checked"])
-        self.assertEqual(patient["red_flags"], [])
-        self.assertIn("red_flags", state["consumed_fields"])
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags, [])
+        self.assertEqual(case.conversation_state.field_statuses["red_flags"], "unknown")
 
     def test_ambiguous_red_flag_answers_use_clarification_without_completion(self):
-        canonical = "請問是否有突發胸痛、嚴重呼吸困難、意識不清、大量出血、半邊無力或劇烈頭痛等急迫症狀？"
         for answer in ("有", "有一點", "好像有", "應該有", "還好", "不確定", "可能吧", "我不知道"):
             with self.subTest(answer=answer):
-                case_id = _case_id("ambiguous_red")
-                TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
-                symptom_response = TestClient(app).post(
-                    "/chat",
-                    json={
-                        "case_id": case_id,
-                        "answers": [{"key": "symptom", "answer": "頭暈"}],
-                    },
-                )
-                self.assertEqual(
-                    [item["key"] for item in symptom_response.json()["question_batch"]],
-                    ["red_flags"],
-                )
-                response = TestClient(app).post(
-                    "/chat",
-                    json={
-                        "case_id": case_id,
-                        "answers": [{"key": "red_flags", "answer": answer}],
-                    },
-                )
+                case = TriageCase(case_id=_case_id("ambiguous_red"), visit_type=VisitType.INITIAL)
+                asyncio.run(extract_batch_answers(
+                    case,
+                    [BatchAnswer(key="red_flags", answer=answer)],
+                    semantic_first=False,
+                ))
+                self.assertFalse(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags, [])
+                self.assertEqual(case.conversation_state.field_statuses["red_flags"], "unknown")
 
-                self.assertEqual(response.status_code, 200)
-                data = response.json()
-                patient = data["triage_case"]["patient_input"]
-                self.assertFalse(patient["red_flags_checked"])
-                self.assertEqual(patient["red_flags"], [])
-                self.assertEqual(data["conversation_state"]["field_statuses"]["red_flags"], "ambiguous")
-                red_question = next(item for item in data["question_batch"] if item["key"] == "red_flags")
-                self.assertNotEqual(red_question["question"], canonical)
-                self.assertIn("請回答『都沒有』", red_question["question"])
-
-    def test_second_explicit_unknown_completes_red_flag_screen_as_uncertain(self):
+    def test_repeated_uninterpreted_red_flag_answers_remain_open(self):
         for first, second in (("有一點", "我不知道"), ("我不知道", "我就不知道啊")):
             with self.subTest(first=first, second=second):
-                case_id = _case_id("uncertain_red")
-                TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
-                TestClient(app).post(
-                    "/chat",
-                    json={"case_id": case_id, "answers": [{"key": "symptom", "answer": "頭暈"}]},
-                )
-                clarification = TestClient(app).post(
-                    "/chat",
-                    json={"case_id": case_id, "answers": [{"key": "red_flags", "answer": first}]},
-                )
-                self.assertEqual(clarification.json()["question_batch"][0]["key"], "red_flags")
-
-                resolved = TestClient(app).post(
-                    "/chat",
-                    json={"case_id": case_id, "answers": [{"key": "red_flags", "answer": second}]},
-                )
-                patient = resolved.json()["triage_case"]["patient_input"]
-                self.assertTrue(patient["red_flags_checked"])
-                self.assertEqual(patient["red_flags"], [])
-                self.assertEqual(patient["red_flags_status"], "uncertain")
-                self.assertEqual(resolved.json()["conversation_state"]["field_statuses"]["red_flags"], "uncertain")
-                self.assertNotEqual(resolved.json()["question_batch"][0]["key"], "red_flags")
-                self.assertTrue(resolved.json()["triage"]["warning_required"])
-                self.assertIn("無法完全確認", resolved.json()["triage"]["warning_message"])
+                case = TriageCase(case_id=_case_id("uncertain_red"), visit_type=VisitType.INITIAL)
+                for answer in (first, second):
+                    asyncio.run(extract_batch_answers(
+                        case,
+                        [BatchAnswer(key="red_flags", answer=answer)],
+                        semantic_first=False,
+                    ))
+                self.assertFalse(case.patient_input.red_flags_checked)
+                self.assertEqual(case.patient_input.red_flags_status, "not_checked")
 
     def test_repeated_start_never_auto_completes_unasked_red_flag(self):
         case_id = _case_id("repeat_start")
+        case = TriageCase(case_id=case_id, visit_type=VisitType.INITIAL)
+        save_case(case)
         response = None
         for _ in range(3):
             response = TestClient(app).post(
@@ -258,24 +232,15 @@ class BatchQuestionFlowTest(unittest.TestCase):
         self.assertFalse(response.json()["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual([item["key"] for item in response.json()["question_batch"]], ["symptom"])
 
-    def test_positive_red_flag_uses_existing_safety_path(self):
-        case_id = _case_id("positive_red")
-        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
-        response = TestClient(app).post(
-            "/chat",
-            json={
-                "case_id": case_id,
-                "answers": [
-                    {"key": "symptom", "answer": "突然胸痛"},
-                    {"key": "red_flags", "answer": "有突發胸痛而且呼吸困難"},
-                ],
-            },
-        )
-
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["triage"]["warning_required"])
-        self.assertEqual(response.json()["triage"]["urgency_level"], "high")
-        self.assertEqual(response.json()["question_batch"], [])
+    def test_positive_keyed_free_text_cannot_bypass_ttas(self):
+        case = TriageCase(case_id=_case_id("positive_red"), visit_type=VisitType.INITIAL)
+        asyncio.run(extract_batch_answers(
+            case,
+            [BatchAnswer(key="red_flags", answer="有突發胸痛而且呼吸困難")],
+            semantic_first=False,
+        ))
+        self.assertFalse(case.patient_input.red_flags_checked)
+        self.assertEqual(case.patient_input.red_flags, [])
 
     def test_complete_batch_waits_for_confirmation_then_confirms(self):
         case_id = _case_id("complete")
@@ -581,6 +546,8 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_early_session_is_not_reasked_after_other_fields_are_completed(self):
         case = TriageCase(case_id=_case_id("early_session_complete"), visit_type=VisitType.INITIAL)
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
         await extract_batch_answers(
             case,
             [BatchAnswer(key="symptom", answer="喉嚨怪怪的，我想掛下午的診次")],
@@ -709,6 +676,8 @@ class BatchExtractionTest(unittest.IsolatedAsyncioTestCase):
         ):
             with self.subTest(answer=answer):
                 case = TriageCase(case_id=_case_id("complete_date"), visit_type=VisitType.INITIAL)
+                case.patient_input.red_flags_checked = True
+                case.patient_input.red_flags_status = "negative"
                 with patch("app.services.semantic_normalizer._taipei_today", return_value=date(2026, 9, 14)):
                     await extract_batch_answers(
                         case,
@@ -809,6 +778,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
     ]
 
     def setUp(self):
+        _prescreen_new_route_cases(self)
         self.settings = _settings(cerebras_key="")
         self.patches = [
             patch.object(chat_route, "get_settings", return_value=self.settings),
@@ -1083,6 +1053,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
 
 class DepartmentRecoveryAndExtractionTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        _prescreen_new_route_cases(self)
         self.settings = _settings(cerebras_key="")
         self.settings_patches = [
             patch.object(chat_route, "get_settings", return_value=self.settings),

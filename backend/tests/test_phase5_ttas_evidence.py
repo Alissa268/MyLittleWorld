@@ -394,6 +394,93 @@ def test_safety_turn_uses_same_interpreter_and_ttas_for_positive_result() -> Non
     recommender.assert_not_awaited()
 
 
+def test_ai_unavailable_free_text_has_no_legacy_urgency_guess() -> None:
+    with patch.object(
+        chat_route,
+        "get_settings",
+        return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+    ), patch.object(
+        chat_route,
+        "generate_triage_reply",
+        new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+    ):
+        response = TestClient(app).post(
+            "/chat",
+            json={"case_id": "phase5-no-ai-urgency", "message": "我突然胸痛"},
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+    assert not hasattr(chat_route, "evaluate_urgency")
+    assert result["triage_case"]["ttas_result"]["status"] == "insufficient_information"
+    assert result["triage_case"]["ttas_result"]["level_candidate"] is None
+    assert result["triage"]["urgency_score"] is None
+    assert result["triage"]["urgency_level"] is None
+    assert result["triage_case"]["patient_input"]["red_flags_checked"] is False
+    assert result["triage_case"]["patient_input"]["red_flags"] == []
+
+
+def test_ai_unavailable_clinical_descriptions_do_not_create_custom_urgency_scores() -> None:
+    examples = (
+        "已經兩個月",
+        "痛到不能走路",
+        "越來越嚴重",
+    )
+    for index, message in enumerate(examples):
+        with patch.object(
+            chat_route,
+            "get_settings",
+            return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+        ), patch.object(
+            chat_route,
+            "generate_triage_reply",
+            new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+        ):
+            response = TestClient(app).post(
+                "/chat",
+                json={"case_id": f"phase5-no-custom-score-{index}", "message": message},
+            )
+
+        assert response.status_code == 200
+        result = response.json()
+        assert result["triage"]["urgency_score"] is None
+        assert result["triage"]["urgency_level"] is None
+        assert result["triage_case"]["ttas_result"]["status"] == "insufficient_information"
+        assert result["triage_case"]["ttas_result"]["level_candidate"] is None
+
+
+def test_ai_unavailable_safety_answer_fails_closed() -> None:
+    case = TriageCase(case_id="phase5-no-ai-safety-answer")
+    case.conversation_state.clarification_status = "safety_check"
+    case.conversation_state.last_question_key = "red_flags"
+    case.conversation_state.free_text_mode = True
+    save_case(case)
+
+    with patch.object(
+        chat_route,
+        "get_settings",
+        return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+    ), patch.object(
+        chat_route,
+        "generate_triage_reply",
+        new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
+    ):
+        response = TestClient(app).post(
+            "/chat",
+            json={
+                "case_id": case.case_id,
+                "message": "都沒有，我沒有上述急迫症狀",
+            },
+        )
+
+    assert response.status_code == 200
+    result = response.json()
+    patient = result["triage_case"]["patient_input"]
+    assert patient["red_flags_checked"] is False
+    assert patient["red_flags_status"] == "not_checked"
+    assert result["conversation_state"]["clarification_status"] == "safety_check"
+
+
 def test_urgent_reply_uses_backend_fallback_without_ai_when_warning_is_empty() -> None:
     case = TriageCase(case_id="phase5-urgent-fallback")
     case.conversation_state.free_text_mode = True

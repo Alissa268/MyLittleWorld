@@ -6,14 +6,13 @@ from datetime import datetime, timedelta
 from typing import Any
 from zoneinfo import ZoneInfo
 
-from app.schemas import SemanticExtraction, SeverityNormalization, UrgencyNormalization
+from app.schemas import SemanticExtraction, SeverityNormalization
 from app.services.confidence_scoring import (
     accepted,
     clamp_confidence,
     confidence_with_uncertainty,
     needs_clarification,
 )
-from app.services.negation_utils import is_negated_keyword
 
 PREFERRED_DAYS_KEY = "preferred_days"
 PREFERRED_DATES_KEY = "preferred_dates"
@@ -44,46 +43,10 @@ UNKNOWN_TERMS = [
 ]
 UNAVAILABLE_TERMS = ["沒空", "不能", "不行", "不方便", "無法", "沒辦法"]
 
-RED_FLAG_BUCKETS = {
-    "突發胸痛": ["突發胸痛", "劇烈胸痛", "胸痛", "胸悶冒冷汗", "痛到冒冷汗"],
-    "嚴重呼吸困難": ["呼吸困難", "呼吸很困難", "喘不過氣", "無法呼吸", "有點喘", "有一點喘"],
-    "中風徵象": ["嘴歪", "半邊無力", "半邊沒力", "說話不清", "中風"],
-    "大量出血": ["大量出血", "血流不止"],
-    "意識異常": ["昏倒", "快昏倒", "昏迷", "意識不清", "叫不醒"],
-    "劇烈頭痛合併神經症狀": ["劇烈頭痛", "視力模糊", "抽搐"],
-    "持續高燒": ["持續高燒", "高燒不退"],
-}
-
-NEGATION_TERMS = ["沒有", "無", "否認", "都沒有", "沒這些", "不會", "沒有以上"]
-RED_FLAG_POSITIVE_UNSPECIFIED_TERMS = {
-    "有",
-    "有一點",
-    "有一點點",
-    "好像有",
-    "似乎有",
-    "應該有",
-}
-RED_FLAG_AMBIGUOUS_TERMS = {
-    "還好",
-    "不確定",
-    "可能吧",
-    "我不知道",
-    "不知道",
-    "不清楚",
-    "我真的不知道",
-    "我就不知道",
-    "我就不知道啊",
-    "沒辦法判斷",
-    "無法判斷",
-    "說不準",
-}
-
-
 @dataclass
 class NormalizationResult:
     extractions: list[SemanticExtraction] = field(default_factory=list)
     severity: SeverityNormalization | None = None
-    urgency: UrgencyNormalization | None = None
 
 
 def normalize_message(text: str, last_question_key: str | None = None) -> NormalizationResult:
@@ -105,20 +68,6 @@ def normalize_message(text: str, last_question_key: str | None = None) -> Normal
                 confidence=severity.confidence,
                 source_text=text,
                 follow_up_reason=severity.follow_up_reason,
-            )
-        )
-
-    urgency = normalize_urgency(text, last_question_key)
-    result.urgency = urgency
-    if urgency.semantic_status != "unknown" or last_question_key == "red_flags":
-        result.extractions.append(
-            _extraction(
-                field="red_flags",
-                normalized_value=urgency.matched_red_flags,
-                semantic_status=urgency.semantic_status,
-                confidence=urgency.confidence,
-                source_text=text,
-                follow_up_reason=urgency.follow_up_reason,
             )
         )
 
@@ -232,75 +181,6 @@ def normalize_severity(text: str) -> SeverityNormalization:
         )
 
     return SeverityNormalization(source_text=text)
-
-
-def normalize_urgency(text: str, last_question_key: str | None = None) -> UrgencyNormalization:
-    normalized_text = re.sub(r"[\s，。！？!?、]", "", text)
-    matched: list[str] = []
-    for label, terms in RED_FLAG_BUCKETS.items():
-        if any(term in text and not is_negated_keyword(text, term) for term in terms):
-            matched.append(label)
-
-    if matched:
-        level = "high" if any(flag in matched for flag in ["突發胸痛", "嚴重呼吸困難", "中風徵象", "大量出血", "意識異常"]) else "medium"
-        confidence = 0.9 if level == "high" else 0.76
-        return UrgencyNormalization(
-            urgency_level=level,
-            matched_red_flags=list(dict.fromkeys(matched)),
-            confidence=confidence,
-            warning_required=level == "high",
-            semantic_status="available",
-            source_text=text,
-            answer_classification="positive_specific",
-        )
-
-    if last_question_key == "red_flags" and normalized_text in RED_FLAG_POSITIVE_UNSPECIFIED_TERMS:
-        return UrgencyNormalization(
-            urgency_level="low",
-            matched_red_flags=[],
-            confidence=0.35,
-            warning_required=False,
-            semantic_status="ambiguous",
-            source_text=text,
-            needs_clarification=True,
-            follow_up_reason="使用者表示可能有急迫症狀，但未指出具體項目",
-            answer_classification="positive_unspecified",
-        )
-
-    if last_question_key == "red_flags" and (
-        normalized_text in RED_FLAG_AMBIGUOUS_TERMS
-        or any(term in text for term in UNKNOWN_TERMS)
-        or any(term in text for term in ("可能", "也許", "說不準"))
-    ):
-        return UrgencyNormalization(
-            urgency_level="low",
-            matched_red_flags=[],
-            confidence=0.25,
-            warning_required=False,
-            semantic_status="ambiguous",
-            source_text=text,
-            needs_clarification=True,
-            follow_up_reason="使用者無法確認紅旗症狀",
-            answer_classification="ambiguous",
-        )
-
-    if _has_negation(text) and (_mentions_red_flag(text) or last_question_key == "red_flags"):
-        return UrgencyNormalization(
-            urgency_level="low",
-            matched_red_flags=[],
-            confidence=0.9,
-            warning_required=False,
-            semantic_status="unavailable",
-            source_text=text,
-            answer_classification="negative",
-        )
-
-    return UrgencyNormalization(source_text=text)
-
-
-def is_ambiguous_red_flag_answer(urgency: UrgencyNormalization | None) -> bool:
-    """Use the normalizer's safety classification as the single ambiguity source."""
-    return bool(urgency and urgency.answer_classification == "ambiguous")
 
 
 def _normalize_availability(text: str, last_question_key: str | None) -> list[SemanticExtraction]:
@@ -741,14 +621,6 @@ def _weekday_range(start: str, end: str) -> list[str]:
     if start_index <= end_index:
         return ALL_WEEKDAYS[start_index : end_index + 1]
     return [*ALL_WEEKDAYS[start_index:], *ALL_WEEKDAYS[: end_index + 1]]
-
-
-def _has_negation(text: str) -> bool:
-    return any(term in text for term in NEGATION_TERMS)
-
-
-def _mentions_red_flag(text: str) -> bool:
-    return any(term in text for terms in RED_FLAG_BUCKETS.values() for term in terms)
 
 
 def _unique(items: list[str]) -> list[str]:

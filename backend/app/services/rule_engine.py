@@ -22,9 +22,7 @@ from app.services.negation_utils import is_negated_keyword, strip_negated_red_fl
 from app.services.question_specs import QUESTION_SPECS, question_spec_for_field, select_question_variant
 from app.services.semantic_normalizer import (
     NormalizationResult,
-    is_ambiguous_red_flag_answer,
     normalize_message,
-    normalize_urgency,
 )
 
 logger = logging.getLogger(__name__)
@@ -44,16 +42,6 @@ CHINESE_DURATION_NUMBERS = {
 }
 
 
-RED_FLAG_PATTERNS = {
-    "突發胸痛": ["突發胸痛", "胸痛", "胸悶冒冷汗"],
-    "嚴重呼吸困難": ["呼吸困難", "喘不過氣", "無法呼吸", "有點喘", "有一點喘"],
-    "中風徵象": ["嘴歪", "半邊無力", "說話不清", "中風"],
-    "大量出血": ["大量出血", "血流不止"],
-    "嚴重外傷": ["嚴重外傷", "車禍", "高處墜落"],
-    "意識異常": ["昏迷", "意識不清", "叫不醒"],
-    "劇烈頭痛合併神經症狀": ["劇烈頭痛", "視力模糊", "抽搐"],
-}
-
 RED_FLAG_QUESTION_KEY = "red_flags"
 QUESTION_TEXTS = {spec.state_field: spec.canonical_text for spec in QUESTION_SPECS}
 CHECKLIST_FIELD_ORDER = tuple(spec.state_field for spec in QUESTION_SPECS)
@@ -61,19 +49,6 @@ _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
 _MEDICAL_ASSERTION_FIELDS = {"symptom", "accompanying_symptoms"}
 _SEMANTIC_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguous", "uncertain"}
 
-RED_FLAG_SCREEN_TERMS = [
-    "胸痛",
-    "呼吸困難",
-    "喘不過氣",
-    "意識不清",
-    "大量出血",
-    "半邊無力",
-    "劇烈頭痛",
-    "中風",
-    "昏迷",
-]
-
-NEGATIVE_TERMS = ["沒有", "無", "否", "否認", "都沒有", "都沒", "沒這些", "不會", "沒有以上", "無上述"]
 PREFERRED_DAYS_KEY = "preferred_days"
 PREFERRED_DATES_KEY = "preferred_dates"
 PREFERRED_SESSIONS_KEY = "preferred_sessions"
@@ -89,19 +64,13 @@ ANY_DAY_TERMS = [
     "哪天都可以", "每天都可以", "日期都可以", "日期沒差", "日期都沒差",
     "任何一天都行", "任何一天都可以",
 ]
-RED_FLAG_UNCERTAINTY_WARNING = (
-    "目前無法完全確認是否有急迫症狀；若有突發胸痛、嚴重呼吸困難、意識不清、"
-    "大量出血、半邊無力或劇烈頭痛，請優先尋求緊急醫療協助。"
-)
-
-
 def apply_user_message(
     case: TriageCase,
     message: str,
     *,
     semantic_first: bool = False,
     record_history: bool = True,
-    apply_legacy_safety: bool = True,
+    apply_legacy_safety: bool = False,
 ) -> TriageCase:
     text = message.strip()
     if not text:
@@ -119,23 +88,13 @@ def apply_user_message(
             for field in ("symptom", "body_part"):
                 if field in case.conversation_state.consumed_fields:
                     case.conversation_state.consumed_fields.remove(field)
-        if apply_legacy_safety:
-            _apply_free_text_safety(case, text)
         return case
     patient = case.patient_input
-    previous_red_flag_status = patient.red_flags_status
     symptom_value = text if has_symptom_semantics(text) else None
     if revision_mode and _looks_like_symptom_revision(text):
         _reset_symptom_dependent_fields(case)
     semantic_result = normalize_message(text, case.conversation_state.last_question_key)
     _apply_semantic_result(case, semantic_result)
-
-    if (
-        case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
-        and previous_red_flag_status == "ambiguous"
-        and is_ambiguous_red_flag_answer(semantic_result.urgency)
-    ):
-        _complete_uncertain_red_flag_screen(case, text)
 
     if revision_mode and _looks_like_symptom_revision(text) and symptom_value:
         patient.symptom = symptom_value
@@ -170,46 +129,6 @@ def apply_user_message(
         if symptom not in patient.accompanying_symptoms:
             patient.accompanying_symptoms.append(symptom)
 
-    if semantic_result.urgency and semantic_result.urgency.semantic_status == "unavailable":
-        positive_red_flags = []
-    elif semantic_result.urgency and semantic_result.urgency.matched_red_flags:
-        positive_red_flags = semantic_result.urgency.matched_red_flags
-    else:
-        positive_red_flags = detect_red_flags(text)
-    red_flag_classification = (
-        semantic_result.urgency.answer_classification if semantic_result.urgency else None
-    )
-    red_flag_answered = _is_red_flag_screen_answer(
-        case,
-        text,
-        positive_red_flags,
-        red_flag_classification,
-    )
-    if red_flag_answered:
-        patient.red_flags_checked = True
-        _consume_field(case, RED_FLAG_QUESTION_KEY, "available" if positive_red_flags else "unavailable", 0.9)
-        if not positive_red_flags and _is_negative_red_flag_answer(
-            case,
-            text,
-            red_flag_classification,
-        ):
-            patient.red_flags = []
-
-    for red_flag in positive_red_flags:
-        if red_flag not in patient.red_flags:
-            patient.red_flags.append(red_flag)
-
-    if case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY:
-        classification = (
-            semantic_result.urgency.answer_classification if semantic_result.urgency else None
-        )
-        logger.info(
-            "[RED_FLAGS] classification=%s attempt=%s resolved_status=%s",
-            classification,
-            case.conversation_state.question_attempts.get(RED_FLAG_QUESTION_KEY, 0),
-            patient.red_flags_status,
-        )
-
     availability = case.availability
 
     _refresh_collected_fields(case)
@@ -236,181 +155,33 @@ def apply_user_message(
     return case
 
 
-def _apply_free_text_safety(case: TriageCase, text: str) -> None:
-    """Keep the existing red-flag screen independent of semantic extraction."""
-    patient = case.patient_input
-    previous_status = patient.red_flags_status
-    urgency = normalize_urgency(text, case.conversation_state.last_question_key)
-    _apply_semantic_result(case, NormalizationResult(urgency=urgency))
-    if (
-        case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
-        and previous_status == "ambiguous"
-        and is_ambiguous_red_flag_answer(urgency)
-    ):
-        _complete_uncertain_red_flag_screen(case, text)
-
-    if urgency and urgency.semantic_status == "unavailable":
-        positive_red_flags = []
-    elif urgency and urgency.matched_red_flags:
-        positive_red_flags = urgency.matched_red_flags
-    else:
-        positive_red_flags = detect_red_flags(text)
-    classification = urgency.answer_classification if urgency else None
-    if _is_red_flag_screen_answer(case, text, positive_red_flags, classification):
-        patient.red_flags_checked = True
-        _consume_field(case, RED_FLAG_QUESTION_KEY, "available" if positive_red_flags else "unavailable", 0.9)
-        if not positive_red_flags and _is_negative_red_flag_answer(case, text, classification):
-            patient.red_flags = []
-    for red_flag in positive_red_flags:
-        if red_flag not in patient.red_flags:
-            patient.red_flags.append(red_flag)
-    _refresh_collected_fields(case)
-
-
 def evaluate_urgency(case: TriageCase, *, mark_next_question: bool | None = True) -> UrgencyResult:
-    patient = case.patient_input
-    _refresh_collected_fields(case)
-    combined = " ".join(
-        [
-            patient.symptom or "",
-            patient.body_part or "",
-            patient.duration or "",
-            patient.severity or "",
-            patient.onset or "",
-            " ".join(patient.accompanying_symptoms),
-            " ".join(patient.red_flags),
-        ]
-    )
+    """Compatibility wrapper around the official deterministic TTAS evaluator.
 
-    if patient.urgency_normalized.semantic_status == "unavailable":
-        detected_from_combined = []
-    elif patient.urgency_normalized.matched_red_flags:
-        detected_from_combined = patient.urgency_normalized.matched_red_flags
-    elif any(item.extractor.startswith("ai") for item in case.semantic_extractions):
-        # AI-normalized clinical text cannot create a red flag; the raw-text
-        # safety screen has already run independently for this turn.
-        detected_from_combined = []
-    else:
-        detected_from_combined = detect_red_flags(combined)
-    if patient.red_flags_checked and not patient.red_flags:
-        red_flags = []
-    else:
-        red_flags = list(dict.fromkeys([*patient.red_flags, *detected_from_combined]))
-    patient.red_flags = red_flags
-    if red_flags:
-        logger.info(
-            "evaluate_urgency case_id=%s high_urgency red_flag_count=%s red_flags_checked=%s history_len=%s",
-            case.case_id,
-            len(red_flags),
-            patient.red_flags_checked,
-            len(case.history_records),
+    This function intentionally performs no raw-text medical interpretation and
+    assigns no project-defined urgency score. Production chat calls the TTAS
+    evaluator directly; older structured callers may keep using this wrapper.
+    """
+    from app.services.ttas_evaluator import apply_ttas_evaluation
+
+    result = apply_ttas_evaluation(case)
+    if result.warning_required or mark_next_question is None:
+        return result
+    next_question = (
+        next_question_for(case)
+        if mark_next_question
+        else (
+            question_text_for_field(case, missing[0])
+            if (missing := missing_checklist_fields(case))
+            else None
         )
-        return UrgencyResult(
-            urgency_score=90,
-            urgency_level="high",
-            warning_required=True,
-            warning_message="症狀較急迫，建議盡快就醫，必要時請假處理。",
-            need_more_info=False,
-            next_question=None,
-            reasons=[
-                f"偵測到急迫症狀：{', '.join(red_flags)}",
-                "急迫症狀不需等待完整問診即可進入確認與就醫建議。",
-            ],
-            is_final=True,
-        )
-
-    score = 10
-    reasons = ["基礎急迫度分數為 10。"]
-
-    severity_score = _score_severity(patient.severity, combined)
-    if patient.severity_normalized.sleep_impact:
-        severity_score = max(severity_score, 20)
-    elif patient.severity_normalized.functional_impact:
-        severity_score = max(severity_score, 15)
-    score += severity_score
-    if severity_score:
-        reasons.append(f"症狀程度「{patient.severity or '由描述判斷'}」使急迫度增加 {severity_score} 分。")
-
-    duration_score = _score_duration(patient.duration, combined)
-    score += duration_score
-    if duration_score:
-        reasons.append(f"症狀已持續 {patient.duration or '一段時間'}，急迫度增加 {duration_score} 分。")
-
-    function_score = _score_function_limit(combined)
-    score += function_score
-    if function_score:
-        reasons.append(f"描述包含活動或生活功能受影響，急迫度增加 {function_score} 分。")
-
-    onset_score = _score_onset(patient.onset, combined)
-    score += onset_score
-    if onset_score:
-        reasons.append(f"發作型態「{patient.onset or '由描述判斷'}」使急迫度增加 {onset_score} 分。")
-
-    inflammation_score = _score_inflammation(combined)
-    score += inflammation_score
-    if inflammation_score:
-        reasons.append(f"描述包含發炎或全身不適線索，急迫度增加 {inflammation_score} 分。")
-
-    treatment_score = _score_treatment(combined)
-    score += treatment_score
-    if treatment_score:
-        reasons.append(f"描述包含已處理但未改善，急迫度增加 {treatment_score} 分。")
-
-    risk_score = _score_risk(combined)
-    score += risk_score
-    if risk_score:
-        reasons.append(f"描述包含高風險背景，急迫度增加 {risk_score} 分。")
-
-    score = max(0, min(score, 100))
-
-    if mark_next_question is None:
-        next_question = None
-    elif mark_next_question:
-        next_question = next_question_for(case)
-    else:
-        missing = missing_checklist_fields(case)
-        next_question = question_text_for_field(case, missing[0]) if missing else None
-    need_more_info = next_question is not None or mark_next_question is None
-    level = urgency_level(score)
-    safety_uncertain = patient.red_flags_status == "uncertain"
-    warning_required = level == "high" or safety_uncertain
-    if mark_next_question is not None:
-        if need_more_info:
-            reasons.append(f"資訊尚未完整，下一題：{next_question}")
-        else:
-            reasons.append("問診必要資訊已完整，可進入使用者確認階段。")
-    if safety_uncertain:
-        reasons.append("急迫症狀篩檢已詢問，但使用者仍無法確認；不得視為已確認陰性。")
-
-    logger.info(
-        "evaluate_urgency case_id=%s history_len=%s need_more_info=%s has_next_question=%s red_flag_count=%s red_flags_checked=%s collected_fields=%s asked_fields=%s consumed_fields=%s last_question_key=%s question_attempts=%s field_statuses=%s",
-        case.case_id,
-        len(case.history_records),
-        need_more_info,
-        bool(next_question),
-        len(patient.red_flags),
-        patient.red_flags_checked,
-        patient.collected_fields,
-        case.conversation_state.asked_fields,
-        case.conversation_state.consumed_fields,
-        case.conversation_state.last_question_key,
-        case.conversation_state.question_attempts,
-        case.conversation_state.field_statuses,
     )
-
-    return UrgencyResult(
-        urgency_score=score,
-        urgency_level=level,
-        warning_required=warning_required,
-        warning_message=(
-            RED_FLAG_UNCERTAINTY_WARNING
-            if safety_uncertain
-            else "症狀較急迫，建議盡快就醫，必要時請假處理。" if warning_required else None
-        ),
-        need_more_info=need_more_info,
-        next_question=next_question,
-        reasons=reasons,
-        is_final=not need_more_info,
+    return result.model_copy(
+        update={
+            "need_more_info": next_question is not None,
+            "next_question": next_question,
+            "is_final": next_question is None,
+        }
     )
 
 
@@ -479,8 +250,6 @@ def _field_satisfied(case: TriageCase, field: str) -> bool:
     if field == "symptom":
         return bool(patient.symptom)
     if field == RED_FLAG_QUESTION_KEY:
-        if patient.red_flags and not patient.red_flags_checked:
-            patient.red_flags_checked = True
         return patient.red_flags_checked
     if field == "body_part":
         return bool(patient.body_part)
@@ -501,9 +270,6 @@ def _fallback_field(case: TriageCase, field: str) -> None:
     state.field_confidence[field] = state.field_confidence.get(field, 0.0)
     state.clarification_reasons[field] = "max question attempts reached; explicitly skipped as unknown"
     _consume_field(case, field, state.field_statuses[field], state.field_confidence[field])
-    if field == RED_FLAG_QUESTION_KEY:
-        case.patient_input.red_flags_checked = True
-        case.patient_input.red_flags = []
 
 
 def _question_text_for(case: TriageCase, field: str) -> str:
@@ -519,41 +285,12 @@ def _question_attempts(case: TriageCase, field: str) -> int:
     return case.conversation_state.question_attempts.get(field, 0)
 
 
-def urgency_level(score: int) -> str:
-    if score >= 60:
-        return "high"
-    if score >= 25:
-        return "medium"
-    return "low"
-
-
 def _apply_semantic_result(case: TriageCase, result: NormalizationResult) -> None:
     patient = case.patient_input
     if result.severity is not None:
         patient.severity_normalized = result.severity
         if result.severity.severity_level and accepted(result.severity.confidence, result.severity.semantic_status):
             patient.severity = result.severity.severity_level
-
-    if result.urgency is not None:
-        patient.urgency_normalized = result.urgency
-        if (
-            result.urgency.semantic_status == "unavailable"
-            and case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
-            and accepted(result.urgency.confidence, result.urgency.semantic_status)
-        ):
-            patient.red_flags_checked = True
-            patient.red_flags = []
-            patient.red_flags_status = "negative"
-            _consume_field(case, RED_FLAG_QUESTION_KEY, "unavailable", result.urgency.confidence)
-        elif result.urgency.matched_red_flags and accepted(result.urgency.confidence, result.urgency.semantic_status):
-            patient.red_flags_checked = True
-            patient.red_flags_status = "positive_specific"
-            _consume_field(case, RED_FLAG_QUESTION_KEY, "available", result.urgency.confidence)
-            for red_flag in result.urgency.matched_red_flags:
-                if red_flag not in patient.red_flags:
-                    patient.red_flags.append(red_flag)
-        elif result.urgency.semantic_status == "ambiguous":
-            patient.red_flags_status = "ambiguous"
 
     for extraction in result.extractions:
         _record_semantic_extraction(case, extraction)
@@ -596,9 +333,9 @@ def apply_semantic_extractions(
         ):
             _log_ai_apply_decision(case, extraction, False, "missing_or_invalid_assertion")
             continue
-        if extraction.field == RED_FLAG_QUESTION_KEY and not allow_red_flag_completion:
+        if extraction.field == RED_FLAG_QUESTION_KEY:
             if is_ai_extraction:
-                _log_ai_apply_decision(case, extraction, False, "red_flags_deterministic_only")
+                _log_ai_apply_decision(case, extraction, False, "red_flags_not_semantic_evidence")
             continue
         if (
             is_ai_extraction
@@ -729,10 +466,6 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
         availability.semantic_status[extraction.field] = extraction.semantic_status
         availability.confidence[extraction.field] = extraction.confidence
 
-    if extraction.field == "red_flags" and extraction.semantic_status == "ambiguous":
-        case.patient_input.red_flags_status = "ambiguous"
-        return
-
     if (
         extraction.extractor.startswith("ai")
         and extraction.field in _MEDICAL_ASSERTION_FIELDS
@@ -808,26 +541,6 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
         if level and (case.conversation_state.revision_mode or not case.patient_input.severity):
             case.patient_input.severity = str(level)
             _consume_field(case, extraction.field, extraction.semantic_status, extraction.confidence)
-    elif extraction.field == "red_flags":
-        if extraction.semantic_status == "uncertain":
-            case.patient_input.red_flags_checked = True
-            case.patient_input.red_flags = []
-            case.patient_input.red_flags_status = "uncertain"
-            case.patient_input.urgency_normalized.semantic_status = "uncertain"
-            case.patient_input.urgency_normalized.answer_classification = "uncertain_after_clarification"
-            _consume_field(case, RED_FLAG_QUESTION_KEY, "uncertain", extraction.confidence)
-        elif extraction.semantic_status == "unavailable":
-            case.patient_input.red_flags_checked = True
-            case.patient_input.red_flags = []
-            case.patient_input.red_flags_status = "negative"
-            _consume_field(case, RED_FLAG_QUESTION_KEY, "unavailable", extraction.confidence)
-        else:
-            flags = _as_string_list(extraction.normalized_value)
-            if flags:
-                case.patient_input.red_flags_checked = True
-                case.patient_input.red_flags_status = "positive_specific"
-                _merge_list(case.patient_input.red_flags, flags)
-                _consume_field(case, RED_FLAG_QUESTION_KEY, extraction.semantic_status, extraction.confidence)
 
 
 def _as_string_list(value: Any) -> list[str]:
@@ -944,50 +657,6 @@ def _sync_consumed_fields(case: TriageCase) -> None:
             availability.semantic_status.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_statuses.get(PREFERRED_SESSIONS_KEY),
             availability.confidence.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_confidence.get(PREFERRED_SESSIONS_KEY),
         )
-
-
-def _is_red_flag_screen_answer(
-    case: TriageCase,
-    text: str,
-    positive_red_flags: list[str],
-    answer_classification: str | None = None,
-) -> bool:
-    if positive_red_flags:
-        return True
-    if answer_classification in {"ambiguous", "positive_unspecified"}:
-        return False
-    return (
-        case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
-        and _has_negation(text)
-    )
-
-
-def _is_negative_red_flag_answer(
-    case: TriageCase,
-    text: str,
-    answer_classification: str | None = None,
-) -> bool:
-    if answer_classification in {"ambiguous", "positive_unspecified"}:
-        return False
-    if not _has_negation(text):
-        return False
-    return case.conversation_state.last_question_key == RED_FLAG_QUESTION_KEY
-
-
-def _mentions_red_flag_screen(text: str) -> bool:
-    return any(term in text for term in RED_FLAG_SCREEN_TERMS)
-
-
-def _has_negation(text: str) -> bool:
-    return any(term in text for term in NEGATIVE_TERMS)
-
-
-def detect_red_flags(text: str) -> list[str]:
-    red_flags = []
-    for label, keywords in RED_FLAG_PATTERNS.items():
-        if any(keyword in text and not is_negated_keyword(text, keyword) for keyword in keywords):
-            red_flags.append(label)
-    return red_flags
 
 
 def _extract_body_part(text: str) -> Optional[str]:
@@ -1188,20 +857,6 @@ def _taipei_today():
     return datetime.now(ZoneInfo("Asia/Taipei")).date()
 
 
-def _complete_uncertain_red_flag_screen(case: TriageCase, source_text: str) -> None:
-    patient = case.patient_input
-    patient.red_flags_checked = True
-    patient.red_flags = []
-    patient.red_flags_status = "uncertain"
-    patient.urgency_normalized.semantic_status = "uncertain"
-    patient.urgency_normalized.answer_classification = "uncertain_after_clarification"
-    patient.urgency_normalized.confidence = 1.0
-    patient.urgency_normalized.source_text = source_text
-    patient.urgency_normalized.needs_clarification = False
-    patient.urgency_normalized.follow_up_reason = "clarification 後使用者仍無法判斷急迫症狀"
-    _consume_field(case, RED_FLAG_QUESTION_KEY, "uncertain", 1.0)
-
-
 def _weekday_range(start: str, end: str) -> list[str]:
     if start not in ALL_WEEKDAYS or end not in ALL_WEEKDAYS:
         return []
@@ -1242,76 +897,3 @@ def _refresh_collected_fields(case: TriageCase) -> None:
     if case.availability.preferred_sessions:
         fields.append("preferred_sessions")
     patient.collected_fields = fields
-
-
-def _score_severity(severity: Optional[str], text: str) -> int:
-    value = severity or text
-    if value == "severe":
-        return 18
-    if value == "moderate":
-        return 8
-    if value == "mild":
-        return 3
-    if any(word in value for word in ["很痛", "劇痛", "影響明顯", "嚴重"]):
-        return 15
-    if "明顯" in value:
-        return 10
-    if any(word in value for word in ["中等", "中度"]):
-        return 5
-    return 0
-
-
-def _score_duration(duration: Optional[str], text: str) -> int:
-    value = duration or text
-    if any(word in value for word in ["6週", "六週", "2個月", "兩個月"]):
-        return 8
-    if any(word in value for word in ["2週", "兩週", "3週", "一個月", "1個月"]):
-        return 5
-    if any(word in value for word in ["週", "周", "4天", "5天", "6天", "7天"]):
-        return 3
-    return 0
-
-
-def _score_function_limit(text: str) -> int:
-    if any(word in text for word in ["幾乎不能活動", "不能活動"]):
-        return 20
-    if any(word in text for word in ["無法正常活動", "無法走路"]):
-        return 15
-    if any(word in text for word in ["走路困難", "工作", "爬樓梯很吃力"]):
-        return 10
-    if "影響" in text:
-        return 5
-    return 0
-
-
-def _score_onset(onset: Optional[str], text: str) -> int:
-    value = onset or text
-    if any(word in value for word in ["快速惡化", "突然變嚴重"]):
-        return 10
-    if any(word in value for word in ["慢慢變差", "越來越"]):
-        return 5
-    return 0
-
-
-def _score_inflammation(text: str) -> int:
-    score = 0
-    if any(word in text for word in ["發燒", "紅腫熱痛"]):
-        score += 5
-    if any(word in text for word in ["全身不適", "畏寒"]):
-        score += 10
-    return score
-
-
-def _score_treatment(text: str) -> int:
-    if any(word in text for word in ["休息沒改善", "止痛沒改善", "吃藥沒改善"]):
-        return 5
-    return 0
-
-
-def _score_risk(text: str) -> int:
-    score = 0
-    if any(word in text for word in ["高齡", "老人", "慢性病", "糖尿病"]):
-        score += 5
-    if any(word in text for word in ["免疫低下", "化療"]):
-        score += 10
-    return score

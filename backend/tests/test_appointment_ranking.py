@@ -633,6 +633,8 @@ class _NoAiSettings:
 def _complete_case() -> TriageCase:
     case = TriageCase(case_id="case_ranking", visit_type=VisitType.INITIAL)
     apply_user_message(case, "膝蓋走路疼痛2週，中等程度，慢慢變嚴重，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診")
+    case.patient_input.red_flags_checked = True
+    case.patient_input.red_flags_status = "negative"
     case.triage = evaluate_urgency(case)
     case.conversation_state.is_complete = True
     case.conversation_state.stage = ConversationStage.RECOMMENDING

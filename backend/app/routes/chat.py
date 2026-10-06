@@ -27,7 +27,13 @@ from app.services.conversation_service import (
 from app.services.department_reasoning_service import reason_about_departments
 from app.services.department_preference_service import capture_department_preference, resolve_requested_department
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
-from app.services.rule_engine import apply_user_message, evaluate_urgency
+from app.services.rule_engine import (
+    QUESTION_TEXTS,
+    RED_FLAG_QUESTION_KEY,
+    apply_user_message,
+    missing_checklist_fields,
+    next_question_for,
+)
 from app.services.ttas_evaluator import apply_ttas_evaluation, ttas_requires_immediate_action
 from app.services.ai_service import runtime_ai_available
 
@@ -170,7 +176,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                         case,
                         answer.answer,
                         semantic_first=semantic_first,
-                        apply_legacy_safety=not semantic_first,
+                        apply_legacy_safety=False,
                     )
                     user_text_parts.append(answer.answer)
                     has_user_input = True
@@ -198,7 +204,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 case,
                 req.message,
                 semantic_first=semantic_first or safety_check_turn,
-                apply_legacy_safety=not semantic_first,
+                apply_legacy_safety=False,
             )
             user_text_parts.append(req.message)
             has_user_input = True
@@ -209,7 +215,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                         case,
                         message.content,
                         semantic_first=semantic_first or safety_check_turn,
-                        apply_legacy_safety=not semantic_first,
+                        apply_legacy_safety=False,
                     )
                     user_text_parts.append(message.content)
                     has_user_input = True
@@ -248,11 +254,16 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("rule_engine"):
         confirmation_only = conversational_mode and not has_user_input and case.conversation_state.is_complete
         if not confirmation_only:
-            if conversational_mode and semantic_first:
-                case.triage = apply_ttas_evaluation(case)
-            else:
-                case.triage = evaluate_urgency(
-                    case, mark_next_question=None if conversational_mode else not batch_mode,
+            case.triage = apply_ttas_evaluation(case)
+            if not conversational_mode and not case.triage.warning_required:
+                next_question = None if batch_mode else next_question_for(case)
+                has_missing_fields = bool(missing_checklist_fields(case))
+                case.triage = case.triage.model_copy(
+                    update={
+                        "need_more_info": has_missing_fields,
+                        "next_question": next_question,
+                        "is_final": not has_missing_fields,
+                    }
                 )
         safety_interpretation = (
             ai_suggestion.pending_answer
@@ -272,16 +283,10 @@ async def chat(req: ChatRequest) -> TriageResult:
         if confirmation_only:
             pass
         elif conversational_mode:
-            ttas_immediate = semantic_first and ttas_requires_immediate_action(case)
-            controlled_legacy_positive = bool(
-                safety_check_turn and not semantic_first and case.patient_input.red_flags
-            )
-            if ttas_immediate or controlled_legacy_positive or (
-                not semantic_first and case.patient_input.red_flags
-            ):
-                if ttas_immediate:
-                    case.patient_input.red_flags_checked = True
-                    case.patient_input.red_flags_status = "positive_ttas"
+            ttas_immediate = ttas_requires_immediate_action(case)
+            if ttas_immediate:
+                case.patient_input.red_flags_checked = True
+                case.patient_input.red_flags_status = "positive_ttas"
                 if not safety_check_turn:
                     case.conversation_state.turn_count += len(user_text_parts)
                 case.conversation_state.clarification_status = "urgent"
@@ -302,11 +307,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     else None
                 )
                 turn_interpretation_complete = bool(
-                    not semantic_ai_allowed
-                    or (
-                        ai_suggestion is not None
-                        and getattr(ai_suggestion, "interpretation_complete", True)
-                    )
+                    ai_suggestion is not None
+                    and getattr(ai_suggestion, "interpretation_complete", True)
                 )
                 if not safety_check_turn:
                     capture_pending_answer(case, pending_interpretation, user_text_parts)
@@ -341,6 +343,13 @@ async def chat(req: ChatRequest) -> TriageResult:
                     user_sources=user_text_parts,
                     current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
                 )
+                if safety_check_turn and not safety_completed_this_turn:
+                    case.conversation_state.clarification_status = "safety_check"
+                    case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
+                    case.conversation_state.is_complete = False
+                    case.triage.need_more_info = True
+                    case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+                    case.triage.is_final = False
                 if case.triage.next_question:
                     case.history_records.append(Message(role="assistant", content=case.triage.next_question))
         else:

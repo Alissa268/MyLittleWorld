@@ -25,10 +25,22 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         self.original_rag_settings = rag_triage_adapter.get_settings
         self.original_rag_complete = rag_triage_adapter.complete_prompt
         self.original_specialty_settings = specialty_scoring.get_settings
+        self.chat_route = importlib.import_module("app.routes.chat")
+        self.original_create_case = self.chat_route.create_case
+        self.original_runtime_ai_available = self.chat_route.runtime_ai_available
 
         project_smart_department_adapter.get_settings = lambda: _NoAiSettings()
         rag_triage_adapter.get_settings = lambda: _NoAiSettings()
         specialty_scoring.get_settings = lambda: _NoAiSettings()
+
+        def create_prescreened_case(case_id=None):
+            case = self.original_create_case(case_id)
+            case.patient_input.red_flags_checked = True
+            case.patient_input.red_flags_status = "negative"
+            return case
+
+        self.chat_route.create_case = create_prescreened_case
+        self.chat_route.runtime_ai_available = lambda _settings: False
         appointment_service.fetch_active_departments = _active_departments
         department_preference_service.fetch_active_departments = _active_departments
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: _available_slots()
@@ -51,6 +63,8 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         rag_triage_adapter.get_settings = self.original_rag_settings
         rag_triage_adapter.complete_prompt = self.original_rag_complete
         specialty_scoring.get_settings = self.original_specialty_settings
+        self.chat_route.create_case = self.original_create_case
+        self.chat_route.runtime_ai_available = self.original_runtime_ai_available
         self.generate_script_route.revalidate_schedule = self.original_revalidate
 
     async def test_under_18_abdominal_prefers_active_pediatric_department(self):

@@ -29,7 +29,7 @@ The existing Turn Interpreter returns one JSON object containing:
 
 No fixed second TTAS AI call was added. Backend validation enforces the field allow-list, field-specific value type/range, finite confidence, acceptance threshold, semantic status, and current-turn verbatim grounding. AI-provided level, score, warning, or workflow fields are ignored.
 
-AI-first free-text safety turns use this same Turn Interpreter. A safety pending answer adds a validated `answer_assertion` (`present`, `absent`, or `uncertain`). Backend completes a negative safety screen only for a grounded, high-confidence `answered + absent` proposal tied to the opaque `safety_screen` intent. A no-match TTAS result alone never completes the screen. Legacy phrase/keyword safety parsing remains only for AI-unavailable and legacy/batch compatibility paths.
+AI-first free-text safety turns use this same Turn Interpreter. A safety pending answer adds a validated `answer_assertion` (`present`, `absent`, or `uncertain`). Backend completes a negative safety screen only for a grounded, high-confidence `answered + absent` proposal tied to the opaque `safety_screen` intent. A no-match TTAS result alone never completes the screen. AI-unavailable free text and keyed free-text safety answers fail closed: they do not run a phrase/keyword safety parser, do not complete `red_flags_checked`, and do not infer a TTAS level.
 
 Validated evidence is stored as history and reduced to current field state by latest accepted evidence. The evaluator reads that structured state and trusted age facts only; it never reads raw user text.
 
@@ -47,18 +47,22 @@ Validated evidence is stored as history and reduced to current field state by la
 - E0101 insect-sting rules require `insect_sting_exposure=true` in addition to their criterion evidence.
 - T1201/T1206 upper/lower-limb fracture traces require matching `injury_region`; one fact cannot emit both limb codes.
 - T010110, T120207, and T120707 remain reference-only because the packaged penetration evidence cannot prove the exact official complaint context.
+- A020211 remains reference-only because `tearing_pain` alone cannot prove the A0202 chest-pain/tightness complaint context.
+- A040411 remains reference-only because acute visual disturbance alone cannot prove the A0404 headache complaint context.
+- T110107 remains reference-only because genital swelling/deformity alone cannot prove the T1101 blunt-trauma complaint context.
+- A030712 remains reference-only. The stored crosswalk states that A030712 belongs under A0307 nausea/vomiting while black stool is separately represented under A0310; the current merged evidence field cannot trace those complaints independently.
 
 Each match records `rule_id`, `official_code`, `source_id`, `official_locator`, level, and grounded evidence references.
 
 ## Legacy Differences
 
-- The prototype 90/50/20 urgency score no longer drives the AI-first free-text route; `urgency_score` remains null.
+- The prototype 90/50/20 urgency score and its duration, function, onset, inflammation, treatment, and risk adders were removed; `urgency_score` remains null.
 - The old `<40` glucose threshold was not retained. A130409/A130413 preserve the official `<60` criteria and provenance, but are `reference_only` until `hypoglycemia_symptoms` can be established without an unverified AI clinical grouping.
 - Blanket high-blood-pressure behavior is not executed because those package rules are `reference_only`.
 - A041011/A041017 retain the official six-hour boundary in audit data, but are `reference_only` until stroke-symptom evidence has a Backend-verifiable official definition.
 - No-match is insufficient information, not low urgency.
 
-Legacy deterministic safety parsing remains only for AI-unavailable or legacy/batch compatibility. It is not invoked for AI-first ordinary or safety-check free text and was not expanded in Phase 5.
+`RED_FLAG_PATTERNS`, safety negation phrase lists, and their free-text urgency normalizer are no longer production medical fallbacks. Safety ordering and checklist state remain Backend-owned workflow, while medical urgency comes only from validated TTAS evidence and the deterministic evaluator.
 
 ## Tests
 

@@ -18,6 +18,7 @@ from app.services.script_service import build_navigation_script
 
 class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
     def setUp(self):
+        self.original_create_case = chat_route.create_case
         self.original_departments = appointment_service.fetch_active_departments
         self.original_preference_departments = department_preference_service.fetch_active_departments
         self.original_rag_complete = rag_triage_adapter.complete_prompt
@@ -25,6 +26,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.original_project_complete = project_smart_department_adapter.complete_prompt
         self.original_project_settings = project_smart_department_adapter.get_settings
         self.original_generate_triage_reply = chat_route.generate_triage_reply
+        self.original_runtime_ai_available = chat_route.runtime_ai_available
         appointment_service.fetch_active_departments = lambda: [
             {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"},
             {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
@@ -46,6 +48,14 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             return kwargs["fallback_reply"]
 
         chat_route.generate_triage_reply = deterministic_reply
+        chat_route.runtime_ai_available = lambda _settings: False
+        def create_pre_screened_case(case_id=None):
+            case = self.original_create_case(case_id)
+            case.patient_input.red_flags_checked = True
+            case.patient_input.red_flags_status = "negative"
+            return case
+
+        chat_route.create_case = create_pre_screened_case
         self.generate_script_route = importlib.import_module("app.routes.generate_script")
         self.original_revalidate = self.generate_script_route.revalidate_schedule
         self.generate_script_route.revalidate_schedule = lambda recommendation, **_kwargs: recommendation
@@ -58,15 +68,20 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         project_smart_department_adapter.complete_prompt = self.original_project_complete
         project_smart_department_adapter.get_settings = self.original_project_settings
         chat_route.generate_triage_reply = self.original_generate_triage_reply
+        chat_route.runtime_ai_available = self.original_runtime_ai_available
+        chat_route.create_case = self.original_create_case
         self.generate_script_route.revalidate_schedule = self.original_revalidate
 
     async def test_knee_pain_triage_case(self):
         case = TriageCase(case_id="case_knee")
         apply_user_message(case, "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診")
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
         case.triage = evaluate_urgency(case)
 
         self.assertEqual(case.patient_input.body_part, "膝")
-        self.assertEqual(case.triage.urgency_level, "medium")
+        self.assertIsNone(case.triage.urgency_level)
+        self.assertIsNone(case.triage.urgency_score)
         self.assertFalse(case.triage.need_more_info)
         self.assertTrue(case.triage.reasons)
         self.assertIn("body_part", case.patient_input.collected_fields)
@@ -111,10 +126,10 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         apply_user_message(case, "突發胸痛而且呼吸困難")
         case.triage = evaluate_urgency(case)
 
-        self.assertEqual(case.triage.urgency_score, 90)
-        self.assertEqual(case.triage.urgency_level, "high")
-        self.assertTrue(case.triage.warning_required)
-        self.assertTrue(case.triage.is_final)
+        self.assertIsNone(case.triage.urgency_score)
+        self.assertIsNone(case.triage.urgency_level)
+        self.assertFalse(case.triage.warning_required)
+        self.assertEqual(case.ttas_result.status, "insufficient_information")
         self.assertTrue(case.triage.reasons)
 
     async def test_negated_chest_and_dyspnea_do_not_recommend_cardiology(self):
@@ -128,6 +143,8 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             case,
             "我頭暈一天，程度中等，沒有胸痛、呼吸困難、意識不清、大量出血，週一上午可以看診",
         )
+        case.patient_input.red_flags_checked = True
+        case.patient_input.red_flags_status = "negative"
         case.triage = evaluate_urgency(case)
         result = await detect_department_result(case)
 
@@ -165,8 +182,8 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         case.triage = evaluate_urgency(case)
         result = await detect_department_result(case)
 
-        self.assertEqual(case.triage.urgency_level, "high")
-        self.assertTrue(case.triage.warning_required)
+        self.assertIsNone(case.triage.urgency_level)
+        self.assertFalse(case.triage.warning_required)
         self.assertIn(result.childDept, {"心臟內科", "胸腔內科"})
 
     async def test_db_failure_returns_no_schedule_rows(self):
@@ -545,7 +562,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first_response.status_code, 200)
         first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
+        self.assertNotEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
 
         second_response = client.post(
             "/chat",
@@ -568,7 +585,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(first_response.status_code, 200)
         first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
+        self.assertNotEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
 
         second_response = client.post(
             "/chat",
@@ -857,7 +874,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(normalized.severity_level, "severe")
         self.assertTrue(normalized.sleep_impact)
         self.assertGreaterEqual(normalized.confidence, 0.9)
-        self.assertGreaterEqual(case.triage.urgency_score, 30)
+        self.assertIsNone(case.triage.urgency_score)
 
     async def test_negated_red_flags_are_structured_and_do_not_loop(self):
         client = TestClient(app)
@@ -866,7 +883,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             json={"message": "左膝痛2週"},
         )
         first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
+        self.assertNotEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
 
         second_response = client.post(
             "/chat",
