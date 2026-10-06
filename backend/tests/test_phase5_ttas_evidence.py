@@ -117,6 +117,21 @@ def test_turn_interpreter_prompt_contains_ttas_contract_and_no_level_authority()
     assert "不得推算、提議或輸出任何 TTAS 級數" in prompt
     assert "不得假設正常" in prompt
     assert "source_text" in prompt
+    assert '"field": "chemical_eye_injury"' in prompt
+    assert "化學物質濺入／直接接觸眼睛" in prompt
+    assert "患者原文明確表示化學性物質直接濺入、噴入或接觸眼睛" in prompt
+    assert "不得推測 chemical_eye_injury=true" in prompt
+    assert "即使同一個事實已經同時出現在 semantic_extractions，也不可因此省略 ttas_evidence" in prompt
+    assert "confidence 只表示「患者本輪原文有多明確支持這個結構化事實」" in prompt
+    assert "剛剛清潔劑濺到我的右眼，現在眼睛灼痛" in prompt
+    assert '"source_text": "清潔劑濺到我的右眼"' in prompt
+    assert "我的右眼很痛" in prompt
+    assert "不能從症狀倒推暴露原因" in prompt
+    assert '"field": "respiratory_distress"' not in prompt
+    assert '"field": "hemodynamic_status"' not in prompt
+    assert '"field": "cardiac_chest_pain_suspected"' not in prompt
+    assert '"field": "high_risk_injury_mechanism"' not in prompt
+    assert '"field": "spo2_pct"' not in prompt
     assert "answer_assertion" in _build_symptom_collection_prompt(
         TriageCase.model_validate({
             "case_id": "safety-prompt",
@@ -180,6 +195,93 @@ def test_ttas_evidence_uses_existing_turn_interpreter_call() -> None:
     assert suggestion is not None
     assert len(suggestion.ttas_evidence or []) == 1
     assert len(case.ttas_evidence) == 1
+
+
+def test_chemical_eye_evidence_uses_the_same_turn_interpreter_call() -> None:
+    user_text = "剛剛清潔劑濺到我的右眼，現在眼睛灼痛。"
+    provider = AsyncMock(return_value=json.dumps({
+        "semantic_extractions": [
+            {
+                "field": "symptom",
+                "normalized_value": "灼痛",
+                "semantic_status": "available",
+                "assertion": "present",
+                "confidence": 0.99,
+                "source_text": "眼睛灼痛",
+                "needs_clarification": False,
+                "follow_up_reason": None,
+            },
+            {
+                "field": "body_part",
+                "normalized_value": "右眼",
+                "semantic_status": "available",
+                "assertion": None,
+                "confidence": 0.99,
+                "source_text": "右眼",
+                "needs_clarification": False,
+                "follow_up_reason": None,
+            },
+        ],
+        "pending_answer": None,
+        "ttas_evidence": [_item(
+            "chemical_eye_injury",
+            True,
+            source="清潔劑濺到我的右眼",
+            confidence=0.99,
+        )],
+    }, ensure_ascii=False))
+    case = TriageCase(case_id="chemical-eye-single-call", history_records=[Message(role="user", content=user_text)])
+    with patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
+        rag_triage_adapter, "complete_prompt", new=provider,
+    ):
+        suggestion = asyncio.run(rag_triage_adapter.refine_case_with_ai(case, user_sources=[user_text]))
+    provider.assert_awaited_once()
+    assert suggestion is not None
+    assert [(item.field, item.value) for item in suggestion.ttas_evidence or []] == [
+        ("chemical_eye_injury", True),
+    ]
+    assert [(item.field, item.value) for item in case.ttas_evidence] == [
+        ("chemical_eye_injury", True),
+    ]
+
+
+def test_eye_pain_without_exposure_is_not_filled_by_backend() -> None:
+    user_text = "我的右眼很痛。"
+    provider = AsyncMock(return_value=json.dumps({
+        "semantic_extractions": [
+            {
+                "field": "symptom",
+                "normalized_value": "眼痛",
+                "semantic_status": "available",
+                "assertion": "present",
+                "confidence": 0.99,
+                "source_text": "右眼很痛",
+                "needs_clarification": False,
+                "follow_up_reason": None,
+            },
+            {
+                "field": "body_part",
+                "normalized_value": "右眼",
+                "semantic_status": "available",
+                "assertion": None,
+                "confidence": 0.99,
+                "source_text": "右眼",
+                "needs_clarification": False,
+                "follow_up_reason": None,
+            },
+        ],
+        "pending_answer": None,
+        "ttas_evidence": [],
+    }, ensure_ascii=False))
+    case = TriageCase(case_id="eye-pain-no-exposure", history_records=[Message(role="user", content=user_text)])
+    with patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
+        rag_triage_adapter, "complete_prompt", new=provider,
+    ):
+        suggestion = asyncio.run(rag_triage_adapter.refine_case_with_ai(case, user_sources=[user_text]))
+    provider.assert_awaited_once()
+    assert suggestion is not None
+    assert suggestion.ttas_evidence == []
+    assert case.ttas_evidence == []
 
 
 def test_ai_first_free_text_can_skip_legacy_safety_nlp() -> None:

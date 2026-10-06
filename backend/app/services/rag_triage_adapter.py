@@ -503,12 +503,9 @@ def _build_symptom_collection_prompt(
         "current_user_text": current_user_text or [],
     }
     try:
-        ttas_fields = {
-            field: spec.get("type")
-            for field, spec in load_ttas_rules().evidence_fields.items()
-        }
+        prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
     except TTASRuleLoadError:
-        ttas_fields = {}
+        prompt_evidence_catalog = {}
 
     return f"""你是醫療問診的語意抽取器。你只能做 extraction、normalization、confidence estimation。
 不要在這個 extraction 回應中決定 next_question、stage、waiting_confirmation 或流程轉移；追問由獨立 clarification call 提議，狀態由 Backend 控制。
@@ -537,14 +534,18 @@ def _build_symptom_collection_prompt(
 15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 包含 answered_intent、answer_status、answer_source_text、answer_confidence，並可包含 answer_assertion；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
   15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報 safety 問題中的一項或多項狀況，absent 表示患者明確否認整份 safety 問題，uncertain 表示無法確定。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為 safety negative。
   16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
-  17. 同一次 interpretation 輸出 ttas_evidence；每筆只能包含 field、value、semantic_status、confidence、source_text。field/value allow-list 如下：
-  {json.dumps(ttas_fields, ensure_ascii=False, indent=2)}
-  18. ttas_evidence.semantic_status 只能是 available、unknown、ambiguous。source_text 必須是 current_user_text 中最短的連續逐字片段。不得從 prior history 為本輪製造 evidence。
-  19. 使用者未提供的血壓、心率、SpO2、GCS、體溫、血糖或年齡等資料不得假設正常，也不得輸出 available；未知就省略，或只有在本輪明確表示不知道時輸出 grounded unknown/null。
-  20. age_years/age_months 只在本輪有逐字年齡證據時抽取。不要猜成人、兒童或月齡。
-  21. 你只抽 TTAS evidence，不得推算、提議或輸出任何 TTAS 級數；不同 evidence 各自使用直接支持它的最短 source_text。
-  22. 不得把患者的主觀形容直接升格為臨床 modifier：例如「喘得很嚴重」不能自行產生 respiratory_distress=severe，「看起來不舒服」不能自行產生 ill_appearing，也不得自行判定 shock、cardiac_chest_pain_suspected、high_risk_injury_mechanism 或 pain_location_class。只有患者明確提供可觀察事實、數值、既有診斷/狀態時才可抽對應 evidence。
-  23. insect_sting_exposure 與 injury_region 只可在 current_user_text 有直接、逐字支持時抽取；不得從症狀推測暴露原因或受傷部位。
+  17. 同一次 Turn Interpretation 必須完成 TTAS evidence 掃描。請逐一對照下方「目前 production 可執行的 TTAS evidence catalog」與 current_user_text。凡本輪患者原文直接支持的 evidence，都必須輸出；即使同一個事實已經同時出現在 semantic_extractions，也不可因此省略 ttas_evidence。
+  18. catalog 的 label_zh / meaning_zh 是語意概念，不是固定關鍵字清單。患者可以使用不同自然說法；只要語意直接等價，而且 source_text 能逐字在 current_user_text 找到，即可抽取。不得只因出現相似字詞就硬套欄位。
+  19. 每筆 ttas_evidence 只能包含 field、value、semantic_status、confidence、source_text。field 只能從下方 catalog 選；value 必須符合該 field 的 type。semantic_status 只能是 available、unknown、ambiguous。
+  20. source_text 必須是本輪 current_user_text 中直接支持該 evidence 的最短連續逐字片段。不得從 prior history 製造本輪 TTAS evidence。若同一事實也出現在 semantic_extractions，兩邊可以引用相同或各自最精準的 source_text。
+  21. confidence 只表示「患者本輪原文有多明確支持這個結構化事實」，不是病情嚴重度、疾病機率、TTAS level 機率，也不是你對醫療判斷的信心。原文沒有直接支持時，不得用較低 confidence 猜一筆 evidence。
+  22. 缺少資料時不要補正常值。使用者未提供血壓、心率、SpO2、GCS、體溫、血糖、年齡、懷孕週數等資料時，不得假設正常，也不得自行換算。使用者明確表示不知道時，才可在有 grounded source_text 的前提下輸出 unknown / ambiguous。
+  23. 不得把患者的主觀形容或一般症狀升格成臨床 modifier、病因或診斷。特別是：不得從「喘得很嚴重」自行產生 respiratory_distress=severe；不得自行判定 shock、ill_appearing、cardiac_chest_pain_suspected、high_risk_injury_mechanism 或 pain_location_class；不得由「昏迷／叫不醒」自行估算 GCS；不得由「很燒／很冷」自行估算 temperature_c；不得由眼痛／灼熱反推化學暴露；不得由紅疹／腫脹反推昆蟲螫傷；不得由疼痛／腫脹反推 open fracture 或骨折／脫臼變形。只有 current_user_text 直接支持 catalog 所描述的結構化事實時才可輸出。
+  24. age_years / age_months 只在本輪有逐字年齡證據時抽取；若 Backend 另有 trusted profile，該 trusted fact 由 Backend 合併，不需要你猜。
+  25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
+
+目前 production 可執行的 TTAS evidence catalog：
+{json.dumps(prompt_evidence_catalog, ensure_ascii=False, indent=2)}
 
 以下是 clinical pending-answer contract 範例。實際 answered_intent 必須換成目前 pending_clarification_intent 的原值，所有 source_text 必須來自實際 current_user_text。請只輸出 JSON，不要輸出其他文字：
 {{
@@ -597,5 +598,71 @@ def _build_symptom_collection_prompt(
     "answer_confidence": 0.98,
     "answer_assertion": "absent"
   }},
+  "ttas_evidence": []
+}}
+
+TTAS 正例（同一句可同時產生 semantic_extractions 與 ttas_evidence）：
+current_user_text:「剛剛清潔劑濺到我的右眼，現在眼睛灼痛。」
+{{
+  "semantic_extractions": [
+    {{
+      "field": "symptom",
+      "normalized_value": "灼痛",
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.99,
+      "source_text": "眼睛灼痛",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "body_part",
+      "normalized_value": "右眼",
+      "semantic_status": "available",
+      "assertion": null,
+      "confidence": 0.99,
+      "source_text": "右眼",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }}
+  ],
+  "pending_answer": null,
+  "ttas_evidence": [
+    {{
+      "field": "chemical_eye_injury",
+      "value": true,
+      "semantic_status": "available",
+      "confidence": 0.99,
+      "source_text": "清潔劑濺到我的右眼"
+    }}
+  ]
+}}
+
+TTAS 反例（不能從症狀倒推暴露原因）：
+current_user_text:「我的右眼很痛。」
+{{
+  "semantic_extractions": [
+    {{
+      "field": "symptom",
+      "normalized_value": "眼痛",
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.99,
+      "source_text": "右眼很痛",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "body_part",
+      "normalized_value": "右眼",
+      "semantic_status": "available",
+      "assertion": null,
+      "confidence": 0.99,
+      "source_text": "右眼",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }}
+  ],
+  "pending_answer": null,
   "ttas_evidence": []
 }}"""

@@ -21,6 +21,7 @@ class TTASRuleSet:
     ruleset_id: str
     sources: dict[str, dict[str, Any]]
     evidence_fields: dict[str, dict[str, Any]]
+    prompt_evidence_catalog: dict[str, dict[str, Any]]
     rules: tuple[dict[str, Any], ...]
 
     @property
@@ -59,11 +60,86 @@ def _validate_predicate(predicate: object, fields: set[str], *, enabled: bool) -
         raise TTASRuleLoadError(f"TTAS {operator} predicate has an invalid arity")
 
 
+def _predicate_fields(predicate: dict[str, Any]) -> set[str]:
+    operator, value = next(iter(predicate.items()))
+    if operator in {"all", "any"}:
+        fields: set[str] = set()
+        for item in value:
+            fields.update(_predicate_fields(item))
+        return fields
+    return {value[0]}
+
+
+def _build_prompt_evidence_catalog(
+    catalog_data: dict[str, Any],
+    *,
+    evidence_fields: dict[str, dict[str, Any]],
+    enabled_fields: set[str],
+    sources: dict[str, dict[str, Any]],
+    rule_ids: set[str],
+) -> dict[str, dict[str, Any]]:
+    catalog_fields = catalog_data.get("fields")
+    if not isinstance(catalog_fields, dict):
+        raise TTASRuleLoadError("TTAS evidence catalog fields must contain an object")
+
+    required_text_fields = {"label_zh", "meaning_zh", "do_not_infer_zh", "evidence_kind"}
+    for field, entry in catalog_fields.items():
+        if not isinstance(field, str) or not field.strip() or not isinstance(entry, dict):
+            raise TTASRuleLoadError("TTAS evidence catalog contains an invalid field entry")
+        if field not in evidence_fields:
+            raise TTASRuleLoadError(f"TTAS evidence catalog references unknown schema field: {field}")
+        if any(not isinstance(entry.get(key), str) or not entry[key].strip() for key in required_text_fields):
+            raise TTASRuleLoadError(f"TTAS evidence catalog entry is incomplete: {field}")
+        source_basis = entry.get("source_basis")
+        if not isinstance(source_basis, dict):
+            raise TTASRuleLoadError(f"TTAS evidence catalog source_basis is invalid: {field}")
+        source_ids = source_basis.get("source_ids")
+        catalog_rule_ids = source_basis.get("rule_ids")
+        if (
+            not isinstance(source_ids, list)
+            or not source_ids
+            or any(not isinstance(source_id, str) or source_id not in sources for source_id in source_ids)
+        ):
+            raise TTASRuleLoadError(f"TTAS evidence catalog has an unknown source_id: {field}")
+        if (
+            not isinstance(catalog_rule_ids, list)
+            or not catalog_rule_ids
+            or any(not isinstance(rule_id, str) or rule_id not in rule_ids for rule_id in catalog_rule_ids)
+        ):
+            raise TTASRuleLoadError(f"TTAS evidence catalog has an unknown rule_id: {field}")
+
+    missing = enabled_fields.difference(catalog_fields)
+    if missing:
+        raise TTASRuleLoadError(
+            "Enabled TTAS fields are missing from the evidence catalog: " + ", ".join(sorted(missing))
+        )
+
+    return {
+        field: {
+            "field": field,
+            "type": _evidence_type(evidence_fields[field], field),
+            "label_zh": catalog_fields[field]["label_zh"],
+            "meaning_zh": catalog_fields[field]["meaning_zh"],
+            "do_not_infer_zh": catalog_fields[field]["do_not_infer_zh"],
+            "evidence_kind": catalog_fields[field]["evidence_kind"],
+        }
+        for field in sorted(enabled_fields)
+    }
+
+
+def _evidence_type(spec: dict[str, Any], field: str) -> str:
+    type_spec = spec.get("type")
+    if not isinstance(type_spec, str) or not type_spec.strip():
+        raise TTASRuleLoadError(f"TTAS evidence schema field has no valid type: {field}")
+    return type_spec
+
+
 @lru_cache(maxsize=1)
 def load_ttas_rules() -> TTASRuleSet:
     manifest = _read_json("source_manifest.json")
     schema = _read_json("ttas_evidence_schema.json")
     rule_data = _read_json("active_rules.json")
+    catalog_data = _read_json("evidence_catalog.json")
 
     source_items = manifest.get("sources")
     field_items = schema.get("fields")
@@ -111,7 +187,24 @@ def load_ttas_rules() -> TTASRuleSet:
     ruleset_id = rule_data.get("ruleset_id")
     if not isinstance(ruleset_id, str) or not ruleset_id.strip():
         raise TTASRuleLoadError("TTAS ruleset_id is missing")
-    return TTASRuleSet(ruleset_id, sources, field_items, tuple(rules))
+    enabled_fields: set[str] = set()
+    for rule in rules:
+        if rule["implementation_status"] == "enabled":
+            enabled_fields.update(_predicate_fields(rule["predicate"]))
+    prompt_evidence_catalog = _build_prompt_evidence_catalog(
+        catalog_data,
+        evidence_fields=field_items,
+        enabled_fields=enabled_fields,
+        sources=sources,
+        rule_ids=seen_rule_ids,
+    )
+    return TTASRuleSet(
+        ruleset_id=ruleset_id,
+        sources=sources,
+        evidence_fields=field_items,
+        prompt_evidence_catalog=prompt_evidence_catalog,
+        rules=tuple(rules),
+    )
 
 
 def clear_ttas_rule_cache() -> None:

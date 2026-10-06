@@ -1,0 +1,19 @@
+{
+  "package_id": "phase5_ttas_extraction_redesign_package_v1",
+  "prepared_for": "New_Android_Backend Phase 5",
+  "files": [
+    "README.md",
+    "PHASE5_TTAS_EXTRACTION_REDESIGN.md",
+    "TURN_INTERPRETER_TTAS_PROMPT_SPEC.md",
+    "SOURCE_BASIS.md",
+    "evidence_catalog.json",
+    "TEST_MATRIX.md",
+    "CODEX_REPLACEMENT_INSTRUCTIONS.md"
+  ],
+  "scope": "TTAS evidence extraction recall / prompt catalog only",
+  "medical_authority": "Current New_Android_Backend source_manifest.json + active_rules.json + ttas_evidence_schema.json",
+  "legacy_role": "AILogic/triage.py is phrasing reference only; not medical authority",
+  "no_keyword_nlu": true,
+  "no_second_fixed_ai_call": true,
+  "ai_may_set_ttas_level": false
+}
