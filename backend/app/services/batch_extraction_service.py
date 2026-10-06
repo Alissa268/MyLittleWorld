@@ -5,6 +5,7 @@ import logging
 import re
 from dataclasses import dataclass, field
 from typing import Any
+from unittest import case
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
@@ -28,8 +29,10 @@ from app.services.rule_engine import (
     apply_user_message,
     missing_checklist_fields,
 )
-from app.services.semantic_normalizer import SESSION_ALIASES
-
+from app.services.semantic_normalizer import (
+    SESSION_ALIASES,
+    normalize_preferred_sessions,
+)
 logger = logging.getLogger(__name__)
 
 _ALLOWED_FIELDS = frozenset((*CHECKLIST_FIELD_ORDER, "onset", "accompanying_symptoms"))
@@ -266,14 +269,27 @@ async def extract_batch_answers(
     })
     if semantic_sources:
         all_missing = missing_checklist_fields(case, apply_attempt_fallback=False)
-        for source_text in tuple(semantic_sources.values()):
-            for field_name in all_missing:
-                if (
-                    field_name != "red_flags"
-                    and field_name not in semantic_sources
-                    and plausible_semantic_target(field_name, source_text)
-                ):
-                    semantic_sources[field_name] = source_text
+    for source_text in tuple(semantic_sources.values()):
+        for field_name in all_missing:
+            if field_name == "red_flags" or field_name in semantic_sources:
+                continue
+
+            # preferred_sessions 作為「順便抽取的額外欄位」時，
+            # 必須先有明確掛號／看診時段語境。
+            # 例如「下午比較嚴重」「下午開始頭痛」中的下午
+            # 是症狀時間，不是掛號偏好。
+            #
+            # 注意：如果目前使用者本來就在回答 preferred_sessions，
+            # 該欄位已經存在 semantic_sources，因此不會進到這個 guard。
+            # 所以直接回答「下午」仍然可以正常接受。
+            if (
+                field_name == "preferred_sessions"
+                and normalize_preferred_sessions(source_text, None) is None
+            ):
+                continue
+
+            if plausible_semantic_target(field_name, source_text):
+                semantic_sources[field_name] = source_text
     ai_targets = list(semantic_sources)
     if not ai_targets:
         outcome.unresolved_fields = [

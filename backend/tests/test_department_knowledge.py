@@ -16,8 +16,8 @@ from app.services.department_knowledge import (
 )
 
 
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
-PACKAGE_DIR = PROJECT_ROOT / "phase3_kb_migration_package"
+BACKEND_ROOT = Path(__file__).resolve().parents[1]
+PACKAGE_DIR = BACKEND_ROOT / "AI_Source" / "phase3_kb_migration_package"
 REQUIRED_PACKAGE_FILES = {
     "phase3_kb_migration_763.json",
     "phase3_kb_migration_763.csv",
@@ -39,14 +39,15 @@ def mappings():
 
 
 def test_required_reviewed_migration_package_is_complete():
-    if not PACKAGE_DIR.is_dir():
-        pytest.skip("reviewed Phase 3 migration package is not present in this checkout")
+    assert PACKAGE_DIR.is_dir(), (
+        f"reviewed Phase 3 migration package is missing: {PACKAGE_DIR}"
+    )
     assert REQUIRED_PACKAGE_FILES <= {path.name for path in PACKAGE_DIR.iterdir()}
 
-
 def test_production_knowledge_has_exact_package_lineage(knowledge, mappings):
-    if not PACKAGE_DIR.is_dir():
-        pytest.skip("reviewed Phase 3 migration package is not present in this checkout")
+    assert PACKAGE_DIR.is_dir(), (
+        f"reviewed Phase 3 migration package is missing: {PACKAGE_DIR}"
+    )
     sources, records = knowledge
     source_package = json.loads(
         (PACKAGE_DIR / "phase3_source_registry.json").read_text(encoding="utf-8")
