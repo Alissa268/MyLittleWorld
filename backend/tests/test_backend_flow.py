@@ -365,12 +365,17 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         def fake_slots(*_, **__):
             return [
                 {
+                    "dept_id": 7,
                     "parent_dept": "外科系",
                     "child_dept": "一般骨科",
+                    "doctor_id": f"fixture-doctor-{i}",
                     "doctor": f"測試醫師{i}",
-                    "date": today + timedelta(days=i),
+                    "schedule_id": f"fixture-schedule-{i}",
+                    "date": today + timedelta(days=i + 1),
                     "session": "上午",
                     "slot": f"32{i:02d}診",
+                    "status": "open",
+                    "source": "test_fixture",
                     "visit_type": "初診",
                 }
                 for i in range(8)
@@ -440,9 +445,13 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
                     "dept_id": 1333,
                     "parent_dept": "五官科",
                     "child_dept": "耳科",
+                    "doctor_id": "fixture-ear-doctor",
                     "doctor": "耳科醫師",
+                    "schedule_id": "fixture-ear-schedule",
                     "date": date.today() + timedelta(days=1),
                     "session": "上午",
+                    "status": "open",
+                    "source": "test_fixture",
                     "visit_type": "初診",
                 }
             ]
@@ -962,6 +971,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         days_until_monday = (7 - date.today().weekday()) % 7 or 7
         appointment_service.fetch_available_slots = lambda *_args, **_kwargs: [
             {
+                "dept_id": 7,
                 "parent_dept": "外科系",
                 "child_dept": "一般骨科",
                 "doctor_id": "fixture-doctor",

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
@@ -32,9 +33,10 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         followup_service.fetch_reference_doctors = self.original_fetch_doctors
 
     def test_original_doctor_available(self):
+        original_date = _future_date(14)
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
-            _row("原醫師", "2026-07-20", "上午"),
-            _row("替代醫師", "2026-07-21", "下午"),
+            _row("原醫師", original_date, "上午"),
+            _row("替代醫師", _future_date(15), "下午"),
         ]
 
         response = TestClient(app).post(
@@ -46,7 +48,9 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["recommendations"][0]["doctor"], "原醫師")
 
     def test_original_doctor_unavailable_does_not_use_same_department_alternative(self):
-        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [_row("替代醫師", "2026-07-21", "下午")]
+        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
+            _row("替代醫師", _future_date(15), "下午")
+        ]
 
         response = TestClient(app).post(
             "/followup/recommend",
@@ -113,7 +117,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
 
     def test_no_matching_availability_returns_empty_instead_of_open_rows(self):
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
-            _row("複診醫師", "2026-07-13", "上午")
+            _row("複診醫師", _future_weekday(0), "上午")
         ]
 
         response = TestClient(app).post(
@@ -135,10 +139,10 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["fallback_departments"], [])
 
     def test_return_visit_does_not_filter_by_schedule_visit_type(self):
-        initial = _row("原醫師", "2026-07-20", "上午")
+        initial = _row("原醫師", _future_date(14), "上午")
         initial["visit_type"] = "初診"
-        followup = _row("複診醫師", "2026-07-21", "下午")
-        blank = _row("空白類型醫師", "2026-07-22", "上午")
+        followup = _row("複診醫師", _future_date(15), "下午")
+        blank = _row("空白類型醫師", _future_date(16), "上午")
         blank["visit_type"] = ""
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [initial, followup, blank]
 
@@ -159,9 +163,13 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["recommendations"][0]["visit_type"], "初診")
 
     def test_preferred_date_does_not_match_another_same_weekday(self):
+        preferred_date = _future_weekday(0, weeks_ahead=2)
+        next_same_weekday = (
+            date.fromisoformat(preferred_date) + timedelta(days=7)
+        ).isoformat()
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
-            _row("指定日期醫師", "2026-08-24", "下午"),
-            _row("其他週一醫師", "2026-08-31", "下午"),
+            _row("指定日期醫師", preferred_date, "下午"),
+            _row("其他週一醫師", next_same_weekday, "下午"),
         ]
 
         response = TestClient(app).post(
@@ -171,7 +179,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "parentDept": "外科系",
                 "original_doctor": "指定日期醫師",
                 "availability": {
-                    "preferred_dates": ["2026-08-24"],
+                    "preferred_dates": [preferred_date],
                     "preferred_sessions": ["下午"],
                 },
             },
@@ -180,13 +188,17 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(
             [item["date"] for item in response.json()["recommendations"]],
-            ["2026-08-24"],
+            [preferred_date],
         )
 
     def test_original_doctor_without_requested_date_slot_returns_empty(self):
+        preferred_date = _future_weekday(0, weeks_ahead=2)
+        next_same_weekday = (
+            date.fromisoformat(preferred_date) + timedelta(days=7)
+        ).isoformat()
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
-            _row("醫師A", "2026-08-31", "下午"),
-            _row("醫師B", "2026-08-24", "下午"),
+            _row("醫師A", next_same_weekday, "下午"),
+            _row("醫師B", preferred_date, "下午"),
         ]
 
         response = TestClient(app).post(
@@ -196,7 +208,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "parentDept": "外科系",
                 "original_doctor": "醫師A",
                 "availability": {
-                    "preferred_dates": ["2026-08-24"],
+                    "preferred_dates": [preferred_date],
                     "preferred_sessions": ["下午"],
                 },
             },
@@ -206,7 +218,9 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["recommendations"], [])
 
     def test_return_visit_requires_exact_doctor_department_date_and_session(self):
-        exact = _row("原醫師", "2026-09-07", "下午")
+        exact_date = _future_weekday(0, weeks_ahead=2)
+        other_date = (date.fromisoformat(exact_date) + timedelta(days=7)).isoformat()
+        exact = _row("原醫師", exact_date, "下午")
         exact.update(
             doctor_id="101",
             dept_id="7",
@@ -215,7 +229,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         )
         wrong_doctor_id = {**exact, "doctor_id": "102", "schedule_id": "wrong-doctor"}
         wrong_dept_id = {**exact, "dept_id": "8", "schedule_id": "wrong-department"}
-        wrong_date = {**exact, "date": "2026-09-14", "schedule_id": "wrong-date"}
+        wrong_date = {**exact, "date": other_date, "schedule_id": "wrong-date"}
         wrong_session = {**exact, "session": "上午", "schedule_id": "wrong-session"}
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
             wrong_doctor_id,
@@ -233,7 +247,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "original_doctor": "原醫師",
                 "original_doctor_id": 101,
                 "availability": {
-                    "preferred_dates": ["2026-09-07"],
+                    "preferred_dates": [exact_date],
                     "preferred_sessions": ["下午"],
                 },
             },
@@ -248,14 +262,15 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.json()["recommendations"][0]["visit_type"], "初診")
 
     def test_original_doctor_after_first_thirty_rows_is_still_found(self):
+        preferred_date = _future_weekday(0, weeks_ahead=2)
         rows = [
-            _row(f"其他醫師{index}", "2026-08-24", "下午")
+            _row(f"其他醫師{index}", preferred_date, "下午")
             for index in range(30)
-        ] + [_row("原醫師", "2026-08-24", "下午")]
+        ] + [_row("原醫師", preferred_date, "下午")]
 
         def fetch_without_early_limit(*_args, **kwargs):
             self.assertNotIn("schedule_visit_type", kwargs)
-            self.assertEqual(kwargs["preferred_dates"], ["2026-08-24"])
+            self.assertEqual(kwargs["preferred_dates"], [preferred_date])
             return rows
 
         followup_service.fetch_return_visit_slots = fetch_without_early_limit
@@ -267,7 +282,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "parentDept": "外科系",
                 "original_doctor": "原醫師",
                 "availability": {
-                    "preferred_dates": ["2026-08-24"],
+                    "preferred_dates": [preferred_date],
                     "preferred_sessions": ["下午"],
                 },
             },
@@ -280,8 +295,9 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_followup_recommendation_can_generate_script(self):
+        preferred_date = _future_weekday(0, weeks_ahead=2)
         followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
-            _row("回診醫師", "2026-08-24", "下午")
+            _row("回診醫師", preferred_date, "下午")
         ]
         client = TestClient(app)
 
@@ -291,7 +307,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "childDept": "一般骨科",
                 "parentDept": "外科系",
                 "original_doctor": "回診醫師",
-                "availability": {"preferred_dates": ["2026-08-24"]},
+                "availability": {"preferred_dates": [preferred_date]},
             },
         )
         self.assertEqual(recommend_response.status_code, 200)
@@ -329,7 +345,9 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
         case = TriageCase(case_id="case_followup")
         case.department_result = DepartmentResult(parentDept="外科系", childDept="一般骨科")
         save_case(case)
-        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [_row("原醫師", "2026-07-20", "上午")]
+        followup_service.fetch_return_visit_slots = lambda *_args, **_kwargs: [
+            _row("原醫師", _future_date(14), "上午")
+        ]
 
         response = TestClient(app).post(
             "/followup/recommend",
@@ -341,6 +359,8 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
 
 
     def test_end_to_end_followup_recommendation_route(self):
+        original_date = _future_date(14)
+        alternate_date = _future_date(15)
         case = TriageCase(case_id="case_followup_e2e")
         case.department_result = DepartmentResult(parentDept="Surgery", childDept="Orthopedics")
         save_case(case)
@@ -351,7 +371,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "doctor_id": "101",
                 "doctor": "Original Doctor",
                 "schedule_id": "followup-1",
-                "date": "2026-07-20",
+                "date": original_date,
                 "session": "morning",
                 "slot": "Room 3201",
                 "room": "Room 3201",
@@ -367,7 +387,7 @@ class FollowupServiceTest(unittest.IsolatedAsyncioTestCase):
                 "doctor_id": "102",
                 "doctor": "Same Dept Doctor",
                 "schedule_id": "followup-2",
-                "date": "2026-07-21",
+                "date": alternate_date,
                 "session": "afternoon",
                 "slot": "Room 3202",
                 "room": "Room 3202",
@@ -413,6 +433,18 @@ def _row(doctor: str, date: str, session: str, source: str = "db"):
         "visit_type": "複診",
         "dept_id": "7",
     }
+
+
+def _future_date(days: int) -> str:
+    return (date.today() + timedelta(days=days)).isoformat()
+
+
+def _future_weekday(weekday: int, *, weeks_ahead: int = 1) -> str:
+    days_until = (weekday - date.today().weekday()) % 7
+    if days_until == 0:
+        days_until = 7
+    days_until += 7 * (max(weeks_ahead, 1) - 1)
+    return (date.today() + timedelta(days=days_until)).isoformat()
 
 
 if __name__ == "__main__":

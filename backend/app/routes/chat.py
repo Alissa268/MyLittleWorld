@@ -63,6 +63,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
         batch_enabled = bool(settings.batch_triage_enabled)
+        urgent_terminal_at_request_start = _is_urgent_terminal(case)
         safety_check_turn = case.conversation_state.clarification_status == "safety_check"
         free_text_request = not req.answers and _request_has_text_input(req)
         free_text_flow = free_text_request or (case.conversation_state.free_text_mode and not req.answers)
@@ -230,6 +231,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             )
 
         _sync_confirmation_flags(case)
+        preserve_urgent_terminal = bool(
+            urgent_terminal_at_request_start and not has_user_input
+        )
     if has_user_input and (not req.answers or safety_check_turn):
         if semantic_ai_allowed:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
@@ -257,7 +261,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     and not has_user_input
     and case.conversation_state.is_complete
 )
-        if not confirmation_only:
+        if not confirmation_only and not preserve_urgent_terminal:
             case.triage = apply_ttas_evaluation(case)
             if not conversational_mode and not case.triage.warning_required:
                 next_question = None if batch_mode else next_question_for(case)
@@ -284,7 +288,9 @@ async def chat(req: ChatRequest) -> TriageResult:
         ai_attempted_override = (
             False if conversational_mode else merge_ai_next_question(case, ai_suggestion)
         )
-        if confirmation_only:
+        if preserve_urgent_terminal:
+            pass
+        elif confirmation_only:
             pass
         elif conversational_mode:
             ttas_immediate = ttas_requires_immediate_action(case)

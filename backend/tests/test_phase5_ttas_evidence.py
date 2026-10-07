@@ -5,7 +5,7 @@ import importlib
 import json
 import math
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 from fastapi.testclient import TestClient
 
@@ -495,10 +495,15 @@ def test_urgent_reply_uses_backend_fallback_without_ai_when_warning_is_empty() -
     save_case(case)
 
     ai_reply = AsyncMock(side_effect=AssertionError("urgent warning must not use AI"))
+    ttas_evaluation = Mock(side_effect=AssertionError("stored urgent terminal must not be recomputed"))
     with patch.object(
         chat_route,
         "get_settings",
         return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+    ), patch.object(
+        chat_route,
+        "apply_ttas_evaluation",
+        new=ttas_evaluation,
     ), patch.object(chat_route, "generate_triage_reply", new=ai_reply):
         response = TestClient(app).post("/chat", json={"case_id": case.case_id})
 
@@ -507,6 +512,7 @@ def test_urgent_reply_uses_backend_fallback_without_ai_when_warning_is_empty() -
     assert result["conversation_state"]["stage"] == "done"
     assert result["conversation_state"]["is_complete"] is True
     assert result["reply"] == chat_route.URGENT_WARNING_FALLBACK
+    ttas_evaluation.assert_not_called()
     ai_reply.assert_not_awaited()
 
 

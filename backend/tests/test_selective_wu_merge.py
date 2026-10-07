@@ -88,7 +88,7 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNone(result)
 
-    def test_specialty_scoring_reason_has_explicit_basis(self):
+    def test_deterministic_specialty_fallback_is_neutral_without_keyword_inference(self):
         case = TriageCase(case_id="case_selective_reason")
         case.patient_input.symptom = "腹痛兩天"
         department = DepartmentResult(parentDept="內科系", childDept="胃腸肝膽科", confidence=0.8)
@@ -101,10 +101,11 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
 
         score = score_doctor_deterministically(case, department, row)
 
-        self.assertGreaterEqual(score.score, 0.7)
-        self.assertIn("症狀", score.reason)
-        self.assertIn("醫師專長", score.reason)
-        self.assertIn("腸胃", score.reason)
+        self.assertEqual(score.score, 0.5)
+        self.assertEqual(score.source, "neutral")
+        self.assertIn("中性值 0.50", score.reason)
+        self.assertNotIn("腹痛", score.reason)
+        self.assertNotIn("腸胃", score.reason)
 
     def test_same_day_multi_session_availability_is_parsed(self):
         result = normalize_message("週三下午和晚上都可以")
