@@ -19,6 +19,8 @@ from app.services.negation_utils import strip_negated_red_flags
 from app.services.schedule_filter import (
     TAIPEI_ZONE,
     normalize_session,
+    open_rows,
+    parse_date,
     row_is_available,
     row_matches_availability,
     select_feasible_rows,
@@ -27,20 +29,15 @@ from app.services.schedule_filter import (
     weekday_label as schedule_weekday_label,
 )
 from app.services.specialty_scoring import SpecialtyScore, score_doctor_specialties
-
-logger = logging.getLogger(__name__)
-
-_COMPACT_SPECIALTY_CONCEPTS: tuple[tuple[tuple[str, ...], tuple[str, ...]], ...] = (
-    (("頭痛", "頭暈", "眩暈"), ("頭痛", "神經", "腦", "眩暈")),
-    (("鼻", "鼻塞", "流鼻水", "鼻炎", "鼻竇"), ("鼻", "鼻炎", "鼻塞", "鼻竇", "過敏")),
-    (("耳", "耳痛", "耳鳴", "聽力"), ("耳", "耳鳴", "聽力", "中耳")),
-    (("膝", "關節", "走路", "爬樓梯", "扭傷", "骨"), ("膝", "關節", "骨科", "運動傷害", "復健")),
-    (("皮膚", "紅疹", "癢", "濕疹"), ("皮膚", "紅疹", "過敏", "濕疹", "蕁麻疹")),
-    (("胸痛", "心悸"), ("心臟", "心律", "冠心", "心血管")),
-    (("咳", "喘", "呼吸困難"), ("胸腔", "肺", "呼吸", "氣喘")),
-    (("腹", "胃", "腸", "腹瀉", "嘔吐"), ("腸胃", "胃腸", "消化", "肝膽", "腹")),
+from app.services.time_preference_service import (
+    describe_time_match,
+    filter_hard_exclusions,
+    pareto_time_tiers,
+    row_time_identity,
+    search_horizon_days,
 )
 
+logger = logging.getLogger(__name__)
 
 class DepartmentResolutionError(ValueError):
     """The selected department cannot be tied to one canonical DB record."""
@@ -148,16 +145,36 @@ async def recommend_appointments(
     )
     primary_slots = fetch_available_slots(
         department.childDept,
-        search_days=21,
+        search_days=search_horizon_days(
+            case.availability,
+            reference_date=current_taipei_datetime.date(),
+        ),
         max_slots=None,
         schedule_visit_type=schedule_visit_type,
         department_id=department.dept_id,
     )
     slots = _filter_slots_by_department(primary_slots, department.childDept, department.dept_id)
     slots = _filter_slots_by_visit_type(slots, canonical_visit_type)
+    slots = _formal_schedule_rows(slots, department.dept_id)
 
     doctor_preference = case.preferences.doctor_preference or "不限"
-    feasible_slots, relaxed_by_date = select_feasible_rows(slots, case.availability, doctor_preference)
+    if case.availability.time_preferences:
+        feasible_slots = filter_hard_exclusions(
+            open_rows(slots, now=current_taipei_datetime),
+            case.availability,
+        )
+        if doctor_preference and doctor_preference != "不限":
+            doctor_rows = [
+                row for row in feasible_slots
+                if doctor_preference in str(row.get("doctor") or "")
+            ]
+            if doctor_rows:
+                feasible_slots = doctor_rows
+        relaxed_by_date = False
+    else:
+        feasible_slots, relaxed_by_date = select_feasible_rows(
+            slots, case.availability, doctor_preference, now=current_taipei_datetime
+        )
     _log_schedule_filter_counts(
         primary_slots=primary_slots,
         visit_slots=slots,
@@ -166,6 +183,7 @@ async def recommend_appointments(
         now=current_taipei_datetime,
     )
     ranking_slots = feasible_slots
+    time_tiers = pareto_time_tiers(ranking_slots, case.availability)
     specialty_scores = await score_doctor_specialties(case, department, ranking_slots)
 
     specialty_first = _build_recommendations(
@@ -175,6 +193,7 @@ async def recommend_appointments(
         prefix="rec_s",
         specialty_first=True,
         specialty_scores=specialty_scores,
+        time_tiers=time_tiers,
         relaxed_by_date=relaxed_by_date,
     )
     time_first = _build_recommendations(
@@ -184,6 +203,7 @@ async def recommend_appointments(
         prefix="rec_t",
         specialty_first=False,
         specialty_scores=specialty_scores,
+        time_tiers=time_tiers,
         relaxed_by_date=relaxed_by_date,
     )
 
@@ -248,15 +268,25 @@ def _log_schedule_filter_counts(
 
 
 def _filter_slots_by_department(slots: list[dict], child_dept: str, dept_id: int | None = None) -> list[dict]:
-    requested = str(child_dept or "").strip()
+    del child_dept
+    if dept_id is None:
+        return []
     return [
         slot
         for slot in slots
-        if (
-            str(slot.get("dept_id") or "").strip() == str(dept_id)
-            if dept_id is not None and slot.get("dept_id") is not None
-            else str(slot.get("child_dept") or slot.get("childDept") or "").strip() == requested
-        )
+        if _optional_int(slot.get("dept_id")) == dept_id
+    ]
+
+
+def _formal_schedule_rows(slots: list[dict], dept_id: int) -> list[dict]:
+    """Only SQL rows with complete canonical navigation identity may be recommended."""
+    return [
+        slot for slot in slots
+        if _optional_int(slot.get("dept_id")) == dept_id
+        and bool(str(slot.get("doctor_id") or "").strip())
+        and bool(str(slot.get("schedule_id") or "").strip())
+        and parse_date(slot.get("date")) is not None
+        and bool(normalize_session(slot.get("session")))
     ]
 
 
@@ -394,29 +424,33 @@ def _build_recommendations(
     prefix: str,
     specialty_first: bool,
     specialty_scores: dict[str, SpecialtyScore] | None = None,
+    time_tiers: dict[str, int] | None = None,
     relaxed_by_date: bool = False,
 ) -> list[RecommendationItem]:
     specialty_scores = specialty_scores or {}
+    time_tiers = time_tiers or pareto_time_tiers(slots, case.availability)
     sorted_slots = sorted(
         slots,
-        key=lambda slot: _ranking_key(slot, case, specialty_scores, specialty_first),
+        key=lambda slot: _ranking_key(slot, specialty_scores, time_tiers, specialty_first),
     )
     items = []
     seen = set()
     for slot in sorted_slots:
-        key = (slot.get("parent_dept"), slot.get("child_dept"), slot.get("doctor"), slot.get("date"), slot.get("session"))
+        key = str(slot.get("schedule_id") or "")
         if key in seen:
             continue
         seen.add(key)
 
         specialty = _score_for_slot(slot, specialty_scores)
-        time_score = _time_score(slot, case)
+        time_tier = time_tiers.get(row_time_identity(slot), 0)
+        time_score = 1.0 if time_tier == 0 else 0.0
         score = weighted_score(specialty.score, time_score, specialty_first)
         if specialty_first:
             reasons = _score_explanation_reasons(
                 case=case,
                 slot=slot,
                 specialty=specialty,
+                time_tier=time_tier,
                 time_score=time_score,
                 total_score=score,
                 specialty_first=True,
@@ -426,6 +460,7 @@ def _build_recommendations(
                 case=case,
                 slot=slot,
                 specialty=specialty,
+                time_tier=time_tier,
                 time_score=time_score,
                 total_score=score,
                 specialty_first=False,
@@ -448,7 +483,7 @@ def _build_recommendations(
             date=_date_to_text(slot["date"]),
             session=normalize_session(slot.get("session", "")) or str(slot.get("session", "")),
             slot=str(slot.get("slot") or slot.get("room") or ""),
-            doctor_id=str(slot.get("doctor_id") or slot.get("doctor") or ""),
+            doctor_id=str(slot.get("doctor_id") or ""),
             schedule_id=str(slot.get("schedule_id") or ""),
             session_time=session_range(slot.get("session", "")),
             room=str(slot.get("room") or slot.get("slot") or ""),
@@ -456,7 +491,7 @@ def _build_recommendations(
             specialty_tags=str(slot.get("specialty_tags") or ""),
             specialty_score=round(specialty.score, 2),
             time_score=round(time_score, 2),
-            match_reason=specialty.reason if specialty.source == "ai" else None,
+            match_reason=None,
             score=score,
             reasons=reasons,
             rank=len(items) + 1,
@@ -473,32 +508,32 @@ def _build_recommendations(
 
 def _ranking_key(
     slot: dict,
-    case: TriageCase,
     specialty_scores: dict[str, SpecialtyScore],
+    time_tiers: dict[str, int],
     specialty_first: bool,
 ) -> tuple:
     specialty = _score_for_slot(slot, specialty_scores)
-    time_score = _time_score(slot, case)
-    total_score = weighted_score(specialty.score, time_score, specialty_first)
+    time_tier = time_tiers.get(row_time_identity(slot), 0)
     date_key = _date_sort_key(slot.get("date"))
     session_key = _session_rank(slot.get("session", ""))
-    doctor_key = str(slot.get("doctor") or "")
+    doctor_key = str(slot.get("doctor_id") or "")
+    schedule_key = str(slot.get("schedule_id") or "")
     if specialty_first:
         return (
-            -total_score,
             -specialty.score,
-            -time_score,
+            time_tier,
             date_key,
             session_key,
             doctor_key,
+            schedule_key,
         )
     return (
-        -total_score,
-        -time_score,
-        -specialty.score,
+        time_tier,
         date_key,
         session_key,
+        -specialty.score,
         doctor_key,
+        schedule_key,
     )
 
 
@@ -507,16 +542,13 @@ def weighted_score(
     time_score: float,
     specialty_first: bool,
 ) -> float:
-    """Return the displayed and ranked 0-100 weighted score."""
-    if specialty_first:
-        total = (specialty_score * 0.70) + (time_score * 0.30)
-    else:
-        total = (time_score * 0.70) + (specialty_score * 0.30)
-    return round(total * 100.0, 2)
+    """Compatibility display value only; recommendation order never uses this value."""
+    display = specialty_score if specialty_first else time_score
+    return round(display * 100.0, 2)
 
 
 def _score_for_slot(slot: dict, specialty_scores: dict[str, SpecialtyScore]) -> SpecialtyScore:
-    key = str(slot.get("doctor_id") or slot.get("doctor") or "")
+    key = str(slot.get("doctor_id") or "")
     if key in specialty_scores:
         return specialty_scores[key]
     return SpecialtyScore(
@@ -524,91 +556,37 @@ def _score_for_slot(slot: dict, specialty_scores: dict[str, SpecialtyScore]) -> 
         doctor=str(slot.get("doctor") or ""),
         childDept=str(slot.get("child_dept") or ""),
         score=0.5,
-        reason="醫師專長資料不足，不列為主要依據；專長分數使用中性值 0.50",
+        reason="AI 專長語意評分未完整可用，專長分數使用中性值 0.50",
+        source="neutral",
     )
-
-
-def _time_score(slot: dict, case: TriageCase) -> float:
-    dates = [value for value in case.availability.preferred_dates if value]
-    days = [day for day in case.availability.preferred_days if day]
-    sessions = [normalize_session(session) for session in case.availability.preferred_sessions if session]
-    sessions = [session for session in sessions if session]
-    if not dates and not days and not sessions:
-        return 0.8
-
-    row_date = _date_to_text(slot.get("date"))
-    row_day = schedule_weekday_label(slot.get("date"))
-    row_session = normalize_session(slot.get("session"))
-    date_or_day_match = row_date in dates if dates else (bool(days) and row_day in days)
-    session_match = bool(sessions) and row_session in sessions
-
-    if (dates or days) and sessions:
-        if date_or_day_match and session_match:
-            return 1.0
-        if date_or_day_match:
-            return 0.72
-        if session_match:
-            return 0.64
-        return 0.35
-    if dates or days:
-        return 1.0 if date_or_day_match else 0.45
-    return 1.0 if session_match else 0.45
 
 
 def _score_explanation_reasons(
     case: TriageCase,
     slot: dict,
     specialty: SpecialtyScore,
+    time_tier: int,
     time_score: float,
     total_score: float,
     specialty_first: bool,
 ) -> list[str]:
     return [
         _department_basis_reason(case, slot),
-        _time_basis_reason(case, slot, time_score),
+        _time_basis_reason(case, slot, time_tier),
         _status_basis_reason(slot),
         _specialty_basis_reason(slot, specialty),
-        _sorting_basis_reason(specialty, time_score, total_score, specialty_first),
+        _sorting_basis_reason(specialty, time_tier, total_score, specialty_first),
     ]
 
 
 def _compact_recommendation_reason(case: TriageCase, slot: dict) -> str:
-    matched_specialties = _matched_specialty_items(case, slot)
-    if matched_specialties:
-        return f"醫師專長相符：{'、'.join(matched_specialties[:2])}"
-    if (
-        case.availability.preferred_days or case.availability.preferred_sessions
-    ) and row_matches_availability(slot, case.availability):
+    if case.availability.time_preferences:
+        return describe_time_match(slot, case.availability)
+    if (case.availability.preferred_days or case.availability.preferred_sessions) and row_matches_availability(
+        slot, case.availability
+    ):
         return "符合您的方便看診時段"
     return "符合目前推薦科別"
-
-
-def _matched_specialty_items(case: TriageCase, slot: dict) -> list[str]:
-    raw = str(slot.get("specialty_tags") or slot.get("specialty") or "").strip()
-    if not raw:
-        return []
-    items = [item.strip() for item in re.split(r"[、,，;；/|\n]+", raw) if item.strip()]
-    patient_text = _case_text(case)
-    active_specialty_terms: set[str] = set()
-    for symptom_terms, specialty_terms in _COMPACT_SPECIALTY_CONCEPTS:
-        if any(term in patient_text for term in symptom_terms):
-            active_specialty_terms.update(specialty_terms)
-    if not active_specialty_terms:
-        return []
-
-    ranked: list[tuple[int, int, str]] = []
-    for index, item in enumerate(items):
-        score = sum(1 for term in active_specialty_terms if term in item)
-        if score:
-            ranked.append((-score, index, _compact_specialty_text(item)))
-    ranked.sort()
-    return list(dict.fromkeys(item for _, _, item in ranked if item))[:2]
-
-
-def _compact_specialty_text(value: str, max_len: int = 22) -> str:
-    text = re.sub(r"(?:之|的)?診斷與治療", "診療", str(value or "").strip())
-    text = re.sub(r"\s+", "", text)
-    return text if len(text) <= max_len else f"{text[:max_len]}…"
 
 
 def _department_basis_reason(case: TriageCase, slot: dict) -> str:
@@ -627,14 +605,16 @@ def _department_basis_reason(case: TriageCase, slot: dict) -> str:
     return f"科別依據：{'；'.join(evidence)}，目前建議科別為 {child_dept or '目前科別'}{department_reason}"
 
 
-def _time_basis_reason(case: TriageCase, slot: dict, time_score: float) -> str:
+def _time_basis_reason(case: TriageCase, slot: dict, time_tier: int) -> str:
     preferred = _availability_text(case)
     slot_time = _slot_time_text(slot)
+    if case.availability.time_preferences:
+        return f"時間依據：{describe_time_match(slot, case.availability)}；Schedule 為 {slot_time}；Pareto preference tier={time_tier}"
     if not case.availability.preferred_dates and not case.availability.preferred_days and not case.availability.preferred_sessions:
-        return f"時間依據：使用者未指定日期/時段偏好，Schedule 為 {slot_time}，時間分數使用可掛號中性值 {time_score:.2f}"
+        return f"時間依據：使用者未指定日期/時段偏好，Schedule 為 {slot_time}"
     if row_matches_availability(slot, case.availability):
-        return f"時間依據：使用者偏好 {preferred}；Schedule 為 {slot_time}，符合偏好，時間分數 {time_score:.2f}"
-    return f"時間依據：使用者偏好 {preferred}；Schedule 為 {slot_time}，未完全符合偏好，時間分數 {time_score:.2f}"
+        return f"時間依據：使用者偏好 {preferred}；Schedule 為 {slot_time}，符合偏好"
+    return f"時間依據：使用者偏好 {preferred}；Schedule 為 {slot_time}，未完全符合偏好"
 
 
 def _status_basis_reason(slot: dict) -> str:
@@ -647,27 +627,26 @@ def _status_basis_reason(slot: dict) -> str:
 def _specialty_basis_reason(slot: dict, specialty: SpecialtyScore) -> str:
     tags = str(slot.get("specialty_tags") or slot.get("specialty") or "").strip()
     if not tags:
-        return "專長依據：doctor.specialty_tags 無資料，專長資料不足，不列為主要依據；專長分數使用中性值 0.50"
-    if specialty.score <= 0.5:
-        return f"專長依據：doctor.specialty_tags={_short_text(tags)}，未命中主要症狀，專長資料不列為主要依據；{specialty.reason}"
-    return f"專長依據：doctor.specialty_tags={_short_text(tags)}；{specialty.reason}"
+        return "專長依據：SQL specialty_tags 無資料，專長分數使用中性值 0.50"
+    return (
+        f"專長依據：SQL specialty_tags={_short_text(tags)}；"
+        f"specialty semantic relevance={specialty.score:.2f}；{specialty.reason}"
+    )
 
 
 def _sorting_basis_reason(
     specialty: SpecialtyScore,
-    time_score: float,
+    time_tier: int,
     total_score: float,
     specialty_first: bool,
 ) -> str:
     if specialty_first:
-        formula = "specialty_score*70 + time_score*30"
-        label = "專長優先欄"
+        order = "specialty_score → time preference tier → datetime → doctor_id"
     else:
-        formula = "time_score*70 + specialty_score*30"
-        label = "時間優先欄"
+        order = "time preference tier → datetime → specialty_score → doctor_id"
     return (
-        f"排序依據：目前排序依科別、時間、專長分數加權；{label}使用 {formula}，"
-        f"Specialty score={specialty.score:.2f}，Time score={time_score:.2f}，總分={total_score:.2f}，非醫學精準分數"
+        f"排序依據：{order}；specialty_score={specialty.score:.2f}；"
+        f"time preference tier={time_tier}；相容顯示 score={total_score:.2f}，不作排序權重"
     )
 
 

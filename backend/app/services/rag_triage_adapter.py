@@ -4,6 +4,7 @@ import json
 import logging
 import math
 from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 from app.config import get_settings
@@ -12,6 +13,7 @@ from app.schemas import (
     PendingAnswerInterpretation,
     SemanticExtraction,
     TTASEvidence,
+    TimePreference,
     TriageCase,
     UrgencyResult,
 )
@@ -22,6 +24,8 @@ from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
 from app.services.ttas_rule_loader import TTASRuleLoadError, load_ttas_rules
+from app.services.schedule_filter import TAIPEI_ZONE
+from app.services.time_preference_service import apply_time_preferences, validate_and_resolve_time_preferences
 
 logger = logging.getLogger(__name__)
 _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
@@ -43,6 +47,7 @@ class RagTriageSuggestion:
     semantic_extractions: list[SemanticExtraction] | None = None
     pending_answer: PendingAnswerInterpretation | None = None
     ttas_evidence: list[TTASEvidence] | None = None
+    time_preferences: list[TimePreference] | None = None
     interpretation_complete: bool = True
 
 
@@ -54,7 +59,10 @@ async def refine_case_with_ai(
         logger.info("rag_triage_adapter refine skipped: AI key is not configured")
         return None
 
-    prompt = _build_symptom_collection_prompt(case, user_sources or [])
+    if user_sources is None:
+        user_sources = [message.content for message in case.history_records if message.role == "user"]
+    time_preference_reference_date = datetime.now(TAIPEI_ZONE).date()
+    prompt = _build_symptom_collection_prompt(case, user_sources)
     try:
         raw = await complete_prompt(prompt)
         logger.debug("rag_triage_adapter response received case_id=%s chars=%s", case.case_id, len(raw))
@@ -67,13 +75,16 @@ async def refine_case_with_ai(
         )
         return None
 
-    if user_sources is None:
-        user_sources = [message.content for message in case.history_records if message.role == "user"]
     pending_intent = _active_pending_intent(case)
     semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
         data,
         pending_intent=pending_intent,
         user_sources=user_sources,
+    )
+    time_preferences = validate_and_resolve_time_preferences(
+        data.get("time_preferences"),
+        user_sources=user_sources,
+        reference_date=time_preference_reference_date,
     )
     if _answered_without_clinical_evidence(
         pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
@@ -91,6 +102,11 @@ async def refine_case_with_ai(
                 repair_data,
                 pending_intent=pending_intent,
                 user_sources=user_sources,
+            )
+            time_preferences = validate_and_resolve_time_preferences(
+                repair_data.get("time_preferences"),
+                user_sources=user_sources,
+                reference_date=time_preference_reference_date,
             )
         except Exception as exc:
             logger.warning(
@@ -121,6 +137,8 @@ async def refine_case_with_ai(
         )
     if ttas_evidence:
         apply_ttas_evidence(case, ttas_evidence)
+    if time_preferences:
+        apply_time_preferences(case.availability, time_preferences)
 
     reply = data.get("reply")
     return RagTriageSuggestion(
@@ -129,6 +147,7 @@ async def refine_case_with_ai(
         semantic_extractions=semantic_extractions,
         pending_answer=pending_answer,
         ttas_evidence=ttas_evidence,
+        time_preferences=time_preferences,
     )
 
 
@@ -477,7 +496,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
         original_prompt
         + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
         "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
-        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer 與 ttas_evidence。"
+        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence 與 time_preferences。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
         " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
     )
@@ -543,6 +562,7 @@ def _build_symptom_collection_prompt(
   23. 不得把患者的主觀形容或一般症狀升格成臨床 modifier、病因或診斷。特別是：不得從「喘得很嚴重」自行產生 respiratory_distress=severe；不得自行判定 shock、ill_appearing、cardiac_chest_pain_suspected、high_risk_injury_mechanism 或 pain_location_class；不得由「昏迷／叫不醒」自行估算 GCS；不得由「很燒／很冷」自行估算 temperature_c；不得由眼痛／灼熱反推化學暴露；不得由紅疹／腫脹反推昆蟲螫傷；不得由疼痛／腫脹反推 open fracture 或骨折／脫臼變形。只有 current_user_text 直接支持 catalog 所描述的結構化事實時才可輸出。
   24. age_years / age_months 只在本輪有逐字年齡證據時抽取；若 Backend 另有 trusted profile，該 trusted fact 由 Backend 合併，不需要你猜。
   25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
+  26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
 
 目前 production 可執行的 TTAS evidence catalog：
 {json.dumps(prompt_evidence_catalog, ensure_ascii=False, indent=2)}
@@ -598,7 +618,8 @@ def _build_symptom_collection_prompt(
     "answer_confidence": 0.98,
     "answer_assertion": "absent"
   }},
-  "ttas_evidence": []
+  "ttas_evidence": [],
+  "time_preferences": []
 }}
 
 TTAS 正例（同一句可同時產生 semantic_extractions 與 ttas_evidence）：
@@ -635,7 +656,8 @@ current_user_text:「剛剛清潔劑濺到我的右眼，現在眼睛灼痛。�
       "confidence": 0.99,
       "source_text": "清潔劑濺到我的右眼"
     }}
-  ]
+  ],
+  "time_preferences": []
 }}
 
 TTAS 反例（不能從症狀倒推暴露原因）：
@@ -664,5 +686,6 @@ current_user_text:「我的右眼很痛。」
     }}
   ],
   "pending_answer": null,
-  "ttas_evidence": []
+  "ttas_evidence": [],
+  "time_preferences": []
 }}"""

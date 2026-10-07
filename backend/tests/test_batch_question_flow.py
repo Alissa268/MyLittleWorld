@@ -1488,13 +1488,15 @@ class _ProviderStatusError(RuntimeError):
 
 
 def _slot(doctor: str, visit_type: str) -> dict:
+    today = date.today()
+    next_monday = today + timedelta(days=(7 - today.weekday()) % 7 or 7)
     return {
         "parent_dept": "外科系",
         "child_dept": "一般骨科",
         "doctor_id": doctor,
         "doctor": doctor,
         "schedule_id": f"s-{doctor}",
-        "date": "2026-08-24",
+        "date": next_monday.isoformat(),
         "session": "上午",
         "slot": "3201診",
         "room": "3201診",

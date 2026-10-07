@@ -3,7 +3,7 @@ from __future__ import annotations
 from datetime import date
 from enum import Enum
 from typing import Any, Dict, List, Literal, Optional
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class ConversationStage(str, Enum):
@@ -42,6 +42,20 @@ EvidenceAssertion = Literal["present", "absent", "uncertain"]
 PendingAnswerStatus = Literal["answered", "partial", "unclear"]
 TTASSemanticStatus = Literal["available", "unknown", "ambiguous"]
 TTASEvaluationStatus = Literal["matched", "insufficient_information"]
+TimePreferenceKind = Literal[
+    "date",
+    "date_range",
+    "relative_week",
+    "relative_weekday",
+    "weekday",
+    "weekday_group",
+    "session",
+]
+TimePreferenceRelation = Literal["exclude", "prefer", "acceptable"]
+TimePreferenceWeekday = Literal[
+    "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday",
+]
+TimePreferenceSession = Literal["morning", "afternoon", "evening"]
 
 
 class QuestionItem(BaseModel):
@@ -157,11 +171,73 @@ class PatientInput(BaseModel):
     age_months: Optional[float] = None
 
 
+class TimePreference(BaseModel):
+    """Grounded time meaning plus its deterministic calendar resolution."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    kind: TimePreferenceKind
+    relation: TimePreferenceRelation
+    priority: Optional[int] = Field(default=None, ge=1, le=99)
+    source_text: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0)
+    date_value: Optional[str] = None
+    start_date: Optional[str] = None
+    end_date: Optional[str] = None
+    week_offset: Optional[int] = Field(default=None, ge=0, le=52)
+    weekday: Optional[TimePreferenceWeekday] = None
+    weekdays: List[TimePreferenceWeekday] = Field(default_factory=list)
+    session: Optional[TimePreferenceSession] = None
+    reference_date: Optional[str] = None
+    resolved_dates: List[str] = Field(default_factory=list)
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def validate_confidence_type(cls, value: object) -> object:
+        if type(value) not in {int, float}:
+            raise ValueError("confidence must be a finite number")
+        return value
+
+    @field_validator("date_value", "start_date", "end_date", "reference_date")
+    @classmethod
+    def validate_optional_date(cls, value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        return date.fromisoformat(value).isoformat()
+
+    @field_validator("resolved_dates")
+    @classmethod
+    def validate_resolved_dates(cls, values: List[str]) -> List[str]:
+        return [date.fromisoformat(value).isoformat() for value in values]
+
+    @model_validator(mode="after")
+    def validate_shape(self) -> "TimePreference":
+        if self.relation == "exclude" and self.priority is not None:
+            raise ValueError("exclude preferences cannot carry priority")
+        if self.relation != "exclude" and self.priority is None:
+            raise ValueError("prefer and acceptable preferences require priority")
+        required = {
+            "date": bool(self.date_value),
+            "date_range": bool(self.start_date and self.end_date),
+            "relative_week": self.week_offset is not None,
+            "relative_weekday": self.week_offset is not None and self.weekday is not None,
+            "weekday": self.weekday is not None,
+            "weekday_group": bool(self.weekdays),
+            "session": self.session is not None,
+        }
+        if not required[self.kind]:
+            raise ValueError(f"missing value for time preference kind {self.kind}")
+        if self.start_date and self.end_date and self.start_date > self.end_date:
+            raise ValueError("date range start must not be after end")
+        return self
+
+
 class Availability(BaseModel):
     preferred_dates: List[str] = Field(default_factory=list)
     preferred_days: List[str] = Field(default_factory=list)
     preferred_sessions: List[str] = Field(default_factory=list)
     can_take_leave: bool = False
+    time_preferences: List[TimePreference] = Field(default_factory=list)
     semantic_status: Dict[str, str] = Field(default_factory=dict)
     confidence: Dict[str, float] = Field(default_factory=dict)
 

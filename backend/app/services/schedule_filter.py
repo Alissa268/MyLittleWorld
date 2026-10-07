@@ -142,6 +142,8 @@ def session_is_open(row: dict[str, Any], now: datetime | None = None) -> bool:
     row_date = parse_date(row.get("date"))
     if row_date is None:
         return True
+    if row_date < local_now.date():
+        return False
     if row_date != local_now.date():
         return True
 
