@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import math
 from dataclasses import dataclass
+from time import monotonic
 from typing import Any, Iterable
 
 from app.config import get_settings
@@ -17,6 +19,7 @@ TAG_NEUTRAL_SCORE = 0.5
 DEFAULT_BATCH_SIZE = 10
 DEFAULT_MAX_CANDIDATES = 40
 DEFAULT_MAX_BATCHES = 4
+DEFAULT_TOTAL_TIMEOUT_SECONDS = 12.0
 
 
 async def complete_prompt(prompt: str) -> str:
@@ -80,10 +83,22 @@ async def score_doctor_specialties(
         return neutral
 
     accepted: dict[str, float] = {}
+    total_budget = _positive_float_setting(
+        settings,
+        "doctor_scoring_total_timeout_seconds",
+        DEFAULT_TOTAL_TIMEOUT_SECONDS,
+    )
+    deadline = monotonic() + total_budget
     try:
         for start in range(0, len(scorable), batch_size):
+            remaining = deadline - monotonic()
+            if remaining <= 0:
+                raise TimeoutError("doctor-scoring total time budget exhausted")
             batch = scorable[start:start + batch_size]
-            raw = await complete_prompt(_build_scoring_prompt(case, department, batch))
+            raw = await asyncio.wait_for(
+                complete_prompt(_build_scoring_prompt(case, department, batch)),
+                timeout=remaining,
+            )
             batch_scores = _validate_complete_batch(_parse_json_object(raw), batch)
             if batch_scores is None:
                 raise ValueError("incomplete or invalid doctor-scoring batch")
@@ -146,6 +161,13 @@ def _neutral_score(row: dict[str, Any], department: DepartmentResult) -> Special
 def _positive_setting(settings: object, name: str, default: int) -> int:
     value = getattr(settings, name, default)
     return int(value) if type(value) is int and value > 0 else default
+
+
+def _positive_float_setting(settings: object, name: str, default: float) -> float:
+    value = getattr(settings, name, default)
+    if type(value) not in {int, float} or not math.isfinite(float(value)) or float(value) <= 0:
+        return default
+    return min(float(value), 60.0)
 
 
 def _ai_available() -> bool:

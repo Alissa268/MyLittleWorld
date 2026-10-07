@@ -564,6 +564,19 @@ def _build_symptom_collection_prompt(
   25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
   26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
 
+時間偏好正例：
+current_user_text:「這週都不行，最好下週二，不然下週三，其他平日也可以。上午不行，下午最好。」
+time_preferences 應輸出：
+[
+  {{"kind":"relative_week","relation":"exclude","priority":null,"week_offset":0,"source_text":"這週都不行","confidence":0.99}},
+  {{"kind":"relative_weekday","relation":"prefer","priority":1,"week_offset":1,"weekday":"tuesday","source_text":"最好下週二","confidence":0.99}},
+  {{"kind":"relative_weekday","relation":"prefer","priority":2,"week_offset":1,"weekday":"wednesday","source_text":"不然下週三","confidence":0.99}},
+  {{"kind":"weekday_group","relation":"acceptable","priority":3,"weekdays":["monday","tuesday","wednesday","thursday","friday"],"source_text":"其他平日也可以","confidence":0.98}},
+  {{"kind":"session","relation":"exclude","priority":null,"session":"morning","source_text":"上午不行","confidence":0.99}},
+  {{"kind":"session","relation":"prefer","priority":1,"session":"afternoon","source_text":"下午最好","confidence":0.99}}
+]
+此 AI 輸出不可包含 reference_date 或 resolved_dates；兩者由 Backend 在接受 grounded preference 時寫入。
+
 目前 production 可執行的 TTAS evidence catalog：
 {json.dumps(prompt_evidence_catalog, ensure_ascii=False, indent=2)}
 

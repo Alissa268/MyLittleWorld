@@ -38,6 +38,12 @@ class Settings(BaseSettings):
     doctor_scoring_batch_size: int = Field(default=10, ge=1, le=25, alias="DOCTOR_SCORING_BATCH_SIZE")
     doctor_scoring_max_candidates: int = Field(default=40, ge=1, le=100, alias="DOCTOR_SCORING_MAX_CANDIDATES")
     doctor_scoring_max_batches: int = Field(default=4, ge=1, le=10, alias="DOCTOR_SCORING_MAX_BATCHES")
+    doctor_scoring_total_timeout_seconds: float = Field(
+        default=12.0,
+        gt=0,
+        le=60,
+        alias="DOCTOR_SCORING_TOTAL_TIMEOUT_SECONDS",
+    )
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
     deploy_mode: str = Field(default="local", alias="DEPLOY_MODE")
     disable_local_embedding: bool = Field(default=False, alias="DISABLE_LOCAL_EMBEDDING")

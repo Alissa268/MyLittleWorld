@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
-from datetime import date
+from datetime import date, datetime
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -11,6 +11,7 @@ from app.services import rag_triage_adapter
 from app.services.time_preference_service import (
     filter_hard_exclusions,
     pareto_time_tiers,
+    select_effective_feasible_rows,
     validate_and_resolve_time_preferences,
 )
 
@@ -141,6 +142,134 @@ def test_time_preferences_share_the_existing_turn_interpreter_call():
     provider.assert_awaited_once()
     assert result is not None and len(result.time_preferences or []) == 6
     assert len(case.availability.time_preferences) == 6
+    assert all(item.reference_date for item in case.availability.time_preferences)
+    assert case.availability.time_preferences[1].resolved_dates
+
+
+def test_turn_interpreter_prompt_contains_complete_time_preference_example():
+    case = TriageCase(case_id="phase6-time-prompt")
+    prompt = rag_triage_adapter._build_symptom_collection_prompt(case, [COMPLEX_TEXT])
+    example = prompt.split("時間偏好正例：", 1)[1].split("此 AI 輸出不可包含", 1)[0]
+    assert '"kind":"relative_week"' in example
+    assert '"weekday":"tuesday"' in example
+    assert '"weekday":"wednesday"' in example
+    assert '"kind":"weekday_group"' in example
+    assert '"session":"morning"' in example
+    assert '"session":"afternoon"' in example
+    assert "reference_date" not in example
+    assert "resolved_dates" not in example
+
+
+def test_new_date_dimension_keeps_legacy_session_dimension():
+    availability = Availability(
+        preferred_sessions=["下午"],
+        time_preferences=[_preference(
+            kind="relative_weekday", relation="prefer", priority=1,
+            week_offset=1, weekday="tuesday", resolved_dates=["2026-10-13"],
+        )],
+    )
+    rows = [
+        _row("tue-am", "2026-10-13", "上午"),
+        _row("tue-pm", "2026-10-13", "下午"),
+        _row("wed-pm", "2026-10-14", "下午"),
+    ]
+    feasible, relaxed = select_effective_feasible_rows(rows, availability, now=_now())
+    assert relaxed is False
+    assert [row["schedule_id"] for row in feasible] == ["tue-pm", "wed-pm"]
+    tiers = pareto_time_tiers(feasible, availability)
+    assert tiers["tue-pm"] < tiers["wed-pm"]
+
+
+def test_new_session_dimension_keeps_legacy_date_dimension():
+    availability = Availability(
+        preferred_days=["週三"],
+        time_preferences=[_preference(
+            kind="session", relation="prefer", priority=1, session="afternoon",
+        )],
+    )
+    rows = [
+        _row("tue-pm", "2026-10-13", "下午"),
+        _row("wed-am", "2026-10-14", "上午"),
+        _row("wed-pm", "2026-10-14", "下午"),
+    ]
+    feasible, _ = select_effective_feasible_rows(rows, availability, now=_now())
+    assert [row["schedule_id"] for row in feasible] == ["wed-am", "wed-pm"]
+    tiers = pareto_time_tiers(feasible, availability)
+    assert tiers["wed-pm"] < tiers["wed-am"]
+
+
+def test_new_session_dimension_supersedes_legacy_session_dimension():
+    availability = Availability(
+        preferred_sessions=["下午"],
+        time_preferences=[_preference(
+            kind="session", relation="prefer", priority=1, session="morning",
+        )],
+    )
+    rows = [
+        _row("am", "2026-10-13", "上午"),
+        _row("pm", "2026-10-13", "下午"),
+    ]
+    feasible, _ = select_effective_feasible_rows(rows, availability, now=_now())
+    assert [row["schedule_id"] for row in feasible] == ["am", "pm"]
+    tiers = pareto_time_tiers(feasible, availability)
+    assert tiers["am"] < tiers["pm"]
+
+
+def test_new_hard_exclusion_is_not_relaxed_by_can_take_leave():
+    availability = Availability(
+        preferred_sessions=["上午"],
+        can_take_leave=True,
+        time_preferences=[_preference(
+            kind="session", relation="exclude", priority=None, session="morning",
+        )],
+    )
+    rows = [
+        _row("am", "2026-10-13", "上午"),
+        _row("pm", "2026-10-13", "下午"),
+    ]
+    feasible, _ = select_effective_feasible_rows(rows, availability, now=_now())
+    assert [row["schedule_id"] for row in feasible] == ["pm"]
+
+
+def test_empty_new_preferences_preserve_legacy_feasibility_exactly():
+    availability = Availability(preferred_sessions=["下午"], can_take_leave=False)
+    rows = [
+        _row("am", "2026-10-13", "上午"),
+        _row("pm", "2026-10-13", "下午"),
+    ]
+    feasible, relaxed = select_effective_feasible_rows(rows, availability, now=_now())
+    assert relaxed is False
+    assert [row["schedule_id"] for row in feasible] == ["pm"]
+
+
+def test_new_preferences_only_keep_existing_pareto_behavior():
+    availability = Availability(time_preferences=[
+        _preference(
+            kind="relative_weekday", relation="prefer", priority=1,
+            week_offset=1, weekday="tuesday", resolved_dates=["2026-10-13"],
+        ),
+        _preference(kind="session", relation="prefer", priority=1, session="afternoon"),
+    ])
+    rows = [
+        _row("tue-am", "2026-10-13", "上午"),
+        _row("wed-pm", "2026-10-14", "下午"),
+    ]
+    feasible, _ = select_effective_feasible_rows(rows, availability, now=_now())
+    assert feasible == rows
+    assert pareto_time_tiers(feasible, availability) == {"tue-am": 0, "wed-pm": 0}
+
+
+def _preference(**kwargs) -> TimePreference:
+    return TimePreference(
+        source_text="測試結構化時間偏好",
+        confidence=0.99,
+        reference_date="2026-10-07",
+        **kwargs,
+    )
+
+
+def _now() -> datetime:
+    return datetime(2026, 10, 7, 9, 0)
 
 
 def _row(schedule_id: str, value: str, session: str) -> dict:

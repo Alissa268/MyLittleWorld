@@ -19,11 +19,9 @@ from app.services.negation_utils import strip_negated_red_flags
 from app.services.schedule_filter import (
     TAIPEI_ZONE,
     normalize_session,
-    open_rows,
     parse_date,
     row_is_available,
     row_matches_availability,
-    select_feasible_rows,
     session_is_open,
     session_range,
     weekday_label as schedule_weekday_label,
@@ -31,10 +29,10 @@ from app.services.schedule_filter import (
 from app.services.specialty_scoring import SpecialtyScore, score_doctor_specialties
 from app.services.time_preference_service import (
     describe_time_match,
-    filter_hard_exclusions,
     pareto_time_tiers,
     row_time_identity,
     search_horizon_days,
+    select_effective_feasible_rows,
 )
 
 logger = logging.getLogger(__name__)
@@ -158,23 +156,12 @@ async def recommend_appointments(
     slots = _formal_schedule_rows(slots, department.dept_id)
 
     doctor_preference = case.preferences.doctor_preference or "不限"
-    if case.availability.time_preferences:
-        feasible_slots = filter_hard_exclusions(
-            open_rows(slots, now=current_taipei_datetime),
-            case.availability,
-        )
-        if doctor_preference and doctor_preference != "不限":
-            doctor_rows = [
-                row for row in feasible_slots
-                if doctor_preference in str(row.get("doctor") or "")
-            ]
-            if doctor_rows:
-                feasible_slots = doctor_rows
-        relaxed_by_date = False
-    else:
-        feasible_slots, relaxed_by_date = select_feasible_rows(
-            slots, case.availability, doctor_preference, now=current_taipei_datetime
-        )
+    feasible_slots, relaxed_by_date = select_effective_feasible_rows(
+        slots,
+        case.availability,
+        doctor_preference,
+        now=current_taipei_datetime,
+    )
     _log_schedule_filter_counts(
         primary_slots=primary_slots,
         visit_slots=slots,

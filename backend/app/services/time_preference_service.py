@@ -1,14 +1,21 @@
 from __future__ import annotations
 
 import math
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from typing import Any, Iterable
 
 from pydantic import ValidationError
 
 from app.schemas import Availability, TimePreference
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
-from app.services.schedule_filter import normalize_session, parse_date
+from app.services.schedule_filter import (
+    normalize_session,
+    open_rows,
+    parse_date,
+    row_matches_availability,
+    select_feasible_rows,
+    weekday_label,
+)
 
 
 WEEKDAY_INDEX = {
@@ -25,6 +32,9 @@ SESSION_VALUE = {
     "afternoon": "下午",
     "evening": "晚上",
 }
+DATE_KINDS = frozenset({
+    "date", "date_range", "relative_week", "relative_weekday", "weekday", "weekday_group",
+})
 _PROPOSAL_KEYS = {
     "kind",
     "relation",
@@ -96,25 +106,87 @@ def filter_hard_exclusions(
     return [row for row in rows if not any(_matches(row, item) for item in exclusions)]
 
 
+def has_new_date_dimension(availability: Availability) -> bool:
+    return any(item.kind in DATE_KINDS for item in availability.time_preferences)
+
+
+def has_new_session_dimension(availability: Availability) -> bool:
+    return any(item.kind == "session" for item in availability.time_preferences)
+
+
+def select_effective_feasible_rows(
+    rows: Iterable[dict[str, Any]],
+    availability: Availability,
+    doctor_preference: str = "",
+    now: datetime | None = None,
+) -> tuple[list[dict[str, Any]], bool]:
+    """Apply new/legacy availability per dimension without relaxing new exclusions."""
+    rows = list(rows)
+    if not availability.time_preferences:
+        return select_feasible_rows(rows, availability, doctor_preference, now=now)
+
+    candidates = filter_hard_exclusions(open_rows(rows, now=now), availability)
+    doctor = str(doctor_preference or "").strip()
+    has_doctor = bool(doctor and doctor != "不限")
+    doctor_rows = [
+        row for row in candidates if doctor in str(row.get("doctor") or "")
+    ] if has_doctor else candidates
+    preferred_source = doctor_rows if doctor_rows else candidates
+
+    legacy_dimensions = Availability(
+        preferred_dates=([] if has_new_date_dimension(availability) else availability.preferred_dates),
+        preferred_days=([] if has_new_date_dimension(availability) else availability.preferred_days),
+        preferred_sessions=([] if has_new_session_dimension(availability) else availability.preferred_sessions),
+        can_take_leave=availability.can_take_leave,
+    )
+    has_legacy_constraint = bool(
+        legacy_dimensions.preferred_dates
+        or legacy_dimensions.preferred_days
+        or legacy_dimensions.preferred_sessions
+    )
+    if not has_legacy_constraint:
+        return preferred_source, False
+
+    matched = [
+        row for row in preferred_source
+        if row_matches_availability(row, legacy_dimensions)
+    ]
+    if matched:
+        return matched, False
+    if availability.can_take_leave:
+        return preferred_source, True
+    return [], False
+
+
 def time_preference_vectors(
     rows: Iterable[dict[str, Any]],
     availability: Availability,
 ) -> dict[str, tuple[int, int]]:
     rows = list(rows)
+    new_date_dimension = has_new_date_dimension(availability)
+    new_session_dimension = has_new_session_dimension(availability)
     date_preferences = [
         item for item in availability.time_preferences
-        if item.relation != "exclude" and item.kind != "session"
-    ]
+        if item.relation != "exclude" and item.kind in DATE_KINDS
+    ] if new_date_dimension else []
     session_preferences = [
         item for item in availability.time_preferences
         if item.relation != "exclude" and item.kind == "session"
-    ]
+    ] if new_session_dimension else []
     max_date = max((item.priority or 0 for item in date_preferences), default=-1)
     max_session = max((item.priority or 0 for item in session_preferences), default=-1)
     vectors: dict[str, tuple[int, int]] = {}
     for index, row in enumerate(rows):
-        date_rank = _dimension_rank(row, date_preferences, max_date)
-        session_rank = _dimension_rank(row, session_preferences, max_session)
+        date_rank = (
+            _dimension_rank(row, date_preferences, max_date)
+            if new_date_dimension
+            else _legacy_date_rank(row, availability)
+        )
+        session_rank = (
+            _dimension_rank(row, session_preferences, max_session)
+            if new_session_dimension
+            else _legacy_session_rank(row, availability)
+        )
         vectors[_row_identity(row, index)] = (date_rank, session_rank)
     return vectors
 
@@ -193,6 +265,26 @@ def _dimension_rank(
         return 0
     matches = [item.priority for item in preferences if _matches(row, item) and item.priority]
     return min(matches) if matches else max_priority + 1
+
+
+def _legacy_date_rank(row: dict[str, Any], availability: Availability) -> int:
+    preferred_dates = {str(value).strip() for value in availability.preferred_dates if str(value).strip()}
+    preferred_days = {str(value).strip() for value in availability.preferred_days if str(value).strip()}
+    if not preferred_dates and not preferred_days:
+        return 0
+    row_date = parse_date(row.get("date"))
+    if preferred_dates:
+        return 0 if row_date and row_date.isoformat() in preferred_dates else 1
+    return 0 if weekday_label(row.get("date")) in preferred_days else 1
+
+
+def _legacy_session_rank(row: dict[str, Any], availability: Availability) -> int:
+    preferred = {
+        normalize_session(value) for value in availability.preferred_sessions if normalize_session(value)
+    }
+    if not preferred:
+        return 0
+    return 0 if normalize_session(row.get("session")) in preferred else 1
 
 
 def _matches(row: dict[str, Any], preference: TimePreference) -> bool:

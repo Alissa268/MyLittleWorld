@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -17,6 +18,7 @@ class AiSettings:
     doctor_scoring_batch_size = 10
     doctor_scoring_max_candidates = 40
     doctor_scoring_max_batches = 4
+    doctor_scoring_total_timeout_seconds = 12.0
 
 
 def _case() -> TriageCase:
@@ -133,6 +135,75 @@ def test_timeout_in_later_batch_neutralizes_earlier_successes():
         scores = asyncio.run(score_doctor_specialties(_case(), _department(), rows))
 
     assert provider.await_count == 2
+    assert all(item.score == 0.5 and item.source == "neutral" for item in scores.values())
+
+
+def test_total_budget_timeout_after_fast_first_batch_is_all_neutral():
+    rows = [_row("doc-0"), _row("doc-1")]
+    settings = SimpleNamespace(
+        cerebras_api_key="test-key",
+        ai_doctor_scoring_enabled=True,
+        doctor_scoring_batch_size=1,
+        doctor_scoring_max_candidates=2,
+        doctor_scoring_max_batches=2,
+        doctor_scoring_total_timeout_seconds=0.05,
+    )
+    calls = 0
+
+    async def provider(_prompt: str) -> str:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return _response(rows[:1])
+        await asyncio.sleep(0.2)
+        return _response(rows[1:])
+
+    with patch.object(specialty_scoring, "get_settings", return_value=settings), patch.object(
+        specialty_scoring, "complete_prompt", new=provider
+    ):
+        scores = asyncio.run(score_doctor_specialties(_case(), _department(), rows))
+
+    assert calls == 2
+    assert all(item.score == 0.5 and item.source == "neutral" for item in scores.values())
+
+
+def test_all_batches_inside_total_budget_keep_ai_scores():
+    rows = [_row(f"doc-{index}") for index in range(4)]
+    settings = SimpleNamespace(
+        cerebras_api_key="test-key",
+        ai_doctor_scoring_enabled=True,
+        doctor_scoring_batch_size=1,
+        doctor_scoring_max_candidates=4,
+        doctor_scoring_max_batches=4,
+        doctor_scoring_total_timeout_seconds=1.0,
+    )
+    provider = AsyncMock(side_effect=[_response([row]) for row in rows])
+    with patch.object(specialty_scoring, "get_settings", return_value=settings), patch.object(
+        specialty_scoring, "complete_prompt", new=provider
+    ):
+        scores = asyncio.run(score_doctor_specialties(_case(), _department(), rows))
+
+    assert provider.await_count == 4
+    assert all(item.source == "ai" for item in scores.values())
+
+
+def test_exhausted_budget_before_next_batch_does_not_call_provider_again():
+    rows = [_row("doc-0"), _row("doc-1")]
+    settings = SimpleNamespace(
+        cerebras_api_key="test-key",
+        ai_doctor_scoring_enabled=True,
+        doctor_scoring_batch_size=1,
+        doctor_scoring_max_candidates=2,
+        doctor_scoring_max_batches=2,
+        doctor_scoring_total_timeout_seconds=0.05,
+    )
+    provider = AsyncMock(return_value=_response(rows[:1]))
+    with patch.object(specialty_scoring, "get_settings", return_value=settings), patch.object(
+        specialty_scoring, "complete_prompt", new=provider
+    ), patch.object(specialty_scoring, "monotonic", side_effect=[0.0, 0.01, 0.06]):
+        scores = asyncio.run(score_doctor_specialties(_case(), _department(), rows))
+
+    provider.assert_awaited_once()
     assert all(item.score == 0.5 and item.source == "neutral" for item in scores.values())
 
 
