@@ -55,6 +55,8 @@ class MedicalRepository(
         private var currentVisitType: String? = null
         private var currentRecommendation: RecommendationItemDto? = null
         private var currentScript: ScriptResponseDto? = null
+        // Memory only: persisted history never proves that a Backend case still exists.
+        private val liveTriageResults = mutableMapOf<String, TriageResultDto>()
         private val chatMessages = mutableListOf<ChatMessage>()
         private val historyItems = mutableListOf<History>()
         private val _historyFlow = MutableStateFlow<List<History>>(emptyList())
@@ -165,7 +167,10 @@ class MedicalRepository(
 
     suspend fun confirmTriage(caseId: String): TriageResultDto =
         apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, confirmed = true))
-            .also(::consumeTriageResult)
+            .also { result ->
+                if (result.caseId != caseId) liveTriageResults.remove(caseId)
+                consumeTriageResult(result)
+            }
 
     suspend fun requestRevision(caseId: String): TriageResultDto =
         apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, revisionRequested = true))
@@ -199,13 +204,32 @@ class MedicalRepository(
                 recommendationId = recommendationId,
                 recommendation = recommendation
             )
-        ).also(::consumeScriptResponse)
+        ).also { response ->
+            if (response.isSuccess) {
+                require(currentCaseId == caseId) { "目前問診案件已變更，請重新選擇班表。" }
+                require(response.recommendationId == recommendationId &&
+                    (response.recommendation == null || response.recommendation.recommendationId == recommendationId)) {
+                    "重新確認的班表識別資料不一致，請重新選擇。"
+                }
+                if (recommendation != null && response.recommendation != null) {
+                    val updated = response.recommendation
+                    require(updated.scheduleId == recommendation.scheduleId &&
+                        updated.doctorId == recommendation.doctorId &&
+                        updated.deptId == recommendation.deptId && updated.date == recommendation.date &&
+                        accessibilitySession(updated.session) == accessibilitySession(recommendation.session)) {
+                        "重新確認的班表與所選診次不一致，請重新選擇。"
+                    }
+                }
+                if (response.recommendation == null) recommendation?.let(::selectRecommendation)
+            }
+            consumeScriptResponse(response)
+        }
 
     internal fun consumeScriptResponse(response: ScriptResponseDto) {
         if (response.isSuccess) {
             response.recommendation?.let(::selectRecommendation)
+            currentScript = response
         }
-        currentScript = response
     }
 
     fun beginTtsSession(): TtsSession {
@@ -278,7 +302,7 @@ class MedicalRepository(
         currentDepartment = null
 
         val history = getHistoryById(id) ?: return null
-        currentCaseId = history.id.takeIf { it.startsWith("case_") }
+        currentCaseId = history.id.takeIf { liveTriageResults.containsKey(it) }
         currentVisitType = history.visitType?.takeIf { it in CANONICAL_VISIT_TYPES }
         currentDepartment = history.typeTitle
             .takeIf {
@@ -286,9 +310,16 @@ class MedicalRepository(
                     it !in setOf("掛號導引", "AI 問診", "症狀評估中")
             }
             ?.let { buildVghDepartment(parentDept = "", childDept = it) }
+        liveTriageResults[id]?.let { result ->
+            (result.departmentResult ?: result.triageCase?.departmentResult)?.let {
+                currentDepartment = buildVghDepartment(it.parentDept, it.childDept)
+            }
+        }
         chatMessages.addAll(history.chatMessages)
         return history
     }
+
+    fun getLiveTriageResult(caseId: String): TriageResultDto? = liveTriageResults[caseId]
 
     fun saveToHistory(history: History) {
         loadHistoryIfNeeded()
@@ -302,6 +333,7 @@ class MedicalRepository(
     fun deleteHistory(id: String) {
         loadHistoryIfNeeded()
         historyItems.removeAll { it.id == id }
+        liveTriageResults.remove(id)
         persistHistory()
         _historyFlow.value = historyItems.toList()
     }
@@ -310,15 +342,17 @@ class MedicalRepository(
         historyId: String,
         summaryText: String,
         completed: Boolean,
-        doctorName: String? = null
+        doctorName: String? = null,
+        allowReopen: Boolean = false
     ) {
         val existing = getHistoryById(historyId)
-        val typeTitle = if (completed) currentDepartment?.clinicName ?: "掛號導引" else "AI 問診"
-        val canKeepRecommendationSnapshot = completed &&
-            existing?.status == HistoryStatus.COMPLETED &&
-            existing.typeTitle.trim() == typeTitle.trim()
+        val effectiveCompleted = completed || (!allowReopen && existing?.status == HistoryStatus.COMPLETED)
+        val typeTitle = if (effectiveCompleted) {
+            currentDepartment?.clinicName ?: existing?.typeTitle ?: "掛號導引"
+        } else "AI 問診"
+        val canKeepRecommendationSnapshot = effectiveCompleted && existing?.status == HistoryStatus.COMPLETED
         val recommendations = if (canKeepRecommendationSnapshot) {
-            existing.recommendations.filter { it.matchesDepartment(typeTitle) }
+            existing!!.recommendations
         } else {
             emptyList()
         }
@@ -327,9 +361,9 @@ class MedicalRepository(
             date = existing?.date ?: todayText(),
             typeTitle = typeTitle,
             summaryText = summaryText.ifBlank { "問診紀錄" },
-            status = if (completed) HistoryStatus.COMPLETED else HistoryStatus.UNCOMPLETED,
+            status = if (effectiveCompleted) HistoryStatus.COMPLETED else HistoryStatus.UNCOMPLETED,
             chatMessages = chatMessages.toList(),
-            completedAt = if (completed) existing?.completedAt ?: completionTimeText() else null,
+            completedAt = if (effectiveCompleted) existing?.completedAt ?: completionTimeText() else null,
             recommendations = recommendations,
             selectedRecommendationId = existing?.selectedRecommendationId
                 ?.takeIf { selectedId -> recommendations.any { it.recommendationId == selectedId } },
@@ -382,20 +416,11 @@ class MedicalRepository(
         currentCaseId?.let { caseId ->
             updateHistory(caseId) { history ->
                 val snapshot = item.toHistoryRecommendation()
-                if (snapshot.matchesDepartment(history.typeTitle)) {
-                    history.copy(
-                        recommendations = history.recommendations
-                            .filter { it.matchesDepartment(history.typeTitle) }
-                            .filterNot { it.sameDoctorAndTime(snapshot) } + snapshot,
-                        selectedRecommendationId = snapshot.recommendationId,
-                        completedAt = history.completedAt ?: completionTimeText()
-                    )
-                } else {
-                    history.copy(
-                        recommendations = emptyList(),
-                        selectedRecommendationId = null
-                    )
-                }
+                history.copy(
+                    recommendations = history.recommendations
+                        .filterNot { it.recommendationId == snapshot.recommendationId } + snapshot,
+                    selectedRecommendationId = snapshot.recommendationId
+                )
             }
         }
     }
@@ -415,25 +440,25 @@ class MedicalRepository(
             id = item.recommendationId,
             date = item.date,
             dayOfWeek = item.date,
-            timeSlot = item.sessionTime ?: item.session,
+            timeSlot = accessibilitySession(item.session),
+            sessionTime = item.sessionTime,
             department = department,
             doctor = item.toDoctor()
         )
     }
 
-    private fun saveRecommendationSnapshot(caseId: String, result: RecommendationResultDto) {
+    internal fun saveRecommendationSnapshot(caseId: String, result: RecommendationResultDto) {
+        require(result.caseId == caseId) { "推薦案件與目前問診不一致，請重新取得推薦。" }
         val recommendationSnapshots = (
             result.recommendations.specialtyFirst + result.recommendations.timeFirst
-        ).distinctBy { it.historySnapshotKey() }
+        ).distinctBy { it.recommendationId }
             .map { it.toHistoryRecommendation() }
         updateHistory(caseId) { history ->
-            val matchingRecommendations = recommendationSnapshots
-                .filter { it.matchesDepartment(history.typeTitle) }
             history.copy(
-                recommendations = matchingRecommendations,
+                recommendations = recommendationSnapshots,
                 selectedRecommendationId = history.selectedRecommendationId
                     ?.takeIf { selectedId ->
-                        matchingRecommendations.any { it.recommendationId == selectedId }
+                        recommendationSnapshots.any { it.recommendationId == selectedId }
                     }
             )
         }
@@ -448,7 +473,8 @@ class MedicalRepository(
         _historyFlow.value = historyItems.toList()
     }
 
-    private fun consumeTriageResult(result: TriageResultDto) {
+    internal fun consumeTriageResult(result: TriageResultDto) {
+        liveTriageResults[result.caseId] = result
         setActiveCaseId(result.caseId)
         val responseVisitType = result.triageCase?.visitType
         if (responseVisitType in CANONICAL_VISIT_TYPES) {
@@ -487,18 +513,12 @@ internal fun RecommendationItemDto.toHistoryRecommendation(): HistoryRecommendat
         room = room ?: slot.takeIf { it.isNotBlank() }
     )
 
-private fun RecommendationItemDto.historySnapshotKey(): String =
-    scheduleId?.takeIf { it.isNotBlank() }
-        ?: listOf(doctorId ?: doctor, date, sessionTime ?: session, room ?: slot).joinToString("|")
-
-private fun HistoryRecommendation.sameDoctorAndTime(other: HistoryRecommendation): Boolean =
-    doctor == other.doctor &&
-        date == other.date &&
-        (sessionTime ?: session) == (other.sessionTime ?: other.session) &&
-        room == other.room
-
-private fun HistoryRecommendation.matchesDepartment(typeTitle: String): Boolean =
-    department.trim().isNotBlank() && department.trim() == typeTitle.trim()
+internal fun accessibilitySession(session: String): String = when (session.trim().lowercase(Locale.ROOT)) {
+    "上午", "早上", "morning" -> "上午"
+    "下午", "午診", "afternoon" -> "下午"
+    "晚上", "晚診", "夜診", "夜間", "evening" -> "晚上"
+    else -> error("無法辨識正式看診時段，請重新選擇班表。")
+}
 
 private fun todayText(): String =
     SimpleDateFormat("yyyy/MM/dd", Locale.TAIWAN).format(Date())
@@ -585,7 +605,7 @@ private fun JSONObject.toHistory(): History {
         HistoryStatus.valueOf(optString("status"))
     }.getOrDefault(HistoryStatus.UNCOMPLETED)
     val compatibleRecommendations = if (status == HistoryStatus.COMPLETED) {
-        recommendations.filter { it.matchesDepartment(typeTitle) }
+        recommendations
     } else {
         emptyList()
     }

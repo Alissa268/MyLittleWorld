@@ -169,11 +169,10 @@ class QuickSearchViewModel(
             return
         }
 
+        _selectingScheduleId.value = schedule.recommendationId
         viewModelScope.launch {
-            _selectingScheduleId.value = schedule.recommendationId
             try {
                 repository.setActiveCaseId(state.caseId)
-                repository.selectRecommendation(schedule)
                 val script = repository.generateScript(
                     caseId = state.caseId,
                     recommendationId = schedule.recommendationId,

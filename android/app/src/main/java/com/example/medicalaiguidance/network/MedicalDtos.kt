@@ -110,7 +110,9 @@ data class ConversationStateDto(
     val questionAttempts: Map<String, Int> = emptyMap(),
     val fieldStatuses: Map<String, String> = emptyMap(),
     val fieldConfidence: Map<String, Double> = emptyMap(),
-    val clarificationReasons: Map<String, String> = emptyMap()
+    val clarificationReasons: Map<String, String> = emptyMap(),
+    val departmentStatus: String? = null,
+    val clarificationStatus: String? = null
 )
 
 data class UrgencyResultDto(
@@ -516,7 +518,9 @@ private fun JSONObject.toConversationStateDto(): ConversationStateDto = Conversa
     questionAttempts = optObject("question_attempts").toIntMap(),
     fieldStatuses = optObject("field_statuses").toStringMap(),
     fieldConfidence = optObject("field_confidence").toDoubleMap(),
-    clarificationReasons = optObject("clarification_reasons").toStringMap()
+    clarificationReasons = optObject("clarification_reasons").toStringMap(),
+    departmentStatus = optNullableString("department_status"),
+    clarificationStatus = optNullableString("clarification_status")
 )
 
 private fun JSONObject.toUrgencyResultDto(): UrgencyResultDto = UrgencyResultDto(

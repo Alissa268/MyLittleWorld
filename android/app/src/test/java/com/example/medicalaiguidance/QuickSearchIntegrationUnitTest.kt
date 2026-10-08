@@ -133,7 +133,8 @@ class QuickSearchIntegrationUnitTest {
         assertEquals(7, retained?.deptId)
         assertEquals("測試醫師", appointment.doctor.name)
         assertEquals("2099-09-20", appointment.date)
-        assertEquals("08:30-12:00", appointment.timeSlot)
+        assertEquals("上午", appointment.timeSlot)
+        assertEquals("08:30-12:00", appointment.sessionTime)
     }
 
     @Test

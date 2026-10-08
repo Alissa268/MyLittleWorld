@@ -116,7 +116,7 @@ class HistoryRepositoryUnitTest {
     }
 
     @Test
-    fun completedHistoryJsonDropsRecommendationsFromAnotherDepartment() {
+    fun historyDisplayTitleIsNotUsedAsRecommendationIdentity() {
         val parsed = parseHistoryJson(
             """
             [{
@@ -139,8 +139,8 @@ class HistoryRepositoryUnitTest {
             """.trimIndent()
         ).single()
 
-        assertTrue(parsed.recommendations.isEmpty())
-        assertNull(parsed.selectedRecommendationId)
+        assertEquals("rec_throat", parsed.selectedRecommendationId)
+        assertEquals("喉科", parsed.recommendations.single().department)
     }
 
     @Test
@@ -171,7 +171,8 @@ class HistoryRepositoryUnitTest {
         repository.saveCurrentChatToHistory(
             historyId = historyId,
             summaryText = "重新編輯中",
-            completed = false
+            completed = false,
+            allowReopen = true
         )
 
         val revised = repository.getHistoryById(historyId)
@@ -216,7 +217,7 @@ class HistoryRepositoryUnitTest {
         )
 
         assertEquals("睡眠醫學中心", repository.getHistoryById(historyId)?.typeTitle)
-        assertEquals(historyId, repository.getActiveCaseId())
+        assertNull(repository.getActiveCaseId())
         repository.deleteHistory(historyId)
     }
 

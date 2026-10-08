@@ -14,13 +14,13 @@ import java.net.SocketTimeoutException
 import java.net.URL
 import java.net.URLEncoder
 
-class MedicalApiClient(
+open class MedicalApiClient(
     private val baseUrl: String = DEFAULT_BASE_URL
 ) {
-    suspend fun chat(request: ChatRequest): TriageResultDto =
+    open suspend fun chat(request: ChatRequest): TriageResultDto =
         post("/chat", request.toJson(), ::parseTriageResult)
 
-    suspend fun recommend(request: RecommendRequest): RecommendationResultDto =
+    open suspend fun recommend(request: RecommendRequest): RecommendationResultDto =
         post("/recommend", request.toJson(), ::parseRecommendationResult)
 
     suspend fun followupRecommend(request: FollowupRecommendRequest): FollowupRecommendationResultDto =
@@ -38,7 +38,7 @@ class MedicalApiClient(
         return get("/reference/doctors?department=$encodedDepartment", ::parseReferenceDoctors)
     }
 
-    suspend fun generateScript(request: ScriptRequest): ScriptResponseDto =
+    open suspend fun generateScript(request: ScriptRequest): ScriptResponseDto =
         post("/generate_script", request.toJson(), ::parseScriptResponse)
 
     suspend fun tts(request: TtsRequest): VoiceTtsResponseDto {

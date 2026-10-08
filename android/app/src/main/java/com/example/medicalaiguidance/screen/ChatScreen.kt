@@ -492,6 +492,14 @@ fun ChatScreen(
                             },
                             primaryDark = primaryDark
                         )
+                        Text(
+                            text = "此紀錄僅供查看，無法確認原問診案件仍有效。",
+                            modifier = Modifier.padding(top = 12.dp),
+                            color = primaryDark
+                        )
+                        Button(onClick = viewModel::restartFromHistory) {
+                            Text("重新開始問診")
+                        }
                     }
                 }
                 if (isAiThinking) {
@@ -683,7 +691,9 @@ private fun CompletedHistorySnapshot(
     ) {
         Column(modifier = Modifier.fillMaxWidth()) {
             Text(
-                text = "問診完成摘要",
+                text = if (history.status == com.example.medicalaiguidance.model.HistoryStatus.COMPLETED) {
+                    "問診確認摘要"
+                } else "未完成問診紀錄",
                 color = primaryDark,
                 fontSize = 19.sp,
                 fontWeight = FontWeight.Bold
@@ -699,7 +709,7 @@ private fun CompletedHistorySnapshot(
                     else -> "未記錄"
                 }
             )
-            HistorySnapshotRow("問診完成時間", history.completedAt ?: history.date)
+            HistorySnapshotRow("問診確認時間", history.completedAt ?: "尚未確認")
             HistorySnapshotRow(
                 "當時選擇醫師",
                 selectedRecommendation?.doctor ?: "未選擇或舊紀錄未保存"

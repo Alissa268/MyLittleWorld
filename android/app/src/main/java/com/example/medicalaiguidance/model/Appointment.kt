@@ -7,5 +7,6 @@ data class Appointment(
     val dayOfWeek: String,    // 例如：(二)
     val timeSlot: String,     // 上午 / 下午 / 晚上
     val department: Department,
-    val doctor: Doctor
+    val doctor: Doctor,
+    val sessionTime: String? = null
 )

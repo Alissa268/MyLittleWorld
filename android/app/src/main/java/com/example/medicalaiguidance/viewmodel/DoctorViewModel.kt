@@ -126,23 +126,25 @@ class DoctorViewModel(
     }
 
     fun selectRecommendationAndNavigate(item: RecommendationItemDto, onNavigate: () -> Unit) {
+        if (_selectingRecommendationId.value != null) return
         val caseId = repository.getActiveCaseId()
         if (caseId.isNullOrBlank()) {
             _uiState.value = DoctorUiState.Error("尚未取得 case_id，無法產生掛號導引腳本。")
             return
         }
 
+        _selectingRecommendationId.value = item.recommendationId
         viewModelScope.launch {
-            _selectingRecommendationId.value = item.recommendationId
             try {
-                repository.selectRecommendation(item)
-                val script = repository.generateScript(caseId, item.recommendationId)
+                val script = repository.generateScript(caseId, item.recommendationId, item)
                 val revalidationError = script.revalidationError()
                 if (revalidationError != null) {
                     _uiState.value = DoctorUiState.Error(revalidationError)
                     return@launch
                 }
                 onNavigate()
+            } catch (cancelled: kotlinx.coroutines.CancellationException) {
+                throw cancelled
             } catch (error: Exception) {
                 _uiState.value = DoctorUiState.Error(error.message ?: "無法產生掛號導引腳本，請稍後再試。")
             } finally {

@@ -162,7 +162,8 @@ class RecommendationIntegrationUnitTest {
 
         assertEquals("B診", repository.getSelectedRecommendation()?.room)
         assertEquals("B診", repository.getConfirmedAppointment().doctor.title)
-        assertEquals("09:00-12:00", repository.getConfirmedAppointment().timeSlot)
+        assertEquals("上午", repository.getConfirmedAppointment().timeSlot)
+        assertEquals("09:00-12:00", repository.getConfirmedAppointment().sessionTime)
     }
 
     @Test

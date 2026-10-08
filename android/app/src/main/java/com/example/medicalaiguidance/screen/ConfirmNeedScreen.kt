@@ -125,11 +125,11 @@ fun ConfirmNeedScreen(
     val targetClinic = currentApt.department.clinicName
     val targetDoctor = currentApt.doctor.name
     val targetTime = currentApt.timeSlot
-    val targetDisplayTime = formatConfirmVisitTime(
+    val targetDisplayTime = listOfNotNull(formatConfirmVisitTime(
         date = currentApt.date,
         dayOfWeek = currentApt.dayOfWeek,
         timeSlot = currentApt.timeSlot
-    )
+    ), currentApt.sessionTime?.takeIf { it.isNotBlank() }).joinToString(" ")
 
     // 提醒小視窗 (AlertDialog)
     if (showPermissionDialog) {
