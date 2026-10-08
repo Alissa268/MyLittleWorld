@@ -7,6 +7,8 @@ import android.os.SystemClock
 import android.util.Log
 import com.example.medicalaiguidance.model.ChatMessage
 import com.example.medicalaiguidance.model.History
+import com.example.medicalaiguidance.model.HistoryStatus
+import com.example.medicalaiguidance.network.MedicalApiException
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.network.BatchAnswerDto
@@ -59,15 +61,6 @@ internal fun VoiceChatResponseDto.isReadyForRecommendation(): Boolean {
     return !needMoreInfo &&
         departmentResult?.childDept?.isNotBlank() == true &&
         isReadyStage
-}
-
-internal fun VoiceChatResponseDto.isHistoryCompleted(): Boolean =
-    stage in setOf("recommending", "script_ready", "done")
-
-internal fun TriageResultDto.isHistoryCompleted(): Boolean = when (conversationState.stage) {
-    "recommending" -> conversationState.confirmed
-    "script_ready", "done" -> true
-    else -> false
 }
 
 internal fun TriageResultDto.canNavigateToRecommendations(): Boolean =
@@ -127,6 +120,14 @@ class ChatViewModel(
     private val _openedHistory = MutableStateFlow<History?>(null)
     val openedHistory: StateFlow<History?> = _openedHistory.asStateFlow()
 
+    private val _historyResumeMessage = MutableStateFlow<String?>(null)
+    val historyResumeMessage = _historyResumeMessage.asStateFlow()
+    private val _canRetryHistoryResume = MutableStateFlow(false)
+    val canRetryHistoryResume = _canRetryHistoryResume.asStateFlow()
+    private var resumeJob: Job? = null
+    private var resumeGeneration = 0L
+    private var historyObserver: Job? = null
+
     private val _isConfirmingRecommendation = MutableStateFlow(false)
     val isConfirmingRecommendation: StateFlow<Boolean> = _isConfirmingRecommendation.asStateFlow()
 
@@ -163,13 +164,39 @@ class ChatViewModel(
         publishMessages()
     }
 
+    private fun observeHistoryCompletion() {
+        if (historyObserver != null) return
+        historyObserver = viewModelScope.launch {
+            repository.getAllHistory().collect { histories ->
+                val history = histories.find { it.id == openedHistoryId || it.id == caseId }
+                if (history != null && history.id == openedHistoryId) _openedHistory.value = history
+                if (history?.status == HistoryStatus.COMPLETED) {
+                    resumeGeneration++
+                    resumeJob?.cancel()
+                    _openedHistory.value = history
+                    _isHistoryReadOnly.value = true
+                    _showDecisionButtons.value = false
+                    _showDoctorButton.value = false
+                    _currentBatchQuestion.value = null
+                    _canRetryHistoryResume.value = false
+                    _historyResumeMessage.value = "此導引流程已完成，紀錄僅供查看；如需再次問診，請重新開始。"
+                }
+            }
+        }
+    }
+
+    private fun historyReadOnly(): Boolean = _isHistoryReadOnly.value ||
+        (caseId ?: openedHistoryId)?.let { repository.getHistoryById(it)?.status == HistoryStatus.COMPLETED } == true
+
     fun onInputTextChanged(text: String) {
-        if (_isHistoryReadOnly.value) return
+        if (historyReadOnly()) return
         _inputText.value = text
     }
 
     fun startNewConversation(visitPlan: VisitPlan = VisitPlan.UNKNOWN) {
         if (conversationInitialized) return
+        resumeGeneration++
+        resumeJob?.cancel()
         conversationInitialized = true
         openedHistoryId = null
         caseId = null
@@ -179,6 +206,8 @@ class ChatViewModel(
         _showDoctorButton.value = false
         _isHistoryReadOnly.value = false
         _openedHistory.value = null
+        _historyResumeMessage.value = null
+        _canRetryHistoryResume.value = false
         _isConfirmingRecommendation.value = false
         _selectedVisitType.value = visitPlan.takeUnless { it == VisitPlan.UNKNOWN }
         _currentQuestionBatch.value = emptyList()
@@ -202,6 +231,10 @@ class ChatViewModel(
 
     fun openHistory(historyId: String) {
         if (openedHistoryId == historyId) return
+        if (_isAiThinking.value || _isConfirmingRecommendation.value) return
+        observeHistoryCompletion()
+        resumeGeneration++
+        resumeJob?.cancel()
         conversationInitialized = true
         cancelVoiceRecording()
         ttsSession = ttsSessionFactory()
@@ -210,8 +243,7 @@ class ChatViewModel(
         _openedHistory.value = history
         openedHistoryId = history?.id
         activeHistoryId = history?.id ?: "hist_${System.currentTimeMillis()}"
-        val liveResult = history?.id?.let(repository::getLiveTriageResult)
-        caseId = liveResult?.caseId
+        caseId = null
         _selectedVisitType.value = VisitPlan.fromApiValue(history?.visitType).takeUnless { it == VisitPlan.UNKNOWN }
         _currentQuestionBatch.value = emptyList()
         _currentQuestionIndex.value = 0
@@ -220,14 +252,64 @@ class ChatViewModel(
         _batchValidationError.value = null
         _chatError.value = null
         _urgentWarning.value = null
-        _isHistoryReadOnly.value = liveResult == null
-        liveResult?.let(::updateBatchAndSafetyState)
-        _showDecisionButtons.value = liveResult?.isReadyForRecommendation() == true
-        _showDoctorButton.value = _showDecisionButtons.value
+        _isHistoryReadOnly.value = true
+        _showDecisionButtons.value = false
+        _showDoctorButton.value = false
         _isConfirmingRecommendation.value = false
         stopVoicePlayback()
         publishMessages()
         _pendingChatLatency.value = null
+        _canRetryHistoryResume.value = false
+        if (history?.status == HistoryStatus.COMPLETED) {
+            _historyResumeMessage.value = "此導引流程已完成，紀錄僅供查看；如需再次問診，請重新開始。"
+        } else if (history != null) {
+            retryHistoryResume()
+        }
+    }
+
+    fun retryHistoryResume() {
+        val history = _openedHistory.value ?: return
+        if (history.status == HistoryStatus.COMPLETED) return
+        resumeJob?.cancel()
+        val generation = ++resumeGeneration
+        _isHistoryReadOnly.value = true
+        _canRetryHistoryResume.value = false
+        _historyResumeMessage.value = "正在確認原問診案件狀態…"
+        resumeJob = viewModelScope.launch {
+            try {
+                val resume = repository.resumeCase(history.id)
+                if (generation != resumeGeneration || openedHistoryId != history.id) return@launch
+                check(resume.caseId == history.id) { "續接案件識別不一致。" }
+                if (!resume.canContinue) {
+                    _historyResumeMessage.value = resume.warningMessage ?: "目前無法安全續接此案件，請重新開始問診。"
+                    return@launch
+                }
+                repository.acceptResumedCase(resume)
+                caseId = resume.caseId
+                _selectedVisitType.value = VisitPlan.fromApiValue(resume.visitType).takeUnless { it == VisitPlan.UNKNOWN }
+                val result = resume.toTriageResult()
+                updateBatchAndSafetyState(result)
+                _isHistoryReadOnly.value = false
+                _historyResumeMessage.value = null
+                _showDecisionButtons.value = result.isReadyForRecommendation() ||
+                    (resume.state.confirmed && resume.redFlagsChecked && !resume.warningRequired &&
+                        resume.state.departmentStatus == "resolved" &&
+                        resume.state.stage in setOf("recommending", "script_ready", "done"))
+                _showDoctorButton.value = _showDecisionButtons.value
+                resume.nextQuestion?.takeIf { it.isNotBlank() && repository.getChatMessages().lastOrNull()?.content != it }?.let {
+                    repository.addMessage(ChatMessage(content = it, sender = MessageSender.AI))
+                }
+                publishMessages()
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                if (generation != resumeGeneration || openedHistoryId != history.id) return@launch
+                val expired = (error as? MedicalApiException)?.statusCode in setOf(404, 410)
+                _historyResumeMessage.value = if (expired) "原問診已失效，請重新開始問診。"
+                    else "目前無法確認案件狀態，可稍後重試。"
+                _canRetryHistoryResume.value = !expired
+            }
+        }
     }
 
     fun restartFromHistory() {
@@ -261,7 +343,7 @@ class ChatViewModel(
         requestStartElapsedMs: Long? = null
     ) {
         val text = _inputText.value.trim()
-        if (_isHistoryReadOnly.value || text.isBlank() || _isAiThinking.value || _isConfirmingRecommendation.value ||
+        if (historyReadOnly() || text.isBlank() || _isAiThinking.value || _isConfirmingRecommendation.value ||
             _isListening.value || _isVoiceTranscribing.value) return
         if (_currentBatchQuestion.value != null) {
             submitCurrentBatchAnswer(text, onAnalysisComplete)
@@ -308,13 +390,14 @@ class ChatViewModel(
 
                 _showDecisionButtons.value = readyForRecommendation
                 _showDoctorButton.value = readyForRecommendation
-                saveHistory(completed = result.isHistoryCompleted(), summary = reply, allowReopen = true)
+                saveHistory(completed = false, summary = reply)
 
-                if (result.canNavigateToRecommendations()) {
+                if (result.canNavigateToRecommendations() && !historyReadOnly()) {
                     onAnalysisComplete()
                 }
             } catch (error: Exception) {
-                val message = error.message ?: "Unable to connect to the backend server. Please try again later."
+                val message = if (handleExpiredCase(error)) "原問診已失效，請重新開始問診。"
+                    else error.message ?: "Unable to connect to the backend server. Please try again later."
                 _chatError.value = message
                 repository.addMessage(ChatMessage(content = message, sender = MessageSender.AI))
                 saveHistory(completed = false, summary = message)
@@ -331,7 +414,7 @@ class ChatViewModel(
         onAnalysisComplete: () -> Unit
     ) {
         val currentQuestion = _currentBatchQuestion.value ?: return
-        if (_isHistoryReadOnly.value || _isAiThinking.value) return
+        if (historyReadOnly() || _isAiThinking.value) return
         val keyedAnswer = currentQuestionAnswer(currentQuestion, answer) ?: return
 
         _batchAnswers.value = mapOf(keyedAnswer.key to keyedAnswer.answer)
@@ -370,7 +453,8 @@ class ChatViewModel(
                 caseId = result.caseId
                 consumeTriageResponse(result, onAnalysisComplete)
             } catch (error: Exception) {
-                val message = error.message ?: "送出回答失敗，請稍後再試。"
+                val message = if (handleExpiredCase(error)) "原問診已失效，請重新開始問診。"
+                    else error.message ?: "送出回答失敗，請稍後再試。"
                 _chatError.value = message
                 repository.addMessage(ChatMessage(content = message, sender = MessageSender.AI))
                 repository.addMessage(ChatMessage(content = currentQuestion.question, sender = MessageSender.AI))
@@ -389,7 +473,7 @@ class ChatViewModel(
     }
 
     fun beginSystemVoiceInput(): Boolean {
-        if (_isHistoryReadOnly.value || _isAiThinking.value || _isConfirmingRecommendation.value || _isListening.value ||
+        if (historyReadOnly() || _isAiThinking.value || _isConfirmingRecommendation.value || _isListening.value ||
             _isVoiceTranscribing.value) return false
         stopVoicePlayback()
         _isListening.value = true
@@ -406,7 +490,7 @@ class ChatViewModel(
 
     /** ASR only edits the draft. Only the Send button/IME invokes sendMessage. */
     fun acceptVoiceTranscript(text: String) {
-        if (_isHistoryReadOnly.value) return
+        if (historyReadOnly()) return
         val transcript = text.trim()
         if (transcript.isNotBlank()) _inputText.value = transcript
     }
@@ -414,7 +498,7 @@ class ChatViewModel(
     // ── 語音錄音（國台語通用）──
     fun startVoiceRecording(): Boolean {
         if (
-            _isHistoryReadOnly.value ||
+            historyReadOnly() ||
             _isAiThinking.value ||
             _isListening.value ||
             _isVoiceTranscribing.value
@@ -446,7 +530,7 @@ class ChatViewModel(
     }
 
     fun stopTaiwaneseRecordingAndTranscribe() {
-        if (_isHistoryReadOnly.value || !_isListening.value || _isVoiceTranscribing.value) return
+        if (historyReadOnly() || !_isListening.value || _isVoiceTranscribing.value) return
         _isListening.value = false
         val wavBytes = audioRecorder.stop()
         if (wavBytes.isEmpty()) {
@@ -593,7 +677,7 @@ class ChatViewModel(
     }
 
     fun chooseRecommendation(onConfirmed: () -> Unit) {
-        if (_isHistoryReadOnly.value || _isConfirmingRecommendation.value || _isAiThinking.value ||
+        if (historyReadOnly() || _isConfirmingRecommendation.value || _isAiThinking.value ||
             _isListening.value || _isVoiceTranscribing.value) return
 
         val activeCase = caseId ?: repository.getActiveCaseId()
@@ -614,7 +698,7 @@ class ChatViewModel(
                 val result = repository.confirmTriage(activeCase)
                 caseId = result.caseId
                 consumeTriageResponse(result)
-                if (result.caseId == activeCase && result.canNavigateToRecommendations()) {
+                if (result.caseId == activeCase && result.canNavigateToRecommendations() && !historyReadOnly()) {
                     onConfirmed()
                 } else {
                     val prompt = if (result.caseId != activeCase) {
@@ -632,7 +716,8 @@ class ChatViewModel(
             } catch (cancelled: CancellationException) {
                 throw cancelled
             } catch (error: Exception) {
-                val message = error.message ?: "無法確認問診結果，請稍後再試。"
+                val message = if (handleExpiredCase(error)) "原問診已失效，請重新開始問診。"
+                    else error.message ?: "無法確認問診結果，請稍後再試。"
                 repository.addMessage(ChatMessage(content = message, sender = MessageSender.AI))
                 publishMessages()
             } finally {
@@ -643,7 +728,8 @@ class ChatViewModel(
     }
 
     fun continueEditing() {
-        if (_isHistoryReadOnly.value || _isConfirmingRecommendation.value) return
+        if (historyReadOnly() || _isConfirmingRecommendation.value || _isAiThinking.value) return
+        val hadDecisionButtons = _showDecisionButtons.value
         _showDecisionButtons.value = false
         _showDoctorButton.value = false
         val activeCase = caseId ?: repository.getActiveCaseId()
@@ -667,7 +753,12 @@ class ChatViewModel(
                 repository.addMessage(ChatMessage(content = prompt, sender = MessageSender.AI))
                 saveHistory(completed = false, summary = prompt, allowReopen = true)
             } catch (error: Exception) {
-                val prompt = "已切回可修改狀態。請直接補充想修改的症狀、科別、嚴重程度或看診時間。"
+                val expired = handleExpiredCase(error)
+                val prompt = if (expired) "原問診已失效，請重新開始問診。"
+                    else "尚未完成切換修改狀態，請稍後重試。原問診紀錄仍保留。"
+                _chatError.value = prompt
+                _showDecisionButtons.value = hadDecisionButtons && !expired
+                _showDoctorButton.value = hadDecisionButtons && !expired
                 repository.addMessage(ChatMessage(content = prompt, sender = MessageSender.AI))
                 saveHistory(completed = false, summary = prompt)
             } finally {
@@ -675,6 +766,20 @@ class ChatViewModel(
                 _isAiThinking.value = false
             }
         }
+    }
+
+    private fun handleExpiredCase(error: Exception): Boolean {
+        if ((error as? MedicalApiException)?.statusCode !in setOf(404, 410)) return false
+        _openedHistory.value = caseId?.let(repository::getHistoryById)
+        openedHistoryId = _openedHistory.value?.id
+        _isHistoryReadOnly.value = true
+        _showDecisionButtons.value = false
+        _showDoctorButton.value = false
+        _currentBatchQuestion.value = null
+        _canRetryHistoryResume.value = false
+        _historyResumeMessage.value = "原問診已失效，請重新開始問診。"
+        repository.clearRecommendationFlow()
+        return true
     }
 
     private fun consumeTriageResponse(
@@ -693,8 +798,8 @@ class ChatViewModel(
         val readyForRecommendation = result.isReadyForRecommendation()
         _showDecisionButtons.value = readyForRecommendation
         _showDoctorButton.value = readyForRecommendation
-        saveHistory(completed = result.isHistoryCompleted(), summary = reply, allowReopen = true)
-        if (result.canNavigateToRecommendations()) onAnalysisComplete()
+        saveHistory(completed = false, summary = reply)
+        if (result.canNavigateToRecommendations() && !historyReadOnly()) onAnalysisComplete()
     }
 
     private fun updateBatchAndSafetyState(result: TriageResultDto) {
@@ -713,6 +818,7 @@ class ChatViewModel(
     }
 
     private fun saveHistory(completed: Boolean, summary: String, allowReopen: Boolean = false) {
+        observeHistoryCompletion()
         repository.saveCurrentChatToHistory(
             historyId = caseId ?: activeHistoryId,
             summaryText = summary,

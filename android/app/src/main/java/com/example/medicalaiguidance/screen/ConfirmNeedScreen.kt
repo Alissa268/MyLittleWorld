@@ -52,6 +52,11 @@ fun ConfirmNeedScreen(
     val appointment by viewModel.appointmentInfo.collectAsState()
     val visitPlan by viewModel.visitPlan.collectAsState()
     val errorMessage by viewModel.errorMessage.collectAsState()
+    LaunchedEffect(errorMessage) {
+        if (appointment != null && errorMessage != null) {
+            Toast.makeText(context, errorMessage, Toast.LENGTH_LONG).show()
+        }
+    }
 
     // 控制提醒彈窗的顯示
     var showPermissionDialog by remember { mutableStateOf(false) }
@@ -238,7 +243,7 @@ fun ConfirmNeedScreen(
                             .clickable {
                                 showConfirmDialog = false
                                 val appointmentType = visitPlan.toAccessibilityAppointmentTypeOrNull()
-                                if (isGuidanceEnabled && appointmentType == null) {
+                                if (appointmentType == null) {
                                     Toast.makeText(
                                         context,
                                         "無法確認就診類型，請返回重新選擇掛號流程。",

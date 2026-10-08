@@ -98,6 +98,15 @@ def get_case(case_id: str) -> TriageCase | None:
     return case
 
 
+def peek_case(case_id: str) -> TriageCase | None:
+    """Read an isolated, unexpired snapshot without refreshing TTL or changing state."""
+    touched = _LAST_TOUCHED.get(case_id)
+    case = _CASES.get(case_id)
+    if case is None or touched is None or _clock() - touched >= CASE_TTL_SECONDS:
+        return None
+    return case.model_copy(deep=True)
+
+
 def save_case(case: TriageCase) -> TriageCase:
     _prune_expired()
     _CASES[case.case_id] = case

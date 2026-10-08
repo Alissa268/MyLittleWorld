@@ -7,7 +7,6 @@ import com.example.medicalaiguidance.network.TriageResultDto
 import com.example.medicalaiguidance.network.UrgencyResultDto
 import com.example.medicalaiguidance.network.parseVoiceChatResponse
 import com.example.medicalaiguidance.viewmodel.isReadyForRecommendation
-import com.example.medicalaiguidance.viewmodel.isHistoryCompleted
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -43,7 +42,6 @@ class ChatDecisionVisibilityUnitTest {
         val waiting = result()
 
         assertTrue(waiting.isReadyForRecommendation())
-        assertFalse(waiting.isHistoryCompleted())
 
         val confirmed = waiting.copy(
             conversationState = waiting.conversationState.copy(
@@ -52,7 +50,6 @@ class ChatDecisionVisibilityUnitTest {
             )
         )
         assertTrue(confirmed.isReadyForRecommendation())
-        assertTrue(confirmed.isHistoryCompleted())
     }
 
     @Test
@@ -74,10 +71,9 @@ class ChatDecisionVisibilityUnitTest {
         )
 
         assertTrue(ready.isReadyForRecommendation())
-        assertFalse(ready.isHistoryCompleted())
         assertFalse(ready.copy(departmentResult = null).isReadyForRecommendation())
 
-        assertTrue(ready.copy(stage = "recommending").isHistoryCompleted())
+        assertTrue(ready.copy(stage = "recommending").isReadyForRecommendation())
     }
 
     private fun result() = TriageResultDto(

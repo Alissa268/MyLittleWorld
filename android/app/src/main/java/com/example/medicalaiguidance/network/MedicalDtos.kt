@@ -162,6 +162,41 @@ data class TriageResultDto(
     val questionBatch: List<QuestionItemDto> = emptyList()
 )
 
+data class CaseResumeDto(
+    val caseId: String,
+    val visitType: String?,
+    val state: ConversationStateDto,
+    val redFlagsChecked: Boolean,
+    val redFlagsStatus: String?,
+    val warningRequired: Boolean,
+    val warningMessage: String?,
+    val department: DepartmentResultDto?,
+    val nextQuestion: String?,
+    val questionBatch: List<QuestionItemDto>,
+    val canContinue: Boolean
+) {
+    fun toTriageResult(): TriageResultDto = TriageResultDto(
+        caseId = caseId, triageCase = null, conversationState = state,
+        triage = UrgencyResultDto(warningRequired = warningRequired, warningMessage = warningMessage,
+            needMoreInfo = state.stage == "collecting", nextQuestion = nextQuestion),
+        departmentResult = department, nextQuestion = nextQuestion,
+        needMoreInfo = state.stage == "collecting", questionBatch = questionBatch
+    )
+}
+
+fun parseCaseResume(json: String): CaseResumeDto {
+    val obj = JSONObject(json)
+    return CaseResumeDto(
+        caseId = obj.getString("case_id"), visitType = obj.optNullableString("visit_type"),
+        state = obj.toConversationStateDto(), redFlagsChecked = obj.optBoolean("red_flags_checked", false),
+        redFlagsStatus = obj.optNullableString("red_flags_status"),
+        warningRequired = obj.optBoolean("warning_required", false), warningMessage = obj.optNullableString("warning_message"),
+        department = obj.optObject("department_result")?.toDepartmentResultDto(),
+        nextQuestion = obj.optNullableString("next_question"), questionBatch = obj.optArray("question_batch").toQuestionList(),
+        canContinue = obj.optBoolean("can_continue", false)
+    )
+}
+
 data class RecommendationItemDto(
     val recommendationId: String,
     val parentDept: String,
@@ -280,6 +315,7 @@ data class VoiceAsrResponseDto(
 
 fun ChatRequest.toJson(): String = JSONObject().apply {
     caseId?.let { put("case_id", it) }
+    if (caseId != null) put("require_existing_case", true)
     message?.let { put("message", it) }
     visitType?.let { put("visit_type", it) }
     if (answers.isNotEmpty()) {

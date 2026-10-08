@@ -20,6 +20,9 @@ open class MedicalApiClient(
     open suspend fun chat(request: ChatRequest): TriageResultDto =
         post("/chat", request.toJson(), ::parseTriageResult)
 
+    open suspend fun resumeCase(caseId: String): CaseResumeDto =
+        get("/chat/${URLEncoder.encode(caseId, Charsets.UTF_8.name())}/resume", ::parseCaseResume)
+
     open suspend fun recommend(request: RecommendRequest): RecommendationResultDto =
         post("/recommend", request.toJson(), ::parseRecommendationResult)
 

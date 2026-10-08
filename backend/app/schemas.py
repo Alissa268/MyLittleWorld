@@ -350,6 +350,32 @@ class ChatRequest(BaseModel):
     answers: List[BatchAnswer] = Field(default_factory=list)
     confirmed: bool = False
     revision_requested: bool = False
+    require_existing_case: bool = False
+
+
+class ResumeDepartment(BaseModel):
+    dept_id: Optional[int] = None
+    parentDept: str
+    childDept: str
+
+
+class CaseResumeResult(BaseModel):
+    case_id: str
+    visit_type: Optional[VisitType] = None
+    stage: ConversationStage
+    confirmed: bool
+    awaiting_confirmation: bool
+    department_status: str
+    clarification_status: str
+    red_flags_checked: bool
+    red_flags_status: str
+    warning_required: bool
+    warning_message: Optional[str] = None
+    department_result: Optional[ResumeDepartment] = None
+    next_question: Optional[str] = None
+    last_question_key: Optional[str] = None
+    question_batch: List[QuestionItem] = Field(default_factory=list)
+    can_continue: bool = False
 
 
 class TriageResult(BaseModel):

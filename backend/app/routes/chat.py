@@ -1,14 +1,15 @@
 import logging
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Response
 
 from app.config import get_settings
-from app.schemas import ChatRequest, ConversationStage, Message, QuestionItem, TriageCase, TriageResult, VisitType
+from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, QuestionItem, TriageCase, TriageResult, VisitType
 from app.services.ai_reply_generator import build_department_confirmation_reply, generate_triage_reply
 from app.services.appointment_service import DepartmentResolutionError, detect_department_result
 from app.services.batch_extraction_service import extract_batch_answers
 from app.services.batch_question_service import build_question_batch
-from app.services.case_store import create_case, get_case, sanitize_untrusted_snapshot, save_case
+from app.services.case_store import create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case
+from app.services.case_resume_service import build_case_resume
 from app.services.chat_perf import (
     ai_phase,
     begin_chat_perf,
@@ -53,6 +54,15 @@ URGENT_WARNING_FALLBACK = (
     "目前初步急迫性篩檢結果較急迫，請儘速由醫療人員評估；"
     "若症狀持續惡化，請立即尋求緊急醫療協助。"
 )
+
+
+@router.get("/{case_id}/resume", response_model=CaseResumeResult)
+async def resume_case(case_id: str, response: Response) -> CaseResumeResult:
+    response.headers["Cache-Control"] = "no-store"
+    case = peek_case(case_id)
+    if case is None:
+        raise HTTPException(status_code=404, detail="原問診已失效，請重新開始問診。")
+    return build_case_resume(case)
 
 
 @router.post("", response_model=TriageResult)
@@ -647,6 +657,8 @@ def _resolve_case(req: ChatRequest) -> TriageCase:
             )
     if stored is not None:
         return stored
+    if req.require_existing_case:
+        raise HTTPException(status_code=404, detail="原問診已失效，請重新開始問診。")
     if supplied is not None:
         case = sanitize_untrusted_snapshot(supplied)
         save_case(case)

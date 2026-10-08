@@ -167,9 +167,9 @@ class Phase7IntegrationRepairUnitTest {
         runCurrent()
         assertEquals(1, navigations)
         val history = repository.getHistoryById(caseId)!!
-        assertEquals(HistoryStatus.COMPLETED, history.status)
+        assertEquals(HistoryStatus.UNCOMPLETED, history.status)
         assertEquals("一般內科", history.typeTitle)
-        assertNotNull(history.completedAt)
+        assertNull(history.completedAt)
         assertEquals(1, repository.getAllHistory().value.count { it.id == caseId })
         assertEquals(caseId, client.chatRequests.single().caseId)
         assertTrue(client.chatRequests.single().confirmed)
@@ -208,19 +208,21 @@ class Phase7IntegrationRepairUnitTest {
     }
 
     @Test
-    fun unfinishedLiveHistoryRestoresButtonsWithoutProbingBackend() {
+    fun unfinishedLiveHistoryRestoresButtonsThroughReadOnlyResumeWithoutChatProbe() = runTest(dispatcher) {
         val model = liveChat()
         assertFalse(model.isHistoryReadOnly.value)
         assertTrue(model.showDecisionButtons.value)
         assertEquals(0, client.chatRequests.size)
+        assertEquals(listOf(caseId), client.resumeRequests)
         assertEquals(HistoryStatus.UNCOMPLETED, repository.getHistoryById(caseId)?.status)
     }
 
     @Test
-    fun oldUnfinishedHistoryIsReadOnlyAndCanStartFreshWithoutProbing() {
+    fun oldUnfinishedHistoryIsReadOnlyAndCanStartFreshWithoutChatProbe() = runTest(dispatcher) {
         repository.saveToHistory(history())
         val model = ChatViewModel(repository, ttsSessionFactory = { ttsSession }).also(models::add)
         model.openHistory(caseId)
+        runCurrent()
         assertTrue(model.isHistoryReadOnly.value)
         assertNull(repository.getActiveCaseId())
         model.chooseRecommendation { fail("old history must not navigate") }
@@ -232,14 +234,14 @@ class Phase7IntegrationRepairUnitTest {
 
     @Test
     fun snapshotsUseCaseAndRecommendationIdRatherThanDisplayTitleOrDoctorName() {
-        repository.saveToHistory(history().copy(status = HistoryStatus.COMPLETED))
+        repository.saveToHistory(history())
         val first = recommendation()
         val second = first.copy(recommendationId = "rec_second", scheduleId = "S002", session = "下午")
         repository.saveRecommendationSnapshot(caseId, RecommendationResultDto(
             caseId, RecommendationColumnsDto(listOf(first, second), listOf(first)), totalCount = 3
         ))
         repository.setActiveCaseId(caseId)
-        repository.selectRecommendation(second)
+        repository.consumeScriptResponse(ScriptResponseDto(true, recommendationId = second.recommendationId, recommendation = second))
         val saved = repository.getHistoryById(caseId)!!
         assertEquals("AI 問診", saved.typeTitle)
         assertEquals(2, saved.recommendations.size)
@@ -264,10 +266,10 @@ class Phase7IntegrationRepairUnitTest {
 
     @Test
     fun transientSaveCannotDemoteConfirmedHistoryOrLoseSnapshot() {
-        repository.saveToHistory(history().copy(status = HistoryStatus.COMPLETED, completedAt = "2026/10/09 09:00"))
-        repository.saveRecommendationSnapshot(caseId, RecommendationResultDto(
-            caseId, RecommendationColumnsDto(listOf(recommendation())), totalCount = 1
-        ))
+        repository.saveToHistory(history().copy(status = HistoryStatus.COMPLETED, completedAt = "2026/10/09 09:00",
+            recommendations = listOf(com.example.medicalaiguidance.model.HistoryRecommendation(
+                recommendationId = "rec_first", parentDepartment = "內科系", department = "一般內科",
+                doctor = "測試醫師", date = "2099-10-13", session = "下午"))))
         repository.saveCurrentChatToHistory(caseId, "retry", completed = false)
         val saved = repository.getHistoryById(caseId)!!
         assertEquals(HistoryStatus.COMPLETED, saved.status)
@@ -398,19 +400,20 @@ class Phase7IntegrationRepairUnitTest {
             RecommendationResultDto(caseId, RecommendationColumnsDto(listOf(recommendation())), totalCount = 1)
         }
         repository.recommend(caseId, "initial")
-        assertEquals(HistoryStatus.COMPLETED, repository.getHistoryById(caseId)?.status)
+        assertEquals(HistoryStatus.UNCOMPLETED, repository.getHistoryById(caseId)?.status)
         assertEquals(recommendation().recommendationId, repository.getHistoryById(caseId)?.recommendations?.single()?.recommendationId)
     }
 
-    private fun liveChat(confirmed: Boolean = false): ChatViewModel {
-        repository.saveToHistory(history().copy(
-            status = if (confirmed) HistoryStatus.COMPLETED else HistoryStatus.UNCOMPLETED
-        ))
+    private suspend fun liveChat(confirmed: Boolean = false): ChatViewModel {
+        repository.saveToHistory(history())
         repository.consumeTriageResult(result(
             stage = if (confirmed) "recommending" else "waiting_confirmation", confirmed = confirmed
         ))
+        client.resumeResponse = { CaseResumeDto(caseId, "initial",
+            result(stage = if (confirmed) "recommending" else "waiting_confirmation", confirmed = confirmed).conversationState,
+            true, "negative", false, null, result().departmentResult, null, emptyList(), true) }
         return ChatViewModel(repository, ttsSessionFactory = { ttsSession })
-            .also { models.add(it); it.openHistory(caseId) }
+            .also { models.add(it); it.openHistory(caseId); dispatcher.scheduler.runCurrent() }
     }
 
     private fun history() = History(caseId, "2026/10/09", "AI 問診", "summary", HistoryStatus.UNCOMPLETED)
@@ -430,6 +433,12 @@ class Phase7IntegrationRepairUnitTest {
     private class FakeClient : MedicalApiClient() {
         val chatRequests = mutableListOf<ChatRequest>()
         val scriptRequests = mutableListOf<ScriptRequest>()
+        val resumeRequests = mutableListOf<String>()
+        var resumeResponse: suspend (String) -> CaseResumeDto = { throw MedicalApiException("expired", statusCode = 404) }
+        override suspend fun resumeCase(caseId: String): CaseResumeDto {
+            resumeRequests.add(caseId)
+            return resumeResponse(caseId)
+        }
         var chatResponse: suspend (ChatRequest) -> TriageResultDto = { error("unexpected chat call") }
         var recommendResponse: suspend (RecommendRequest) -> RecommendationResultDto = { error("unexpected recommend call") }
         var scriptResponse: suspend (ScriptRequest) -> ScriptResponseDto = { error("unexpected script call") }

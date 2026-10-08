@@ -6,6 +6,11 @@ import com.example.medicalaiguidance.model.HistoryRecommendation
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.network.RecommendationItemDto
+import com.example.medicalaiguidance.network.ScriptResponseDto
+import com.example.medicalaiguidance.repository.TtsSession
+import androidx.lifecycle.viewModelScope
+import kotlinx.coroutines.*
+import kotlinx.coroutines.test.*
 import com.example.medicalaiguidance.repository.MedicalRepository
 import com.example.medicalaiguidance.repository.parseHistoryJson
 import com.example.medicalaiguidance.viewmodel.ChatViewModel
@@ -46,7 +51,7 @@ class HistoryRepositoryUnitTest {
     }
 
     @Test
-    fun selectedDoctorAndTimeAreSavedIntoCompletedHistorySnapshot() {
+    fun revalidatedDoctorAndTimeAreSavedWithoutCompletingHistory() {
         val repository = MedicalRepository()
         val historyId = "case_selected_snapshot_${System.nanoTime()}"
         repository.saveToHistory(
@@ -55,13 +60,11 @@ class HistoryRepositoryUnitTest {
                 date = "2026/08/15",
                 typeTitle = "一般內科",
                 summaryText = "synthetic completed history",
-                status = HistoryStatus.COMPLETED,
-                completedAt = "2026/08/15 10:30"
+                status = HistoryStatus.UNCOMPLETED
             )
         )
         repository.setActiveCaseId(historyId)
-        repository.selectRecommendation(
-            RecommendationItemDto(
+        val item = RecommendationItemDto(
                 recommendationId = "synthetic_selected_doctor",
                 parentDept = "內科系",
                 childDept = "一般內科",
@@ -72,14 +75,15 @@ class HistoryRepositoryUnitTest {
                 room = "320診",
                 score = 1.0
             )
-        )
+        repository.consumeScriptResponse(ScriptResponseDto(true, recommendationId = item.recommendationId, recommendation = item))
 
         val history = repository.getHistoryById(historyId)
         val selected = history?.recommendations?.single()
         assertEquals("synthetic_selected_doctor", history?.selectedRecommendationId)
         assertEquals("測試醫師", selected?.doctor)
         assertEquals("09:00-09:30", selected?.sessionTime)
-        assertEquals("2026/08/15 10:30", history?.completedAt)
+        assertNull(history?.completedAt)
+        assertEquals(HistoryStatus.UNCOMPLETED, history?.status)
         repository.deleteHistory(historyId)
     }
 
@@ -144,7 +148,7 @@ class HistoryRepositoryUnitTest {
     }
 
     @Test
-    fun reopeningQuestionnaireClearsStoredRecommendationSnapshot() {
+    fun completedHistoryCannotBeReopenedOrLoseItsSnapshot() {
         val repository = MedicalRepository()
         val historyId = "case_revision_clears_snapshot_${System.nanoTime()}"
         repository.saveToHistory(
@@ -176,8 +180,9 @@ class HistoryRepositoryUnitTest {
         )
 
         val revised = repository.getHistoryById(historyId)
-        assertTrue(revised?.recommendations?.isEmpty() == true)
-        assertNull(revised?.selectedRecommendationId)
+        assertEquals(HistoryStatus.COMPLETED, revised?.status)
+        assertEquals("rec_internal", revised?.selectedRecommendationId)
+        assertEquals(1, revised?.recommendations?.size)
         repository.deleteHistory(historyId)
     }
 
@@ -185,6 +190,7 @@ class HistoryRepositoryUnitTest {
     fun openingHistoryRestoresItsDepartmentInsteadOfLeakingPreviousCase() {
         val repository = MedicalRepository()
         val historyId = "case_history_isolation_${System.nanoTime()}"
+        repository.clearRecommendationFlow()
         repository.saveToHistory(
             History(
                 id = historyId,
@@ -236,7 +242,9 @@ class HistoryRepositoryUnitTest {
     }
 
     @Test
-    fun completedHistoryIsReadOnlyAndCannotRestoreDoctorActions() {
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun completedHistoryIsReadOnlyAndCannotRestoreDoctorActions() = runTest {
+        Dispatchers.setMain(StandardTestDispatcher(testScheduler))
         val repository = MedicalRepository()
         val historyId = "case_completed_read_only_${System.nanoTime()}"
         repository.saveToHistory(
@@ -251,7 +259,8 @@ class HistoryRepositoryUnitTest {
                 )
             )
         )
-        val viewModel = ChatViewModel(repository)
+        val session = TtsSession(CoroutineScope(SupervisorJob() + StandardTestDispatcher(testScheduler))) { _, _, _ -> error("TTS") }
+        val viewModel = ChatViewModel(repository, ttsSessionFactory = { session })
         var doctorNavigationRequested = false
 
         viewModel.openHistory(historyId)
@@ -264,5 +273,8 @@ class HistoryRepositoryUnitTest {
         assertFalse(doctorNavigationRequested)
         assertTrue(viewModel.inputText.value.isEmpty())
         repository.deleteHistory(historyId)
+        viewModel.viewModelScope.cancel()
+        session.close()
+        Dispatchers.resetMain()
     }
 }

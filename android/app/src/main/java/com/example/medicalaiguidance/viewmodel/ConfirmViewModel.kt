@@ -3,6 +3,7 @@ package com.example.medicalaiguidance.viewmodel
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.CancellationException
 import com.example.medicalaiguidance.model.Appointment
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.network.ScriptResponseDto
@@ -12,7 +13,8 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 class ConfirmViewModel(
-    private val repository: MedicalRepository = MedicalRepository()
+    private val repository: MedicalRepository = MedicalRepository(),
+    private val voiceCleanup: suspend () -> Unit = repository::cleanupTtsBeforeHospitalLaunch
 ) : ViewModel() {
     private var launchingHospital = false
 
@@ -21,8 +23,17 @@ class ConfirmViewModel(
         launchingHospital = true
         viewModelScope.launch {
             try {
-                repository.cleanupTtsBeforeHospitalLaunch()
+                val selection = repository.validatedGuidanceSelection()
+                check(_appointmentInfo.value?.id == selection.second) { "確認頁班表已變更，請重新載入。" }
+                voiceCleanup()
+                check(repository.validatedGuidanceSelection() == selection) { "目前掛號案件已變更，請重新選擇。" }
                 launch()
+                repository.completeGuidanceAfterLaunch(selection)
+                _errorMessage.value = null
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (error: Exception) {
+                _errorMessage.value = "無法完成前往掛號入口：${error.message ?: "請稍後重試。"}"
             } finally {
                 launchingHospital = false
             }

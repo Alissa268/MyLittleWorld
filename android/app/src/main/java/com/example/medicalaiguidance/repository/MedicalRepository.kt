@@ -17,6 +17,7 @@ import com.example.medicalaiguidance.model.HistoryRecommendation
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.network.ChatRequest
+import com.example.medicalaiguidance.network.CaseResumeDto
 import com.example.medicalaiguidance.network.BatchAnswerDto
 import com.example.medicalaiguidance.network.FollowupRecommendRequest
 import com.example.medicalaiguidance.network.FollowupRecommendationResultDto
@@ -151,8 +152,30 @@ class MedicalRepository(
     }
 
     suspend fun chat(caseId: String?, message: String, visitType: String? = currentVisitType): TriageResultDto =
-        apiClient.chat(ChatRequest(caseId = caseId, message = message, visitType = visitType))
+        writable(caseId) { apiClient.chat(ChatRequest(caseId = caseId, message = message, visitType = visitType)) }
             .also(::consumeTriageResult)
+
+    suspend fun resumeCase(caseId: String): CaseResumeDto = apiClient.resumeCase(caseId)
+
+    fun acceptResumedCase(result: CaseResumeDto) {
+        require(result.canContinue) { "無法安全續接原問診，請重新開始。" }
+        ensureWritable(result.caseId)
+        setActiveVisitType(result.visitType)
+        consumeTriageResult(result.toTriageResult())
+    }
+
+    private fun ensureWritable(caseId: String?) {
+        check(caseId == null || getHistoryById(caseId)?.status != HistoryStatus.COMPLETED) {
+            "此導引紀錄已完成，只能查看；請建立新的問診。"
+        }
+    }
+
+    private suspend fun <T> writable(caseId: String?, action: suspend () -> T): T {
+        ensureWritable(caseId)
+        val result = action()
+        ensureWritable(caseId)
+        return result
+    }
 
     suspend fun startBatchTriage(visitType: String): TriageResultDto =
         apiClient.chat(ChatRequest(visitType = visitType)).also(::consumeTriageResult)
@@ -161,22 +184,23 @@ class MedicalRepository(
         caseId: String,
         visitType: String,
         answers: List<BatchAnswerDto>
-    ): TriageResultDto = apiClient.chat(
+    ): TriageResultDto = writable(caseId) { apiClient.chat(
         ChatRequest(caseId = caseId, visitType = visitType, answers = answers)
-    ).also(::consumeTriageResult)
+    ) }.also(::consumeTriageResult)
 
     suspend fun confirmTriage(caseId: String): TriageResultDto =
-        apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, confirmed = true))
+        writable(caseId) { apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, confirmed = true)) }
             .also { result ->
                 if (result.caseId != caseId) liveTriageResults.remove(caseId)
                 consumeTriageResult(result)
             }
 
     suspend fun requestRevision(caseId: String): TriageResultDto =
-        apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, revisionRequested = true))
+        writable(caseId) { apiClient.chat(ChatRequest(caseId = caseId, visitType = currentVisitType, revisionRequested = true)) }
             .also(::consumeTriageResult)
 
     suspend fun recommend(caseId: String, visitType: String): RecommendationResultDto {
+        ensureWritable(caseId)
         val effectiveVisitType = resolveRecommendationVisitType(currentVisitType, visitType)
         return apiClient.recommend(RecommendRequest(caseId = caseId, visitType = effectiveVisitType)).also { result ->
             saveRecommendationSnapshot(caseId, result)
@@ -198,13 +222,13 @@ class MedicalRepository(
         recommendationId: String,
         recommendation: RecommendationItemDto? = null
     ): ScriptResponseDto =
-        apiClient.generateScript(
+        writable(caseId) { apiClient.generateScript(
             ScriptRequest(
                 caseId = caseId,
                 recommendationId = recommendationId,
                 recommendation = recommendation
             )
-        ).also { response ->
+        ) }.also { response ->
             if (response.isSuccess) {
                 require(currentCaseId == caseId) { "目前問診案件已變更，請重新選擇班表。" }
                 require(response.recommendationId == recommendationId &&
@@ -227,8 +251,44 @@ class MedicalRepository(
 
     internal fun consumeScriptResponse(response: ScriptResponseDto) {
         if (response.isSuccess) {
+            ensureWritable(currentCaseId)
             response.recommendation?.let(::selectRecommendation)
             currentScript = response
+            currentRecommendation?.takeIf { it.recommendationId == response.recommendationId }?.let { item ->
+                currentCaseId?.let { id ->
+                    updateHistory(id) { history ->
+                        val snapshot = item.toHistoryRecommendation()
+                        history.copy(
+                            recommendations = history.recommendations.filterNot { it.recommendationId == snapshot.recommendationId } + snapshot,
+                            selectedRecommendationId = snapshot.recommendationId
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    fun validatedGuidanceSelection(): Pair<String, String> {
+        val id = requireNotNull(currentCaseId) { "缺少有效掛號案件，請重新選擇。" }
+        ensureWritable(id)
+        val item = requireNotNull(currentRecommendation) { "尚未選擇正式班表。" }
+        check(!item.doctorId.isNullOrBlank() && !item.scheduleId.isNullOrBlank() &&
+            (item.deptId ?: 0) > 0 && item.date.isNotBlank() && item.recommendationId.isNotBlank()) {
+            "正式班表識別資料不完整，請重新選擇。"
+        }
+        accessibilitySession(item.session)
+        check(currentVisitType in setOf("initial", "followup", "quick_search")) { "無法確認就診類型。" }
+        check(currentScript?.isSuccess == true && currentScript?.recommendationId == item.recommendationId) {
+            "班表尚未重新驗證，請重新選擇。"
+        }
+        return id to item.recommendationId
+    }
+
+    fun completeGuidanceAfterLaunch(selection: Pair<String, String>) {
+        check(validatedGuidanceSelection() == selection) { "掛號案件已變更，無法更新歷史。" }
+        updateHistory(selection.first) { history ->
+            history.copy(status = HistoryStatus.COMPLETED, completedAt = completionTimeText(),
+                typeTitle = currentDepartment?.clinicName ?: history.typeTitle)
         }
     }
 
@@ -270,13 +330,13 @@ class MedicalRepository(
         lang: String,
         confirmed: Boolean = false
     ): VoiceChatResponseDto =
-        apiClient.voiceChat(
+        writable(caseId) { apiClient.voiceChat(
             audioBytes = audioBytes,
             caseId = caseId,
             lang = lang,
             confirmed = confirmed,
             visitType = currentVisitType
-        )
+        ) }
 
     fun getAllHistory(): StateFlow<List<History>> {
         loadHistoryIfNeeded()
@@ -302,7 +362,6 @@ class MedicalRepository(
         currentDepartment = null
 
         val history = getHistoryById(id) ?: return null
-        currentCaseId = history.id.takeIf { liveTriageResults.containsKey(it) }
         currentVisitType = history.visitType?.takeIf { it in CANONICAL_VISIT_TYPES }
         currentDepartment = history.typeTitle
             .takeIf {
@@ -323,6 +382,7 @@ class MedicalRepository(
 
     fun saveToHistory(history: History) {
         loadHistoryIfNeeded()
+        if (historyItems.any { it.id == history.id && it.status == HistoryStatus.COMPLETED }) return
         historyItems.removeAll { it.id == history.id }
         historyItems.add(0, history)
         persistHistory()
@@ -346,24 +406,18 @@ class MedicalRepository(
         allowReopen: Boolean = false
     ) {
         val existing = getHistoryById(historyId)
-        val effectiveCompleted = completed || (!allowReopen && existing?.status == HistoryStatus.COMPLETED)
-        val typeTitle = if (effectiveCompleted) {
-            currentDepartment?.clinicName ?: existing?.typeTitle ?: "掛號導引"
-        } else "AI 問診"
-        val canKeepRecommendationSnapshot = effectiveCompleted && existing?.status == HistoryStatus.COMPLETED
-        val recommendations = if (canKeepRecommendationSnapshot) {
-            existing!!.recommendations
-        } else {
-            emptyList()
-        }
+        if (existing?.status == HistoryStatus.COMPLETED) return
+        // Backend workflow completion never completes local guidance history.
+        val typeTitle = currentDepartment?.clinicName ?: existing?.typeTitle ?: "AI 問診"
+        val recommendations = existing?.recommendations.orEmpty()
         val history = History(
             id = historyId,
             date = existing?.date ?: todayText(),
             typeTitle = typeTitle,
             summaryText = summaryText.ifBlank { "問診紀錄" },
-            status = if (effectiveCompleted) HistoryStatus.COMPLETED else HistoryStatus.UNCOMPLETED,
+            status = HistoryStatus.UNCOMPLETED,
             chatMessages = chatMessages.toList(),
-            completedAt = if (effectiveCompleted) existing?.completedAt ?: completionTimeText() else null,
+            completedAt = null,
             recommendations = recommendations,
             selectedRecommendationId = existing?.selectedRecommendationId
                 ?.takeIf { selectedId -> recommendations.any { it.recommendationId == selectedId } },
@@ -407,22 +461,13 @@ class MedicalRepository(
     }
 
     fun selectRecommendation(item: RecommendationItemDto) {
+        ensureWritable(currentCaseId)
         currentRecommendation = item
         currentScript = null
         currentDepartment = buildVghDepartment(
             parentDept = item.parentDept,
             childDept = item.childDept
         )
-        currentCaseId?.let { caseId ->
-            updateHistory(caseId) { history ->
-                val snapshot = item.toHistoryRecommendation()
-                history.copy(
-                    recommendations = history.recommendations
-                        .filterNot { it.recommendationId == snapshot.recommendationId } + snapshot,
-                    selectedRecommendationId = snapshot.recommendationId
-                )
-            }
-        }
     }
 
     fun getSelectedRecommendation(): RecommendationItemDto? = currentRecommendation
@@ -454,12 +499,10 @@ class MedicalRepository(
         ).distinctBy { it.recommendationId }
             .map { it.toHistoryRecommendation() }
         updateHistory(caseId) { history ->
+            val selected = history.recommendations.find { it.recommendationId == history.selectedRecommendationId }
             history.copy(
-                recommendations = recommendationSnapshots,
+                recommendations = (recommendationSnapshots + listOfNotNull(selected)).distinctBy { it.recommendationId },
                 selectedRecommendationId = history.selectedRecommendationId
-                    ?.takeIf { selectedId ->
-                        recommendationSnapshots.any { it.recommendationId == selectedId }
-                    }
             )
         }
     }
@@ -468,6 +511,7 @@ class MedicalRepository(
         loadHistoryIfNeeded()
         val index = historyItems.indexOfFirst { it.id == id }
         if (index < 0) return
+        if (historyItems[index].status == HistoryStatus.COMPLETED) return
         historyItems[index] = transform(historyItems[index])
         persistHistory()
         _historyFlow.value = historyItems.toList()
@@ -526,7 +570,7 @@ private fun todayText(): String =
 private fun completionTimeText(): String =
     SimpleDateFormat("yyyy/MM/dd HH:mm", Locale.TAIWAN).format(Date())
 
-private fun History.toJson(): JSONObject = JSONObject().apply {
+internal fun History.toJson(): JSONObject = JSONObject().apply {
     put("id", id)
     put("date", date)
     put("typeTitle", typeTitle)
@@ -604,11 +648,7 @@ private fun JSONObject.toHistory(): History {
     val status = runCatching {
         HistoryStatus.valueOf(optString("status"))
     }.getOrDefault(HistoryStatus.UNCOMPLETED)
-    val compatibleRecommendations = if (status == HistoryStatus.COMPLETED) {
-        recommendations
-    } else {
-        emptyList()
-    }
+    val compatibleRecommendations = recommendations
     val selectedRecommendationId = optString("selectedRecommendationId")
         .takeIf { selectedId ->
             selectedId.isNotBlank() &&
