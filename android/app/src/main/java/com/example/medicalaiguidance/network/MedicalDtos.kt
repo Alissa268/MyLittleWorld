@@ -236,6 +236,7 @@ data class ScriptResponseDto(
     val isSuccess: Boolean,
     val scriptId: String = "vgh_booking_001",
     val recommendationId: String? = null,
+    val recommendation: RecommendationItemDto? = null,
     val steps: List<ScriptStepDto> = emptyList(),
     val message: String? = null,
     val stepCount: Int = 0
@@ -412,6 +413,7 @@ fun parseScriptResponse(json: String): ScriptResponseDto {
         isSuccess = obj.optBoolean("isSuccess", false),
         scriptId = obj.optString("script_id", "vgh_booking_001"),
         recommendationId = obj.optNullableString("recommendation_id"),
+        recommendation = obj.optObject("recommendation")?.toRecommendationItemDto(),
         steps = obj.optArray("steps").toScriptStepList(),
         message = obj.optNullableString("message"),
         stepCount = obj.optInt("step_count", 0)
@@ -570,33 +572,33 @@ private fun JSONArray?.toQuestionList(): List<QuestionItemDto> {
 private fun JSONArray?.toRecommendationList(): List<RecommendationItemDto> {
     if (this == null) return emptyList()
     return (0 until length()).mapNotNull { index ->
-        optJSONObject(index)?.let {
-            RecommendationItemDto(
-                recommendationId = it.optString("recommendation_id"),
-                parentDept = it.optString("parentDept"),
-                childDept = it.optString("childDept"),
-                doctor = it.optString("doctor"),
-                date = it.optString("date"),
-                session = it.optString("session"),
-                slot = it.optString("slot", ""),
-                score = it.optDouble("score", 0.0),
-                reasons = it.optArray("reasons").toStringList(),
-                rank = it.optNullableInt("rank"),
-                isBestMatch = it.optBoolean("is_best_match", false),
-                doctorId = it.optNullableString("doctor_id"),
-                scheduleId = it.optNullableString("schedule_id"),
-                sessionTime = it.optNullableString("session_time"),
-                room = it.optNullableString("room"),
-                visitType = it.optNullableString("visit_type"),
-                specialtyTags = it.optStringList("specialty_tags"),
-                specialtyScore = it.optNullableDouble("specialty_score"),
-                timeScore = it.optNullableDouble("time_score"),
-                matchReason = it.optNullableString("match_reason"),
-                deptId = it.optNullableInt("dept_id")
-            )
-        }
+        optJSONObject(index)?.toRecommendationItemDto()
     }
 }
+
+private fun JSONObject.toRecommendationItemDto(): RecommendationItemDto = RecommendationItemDto(
+    recommendationId = optString("recommendation_id"),
+    parentDept = optString("parentDept"),
+    childDept = optString("childDept"),
+    doctor = optString("doctor"),
+    date = optString("date"),
+    session = optString("session"),
+    slot = optString("slot", ""),
+    score = optDouble("score", 0.0),
+    reasons = optArray("reasons").toStringList(),
+    rank = optNullableInt("rank"),
+    isBestMatch = optBoolean("is_best_match", false),
+    doctorId = optNullableString("doctor_id"),
+    scheduleId = optNullableString("schedule_id"),
+    sessionTime = optNullableString("session_time"),
+    room = optNullableString("room"),
+    visitType = optNullableString("visit_type"),
+    specialtyTags = optStringList("specialty_tags"),
+    specialtyScore = optNullableDouble("specialty_score"),
+    timeScore = optNullableDouble("time_score"),
+    matchReason = optNullableString("match_reason"),
+    deptId = optNullableInt("dept_id")
+)
 
 private fun RecommendationItemDto.toJsonObject(): JSONObject = JSONObject().apply {
     put("recommendation_id", recommendationId)

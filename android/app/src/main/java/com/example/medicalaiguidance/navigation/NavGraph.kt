@@ -24,7 +24,6 @@ object Route {
     const val CHAT_START = "chat/start/{visitPlan}"
     const val CHAT_HISTORY = "chat/history/{historyId}"
     const val VISIT_TYPE_SELECTION = "visit_type_selection"
-    const val RETURN_VISIT = "return_visit"
     const val QUICK_SEARCH = "quick_search"
     const val SELECT_DOCTOR = "select_doctor/{visitPlan}"
     const val CONFIRM_NEED = "confirm_need"
@@ -94,11 +93,6 @@ fun NavGraph(navController: NavHostController) {
         }
 
         composable(Route.QUICK_SEARCH) {
-            QuickSearchScreen(navController = navController)
-        }
-
-        // Legacy route alias retained so old navigation state does not crash.
-        composable(Route.RETURN_VISIT) {
             QuickSearchScreen(navController = navController)
         }
 

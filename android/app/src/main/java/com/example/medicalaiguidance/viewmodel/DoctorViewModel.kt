@@ -6,6 +6,7 @@ import androidx.lifecycle.viewModelScope
 import com.example.medicalaiguidance.network.FallbackDepartmentDto
 import com.example.medicalaiguidance.network.MedicalApiException
 import com.example.medicalaiguidance.network.RecommendationItemDto
+import com.example.medicalaiguidance.network.ScriptResponseDto
 import com.example.medicalaiguidance.repository.MedicalRepository
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -136,8 +137,9 @@ class DoctorViewModel(
             try {
                 repository.selectRecommendation(item)
                 val script = repository.generateScript(caseId, item.recommendationId)
-                if (!script.isSuccess || script.steps.isEmpty()) {
-                    _uiState.value = DoctorUiState.Error(script.message ?: "後端未回傳可用的掛號導引步驟。")
+                val revalidationError = script.revalidationError()
+                if (revalidationError != null) {
+                    _uiState.value = DoctorUiState.Error(revalidationError)
                     return@launch
                 }
                 onNavigate()
@@ -149,6 +151,9 @@ class DoctorViewModel(
         }
     }
 }
+
+internal fun ScriptResponseDto.revalidationError(): String? =
+    if (isSuccess) null else message ?: "無法重新確認此掛號班表，請重新選擇。"
 
 internal fun intentionalNoSlotsMessage(error: Exception): String? {
     val apiError = error as? MedicalApiException ?: return null

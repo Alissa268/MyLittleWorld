@@ -59,6 +59,15 @@ internal fun VoiceChatResponseDto.isReadyForRecommendation(): Boolean {
         isReadyStage
 }
 
+internal fun VoiceChatResponseDto.isHistoryCompleted(): Boolean =
+    stage in setOf("recommending", "script_ready", "done")
+
+internal fun TriageResultDto.isHistoryCompleted(): Boolean = when (conversationState.stage) {
+    "recommending" -> conversationState.confirmed || triageCase?.confirmed == true
+    "script_ready", "done" -> true
+    else -> false
+}
+
 class ChatViewModel(
     private val repository: MedicalRepository = MedicalRepository(),
     private val ttsSessionFactory: () -> TtsSession = repository::beginTtsSession
@@ -285,7 +294,7 @@ class ChatViewModel(
 
                 _showDecisionButtons.value = readyForRecommendation
                 _showDoctorButton.value = readyForRecommendation
-                saveHistory(completed = readyForRecommendation, summary = reply)
+                saveHistory(completed = result.isHistoryCompleted(), summary = reply)
 
                 if (stage == "recommending") {
                     onAnalysisComplete()
@@ -653,7 +662,7 @@ class ChatViewModel(
         val readyForRecommendation = result.isReadyForRecommendation()
         _showDecisionButtons.value = readyForRecommendation
         _showDoctorButton.value = readyForRecommendation
-        saveHistory(completed = readyForRecommendation, summary = reply)
+        saveHistory(completed = result.isHistoryCompleted(), summary = reply)
         if (stage == "recommending") onAnalysisComplete()
     }
 

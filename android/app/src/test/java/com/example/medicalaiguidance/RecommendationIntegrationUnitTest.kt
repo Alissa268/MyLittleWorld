@@ -1,8 +1,10 @@
 package com.example.medicalaiguidance
 
 import com.example.medicalaiguidance.network.parseRecommendationResult
+import com.example.medicalaiguidance.network.parseScriptResponse
 import com.example.medicalaiguidance.network.RecommendationItemDto
 import com.example.medicalaiguidance.network.RecommendRequest
+import com.example.medicalaiguidance.network.ScriptResponseDto
 import com.example.medicalaiguidance.network.toJson
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.repository.MedicalRepository
@@ -12,9 +14,11 @@ import com.example.medicalaiguidance.screen.TIME_MATCH_TITLE
 import com.example.medicalaiguidance.screen.specialtyDescription
 import com.example.medicalaiguidance.screen.scoreToStars
 import com.example.medicalaiguidance.screen.timeDescription
+import com.example.medicalaiguidance.viewmodel.revalidationError
 import org.json.JSONException
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -76,6 +80,89 @@ class RecommendationIntegrationUnitTest {
         assertEquals("王醫師", appointment.doctor.name)
         assertEquals("2026-07-27", appointment.date)
         assertEquals("上午", appointment.timeSlot)
+    }
+
+    @Test
+    fun scriptResponseParsesRevalidatedRecommendationAndAllowsEmptySteps() {
+        val response = parseScriptResponse(
+            """
+            {
+              "isSuccess": true,
+              "recommendation_id": "rec_sql_001",
+              "recommendation": {
+                "recommendation_id": "rec_sql_001",
+                "parentDept": "內科系",
+                "childDept": "一般內科",
+                "doctor": "王醫師",
+                "doctor_id": "D001",
+                "schedule_id": "S001",
+                "dept_id": 7,
+                "date": "2099-07-27",
+                "session": "上午",
+                "room": "B診",
+                "score": 91.0
+              },
+              "steps": [],
+              "step_count": 0
+            }
+            """.trimIndent()
+        )
+
+        assertTrue(response.isSuccess)
+        assertTrue(response.steps.isEmpty())
+        assertEquals("S001", response.recommendation?.scheduleId)
+        assertEquals("B診", response.recommendation?.room)
+        assertNull(response.revalidationError())
+    }
+
+    @Test
+    fun scriptResponseWithoutRecommendationRemainsCompatible() {
+        val response = parseScriptResponse(
+            """{"isSuccess":true,"recommendation_id":"rec_legacy","steps":[]}"""
+        )
+
+        assertNull(response.recommendation)
+        assertNull(response.revalidationError())
+    }
+
+    @Test
+    fun repositoryUsesBackendRevalidatedRecommendationForConfirmation() {
+        val repository = MedicalRepository()
+        repository.clearRecommendationFlow()
+        repository.selectRecommendation(
+            RecommendationItemDto(
+                recommendationId = "rec_sql_001",
+                parentDept = "內科系",
+                childDept = "一般內科",
+                doctor = "王醫師",
+                date = "2099-07-27",
+                session = "上午",
+                slot = "A診",
+                room = "A診",
+                score = 91.0,
+                doctorId = "D001",
+                scheduleId = "S001",
+                deptId = 7
+            )
+        )
+        val revalidated = repository.getSelectedRecommendation()!!.copy(
+            slot = "B診",
+            room = "B診",
+            sessionTime = "09:00-12:00"
+        )
+
+        repository.consumeScriptResponse(
+            ScriptResponseDto(
+                isSuccess = true,
+                recommendationId = revalidated.recommendationId,
+                recommendation = revalidated,
+                steps = emptyList()
+            )
+        )
+
+        assertEquals("B診", repository.getSelectedRecommendation()?.room)
+        assertEquals("B診", repository.getConfirmedAppointment().doctor.title)
+        assertEquals("09:00-12:00", repository.getConfirmedAppointment().timeSlot)
     }
 
     @Test

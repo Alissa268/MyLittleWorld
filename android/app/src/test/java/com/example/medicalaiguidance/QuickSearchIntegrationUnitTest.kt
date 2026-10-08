@@ -26,14 +26,12 @@ import org.junit.Test
 
 class QuickSearchIntegrationUnitTest {
     @Test
-    fun quickSearchHasIndependentVisitTypeAndRouteWhileLegacyReturnVisitRemains() {
+    fun quickSearchHasIndependentVisitTypeAndRoute() {
         assertEquals("quick_search", VisitPlan.QUICK_SEARCH.apiValue)
         assertEquals("quick_search", VisitPlan.QUICK_SEARCH.routeValue)
         assertEquals("快速查詢", VisitPlan.QUICK_SEARCH.displayName)
         assertEquals("quick_search", Route.QUICK_SEARCH)
 
-        assertEquals("return_visit", VisitPlan.RETURN_VISIT.apiValue)
-        assertEquals("return_visit", Route.RETURN_VISIT)
     }
 
     @Test
@@ -198,10 +196,7 @@ class QuickSearchIntegrationUnitTest {
         assertThrows(IllegalStateException::class.java) {
             resolveRecommendationVisitType(null, VisitPlan.QUICK_SEARCH.apiValue)
         }
-        assertEquals(
-            "return_visit",
-            resolveRecommendationVisitType(null, VisitPlan.RETURN_VISIT.apiValue)
-        )
+        assertEquals("followup", resolveRecommendationVisitType(null, VisitPlan.FOLLOW_UP.apiValue))
     }
 
     private fun quickSchedule() = RecommendationItemDto(

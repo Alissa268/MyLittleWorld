@@ -20,17 +20,17 @@ class AppointmentTypeMappingUnitTest {
     }
 
     @Test
-    fun followupMapsToReturnVisit() {
+    fun followupMapsToFollowupReservationSection() {
         assertEquals(
-            AppointmentType.RETURN_VISIT,
+            AppointmentType.FOLLOWUP,
             VisitPlan.FOLLOW_UP.toAccessibilityAppointmentTypeOrNull()
         )
     }
 
     @Test
-    fun quickSearchMapsToReturnVisit() {
+    fun quickSearchMapsToFollowupReservationSection() {
         assertEquals(
-            AppointmentType.RETURN_VISIT,
+            AppointmentType.FOLLOWUP,
             VisitPlan.QUICK_SEARCH.toAccessibilityAppointmentTypeOrNull()
         )
     }
@@ -39,22 +39,22 @@ class AppointmentTypeMappingUnitTest {
     fun allFormalVisitPlansKeepTheirExpectedMappings() {
         val mappings = mapOf(
             VisitPlan.INITIAL to AppointmentType.INITIAL,
-            VisitPlan.FOLLOW_UP to AppointmentType.RETURN_VISIT,
-            VisitPlan.QUICK_SEARCH to AppointmentType.RETURN_VISIT
+            VisitPlan.FOLLOW_UP to AppointmentType.FOLLOWUP,
+            VisitPlan.QUICK_SEARCH to AppointmentType.FOLLOWUP
         )
 
         mappings.forEach { (visitPlan, expected) ->
             assertEquals(expected, visitPlan.toAccessibilityAppointmentTypeOrNull())
         }
         assertEquals(1, mappings.values.count { it == AppointmentType.INITIAL })
-        assertEquals(2, mappings.values.count { it == AppointmentType.RETURN_VISIT })
+        assertEquals(2, mappings.values.count { it == AppointmentType.FOLLOWUP })
     }
 
     @Test
-    fun legacyReturnVisitAliasStillMapsToReturnVisit() {
+    fun visitPlanContainsOnlyFormalProductFlowsAndUnknown() {
         assertEquals(
-            AppointmentType.RETURN_VISIT,
-            VisitPlan.RETURN_VISIT.toAccessibilityAppointmentTypeOrNull()
+            setOf(VisitPlan.INITIAL, VisitPlan.FOLLOW_UP, VisitPlan.QUICK_SEARCH, VisitPlan.UNKNOWN),
+            VisitPlan.entries.toSet()
         )
     }
 

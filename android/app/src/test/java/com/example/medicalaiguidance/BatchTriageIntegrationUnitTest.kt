@@ -2,10 +2,8 @@ package com.example.medicalaiguidance
 
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.navigation.Route
-import com.example.medicalaiguidance.network.AvailabilityDto
 import com.example.medicalaiguidance.network.BatchAnswerDto
 import com.example.medicalaiguidance.network.ChatRequest
-import com.example.medicalaiguidance.network.FollowupRecommendRequest
 import com.example.medicalaiguidance.network.QuestionItemDto
 import com.example.medicalaiguidance.network.medicalApiErrorMessage
 import com.example.medicalaiguidance.network.MedicalApiException
@@ -34,14 +32,14 @@ class BatchTriageIntegrationUnitTest {
         assertEquals("visit_type_selection", Route.VISIT_TYPE_SELECTION)
         assertEquals("chat/start/initial", Route.chat(VisitPlan.INITIAL))
         assertEquals("chat/start/followup", Route.chat(VisitPlan.FOLLOW_UP))
-        assertEquals("return_visit", Route.RETURN_VISIT)
+        assertEquals("quick_search", Route.QUICK_SEARCH)
     }
 
     @Test
     fun visitPlansExposeThreeCanonicalApiValues() {
         assertEquals("initial", VisitPlan.INITIAL.apiValue)
         assertEquals("followup", VisitPlan.FOLLOW_UP.apiValue)
-        assertEquals("return_visit", VisitPlan.RETURN_VISIT.apiValue)
+        assertEquals("quick_search", VisitPlan.QUICK_SEARCH.apiValue)
         assertEquals("unknown", VisitPlan.UNKNOWN.apiValue)
     }
 
@@ -157,14 +155,13 @@ class BatchTriageIntegrationUnitTest {
     fun doctorNavigationRouteExplicitlyPersistsVisitPlan() {
         assertEquals("select_doctor/initial", Route.selectDoctor(VisitPlan.INITIAL))
         assertEquals("select_doctor/followup", Route.selectDoctor(VisitPlan.FOLLOW_UP))
-        assertEquals("select_doctor/return_visit", Route.selectDoctor(VisitPlan.RETURN_VISIT))
         assertEquals(VisitPlan.FOLLOW_UP, VisitPlan.fromRoute("followup"))
     }
 
     @Test
     fun doctorVisitPlanCanBeRecoveredAfterInMemoryStateIsLost() {
         assertEquals("followup", resolveRecommendationVisitType(null, VisitPlan.FOLLOW_UP.apiValue))
-        assertEquals("return_visit", resolveRecommendationVisitType(null, VisitPlan.RETURN_VISIT.apiValue))
+        assertEquals("initial", resolveRecommendationVisitType(null, VisitPlan.INITIAL.apiValue))
     }
 
     @Test
@@ -230,35 +227,6 @@ class BatchTriageIntegrationUnitTest {
 
         assertNull(history.visitType)
         assertEquals("一般內科", history.typeTitle)
-    }
-
-    @Test
-    fun returnVisitRequestMapsToExistingFollowupSchema() {
-        val json = JSONObject(
-            FollowupRecommendRequest(
-                parentDept = "外科系",
-                childDept = "一般骨科",
-                deptId = "7",
-                originalDoctor = "王醫師",
-                originalDoctorId = "101",
-                availability = AvailabilityDto(
-                    preferredDates = listOf("2026-08-24"),
-                    preferredSessions = listOf("上午")
-                )
-            ).toJson()
-        )
-
-        assertEquals("return_visit", json.getString("visit_type"))
-        assertEquals("一般骨科", json.getString("childDept"))
-        assertEquals("7", json.getString("dept_id"))
-        assertEquals("王醫師", json.getString("original_doctor"))
-        assertEquals("101", json.getString("original_doctor_id"))
-        assertEquals(
-            "2026-08-24",
-            json.getJSONObject("availability").getJSONArray("preferred_dates").getString(0)
-        )
-        assertEquals(0, json.getJSONObject("availability").getJSONArray("preferred_days").length())
-        assertEquals("上午", json.getJSONObject("availability").getJSONArray("preferred_sessions").getString(0))
     }
 
     @Test

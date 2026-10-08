@@ -199,9 +199,14 @@ class MedicalRepository(
                 recommendationId = recommendationId,
                 recommendation = recommendation
             )
-        ).also {
-            currentScript = it
+        ).also(::consumeScriptResponse)
+
+    internal fun consumeScriptResponse(response: ScriptResponseDto) {
+        if (response.isSuccess) {
+            response.recommendation?.let(::selectRecommendation)
         }
+        currentScript = response
+    }
 
     fun beginTtsSession(): TtsSession {
         currentTtsSession?.let { old ->

@@ -179,9 +179,10 @@ class QuickSearchViewModel(
                     recommendationId = schedule.recommendationId,
                     recommendation = schedule
                 )
-                if (!script.isSuccess || script.steps.isEmpty()) {
+                val revalidationError = script.revalidationError()
+                if (revalidationError != null) {
                     _uiState.value = QuickSearchUiState.Error(
-                        script.message ?: "後端未回傳可用的掛號導引步驟。"
+                        revalidationError
                     )
                     return@launch
                 }

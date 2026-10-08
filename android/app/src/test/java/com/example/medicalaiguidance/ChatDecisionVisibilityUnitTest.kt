@@ -7,6 +7,7 @@ import com.example.medicalaiguidance.network.TriageResultDto
 import com.example.medicalaiguidance.network.UrgencyResultDto
 import com.example.medicalaiguidance.network.parseVoiceChatResponse
 import com.example.medicalaiguidance.viewmodel.isReadyForRecommendation
+import com.example.medicalaiguidance.viewmodel.isHistoryCompleted
 import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Test
@@ -38,6 +39,23 @@ class ChatDecisionVisibilityUnitTest {
     }
 
     @Test
+    fun waitingConfirmationShowsButtonsWithoutCompletingHistory() {
+        val waiting = result()
+
+        assertTrue(waiting.isReadyForRecommendation())
+        assertFalse(waiting.isHistoryCompleted())
+
+        val confirmed = waiting.copy(
+            conversationState = waiting.conversationState.copy(
+                stage = "recommending",
+                confirmed = true
+            )
+        )
+        assertTrue(confirmed.isReadyForRecommendation())
+        assertTrue(confirmed.isHistoryCompleted())
+    }
+
+    @Test
     fun voiceResponseParsesDepartmentBeforeShowingButtons() {
         val ready = parseVoiceChatResponse(
             """
@@ -56,7 +74,10 @@ class ChatDecisionVisibilityUnitTest {
         )
 
         assertTrue(ready.isReadyForRecommendation())
+        assertFalse(ready.isHistoryCompleted())
         assertFalse(ready.copy(departmentResult = null).isReadyForRecommendation())
+
+        assertTrue(ready.copy(stage = "recommending").isHistoryCompleted())
     }
 
     private fun result() = TriageResultDto(

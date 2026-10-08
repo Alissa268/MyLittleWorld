@@ -51,6 +51,7 @@ fun ConfirmNeedScreen(
     val context = LocalContext.current
     val appointment by viewModel.appointmentInfo.collectAsState()
     val visitPlan by viewModel.visitPlan.collectAsState()
+    val errorMessage by viewModel.errorMessage.collectAsState()
 
     // 控制提醒彈窗的顯示
     var showPermissionDialog by remember { mutableStateOf(false) }
@@ -90,8 +91,31 @@ fun ConfirmNeedScreen(
     }
 
     if (appointment == null) {
-        Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
-            CircularProgressIndicator(color = primaryDark)
+        if (errorMessage == null) {
+            Box(modifier = Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator(color = primaryDark)
+            }
+        } else {
+            Column(
+                modifier = Modifier.fillMaxSize().padding(24.dp),
+                horizontalAlignment = Alignment.CenterHorizontally,
+                verticalArrangement = Arrangement.Center
+            ) {
+                Text(
+                    text = errorMessage.orEmpty(),
+                    color = Color(0xFF8B2E2E),
+                    fontSize = 16.sp
+                )
+                Spacer(modifier = Modifier.height(16.dp))
+                Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                    OutlinedButton(onClick = { navController.popBackStack() }) {
+                        Text("返回")
+                    }
+                    Button(onClick = viewModel::loadConfirmedAppointment) {
+                        Text("重試")
+                    }
+                }
+            }
         }
         return
     }

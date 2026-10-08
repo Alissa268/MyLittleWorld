@@ -12,15 +12,14 @@ import com.example.medicalaiguidance.model.VisitPlan
 
 enum class AppointmentType {
     INITIAL,
-    RETURN_VISIT
+    FOLLOWUP
 }
 
 internal fun VisitPlan.toAccessibilityAppointmentTypeOrNull(): AppointmentType? =
     when (this) {
         VisitPlan.INITIAL -> AppointmentType.INITIAL
         VisitPlan.FOLLOW_UP,
-        VisitPlan.QUICK_SEARCH,
-        VisitPlan.RETURN_VISIT -> AppointmentType.RETURN_VISIT
+        VisitPlan.QUICK_SEARCH -> AppointmentType.FOLLOWUP
         VisitPlan.UNKNOWN -> null
     }
 
@@ -1200,7 +1199,7 @@ class MyAccessibilityService : AccessibilityService() {
     private fun isPersonalDataFormVisible(nodes: List<NodeData>): Boolean {
         val hasIdField = nodes.any { it.text.trim() == "身分證號" || it.text.trim() == "請輸入身分證號" }
 
-        if (pendingAppointmentType == AppointmentType.RETURN_VISIT) {
+        if (pendingAppointmentType == AppointmentType.FOLLOWUP) {
             return hasIdField
         }
 
@@ -1548,19 +1547,19 @@ data class NodeData(
 
 private enum class ReservationSection {
     INITIAL,
-    RETURN_VISIT
+    FOLLOWUP
 }
 
 private fun AppointmentType.toReservationSection(): ReservationSection =
     when (this) {
         AppointmentType.INITIAL -> ReservationSection.INITIAL
-        AppointmentType.RETURN_VISIT -> ReservationSection.RETURN_VISIT
+        AppointmentType.FOLLOWUP -> ReservationSection.FOLLOWUP
     }
 
 private fun AppointmentType.displayName(): String =
     when (this) {
         AppointmentType.INITIAL -> "初診預約"
-        AppointmentType.RETURN_VISIT -> "複診掛號"
+        AppointmentType.FOLLOWUP -> "複診掛號"
     }
 
 private enum class UnavailableSlotStatus(val label: String) {
@@ -1636,7 +1635,7 @@ private fun String.toReservationSectionOrNull(): ReservationSection? {
     val value = trim()
     return when {
         value.contains("初診預約") -> ReservationSection.INITIAL
-        value.contains("複診掛號") || value.contains("復診掛號") -> ReservationSection.RETURN_VISIT
+        value.contains("複診掛號") || value.contains("復診掛號") -> ReservationSection.FOLLOWUP
         else -> null
     }
 }
