@@ -24,6 +24,7 @@ from app.services.conversation_service import (
     advance_conversation,
     capture_pending_answer,
     capture_safety_screen_answer,
+    clear_answered_pending,
     request_clarification,
     safety_screen_resolved,
 )
@@ -72,6 +73,9 @@ async def chat(req: ChatRequest) -> TriageResult:
     perf, perf_token = begin_chat_perf()
     with perf.measure("case_prepare"):
         case = _resolve_case(req)
+        clarification_before = case.conversation_state.clarification_status
+        pending_before = case.conversation_state.pending_clarification_intent
+        department_before = case.conversation_state.department_status
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
         batch_enabled = bool(settings.batch_triage_enabled)
@@ -341,6 +345,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 )
                 if not safety_check_turn:
                     capture_pending_answer(case, pending_interpretation, user_text_parts)
+                    clear_answered_pending(case)
                 department_reasoning_allowed = bool(
                     has_user_input
                     and turn_interpretation_complete
@@ -366,6 +371,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                                 pending_interpretation.answer_status
                                 if pending_interpretation is not None else None
                             ),
+                            dialogue_act=getattr(ai_suggestion, "dialogue_act", None),
                         )
                 advance_conversation(
                     case,
@@ -375,6 +381,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 )
                 if not has_user_input and not safety_check_turn and not case.history_records:
                     case.conversation_state.last_question_key = "symptom"
+                    case.conversation_state.reply_source = "INITIAL_PROMPT"
                     case.triage.next_question = QUESTION_TEXTS["symptom"]
                 if case.triage.next_question:
                     case.history_records.append(Message(role="assistant", content=case.triage.next_question))
@@ -523,14 +530,17 @@ async def chat(req: ChatRequest) -> TriageResult:
         )
     urgent_terminal = _is_urgent_terminal(case)
     if urgent_terminal:
+        case.conversation_state.reply_source = "URGENT_BACKEND"
         reply = case.triage.warning_message or URGENT_WARNING_FALLBACK
     elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
         reply = DEPARTMENT_UNRESOLVED_REPLY
     elif conversational_mode and case.conversation_state.clarification_status == "unresolved":
         reply = SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else UNRESOLVED_REPLY
     elif reply is None and case.conversation_state.awaiting_confirmation and case.department_result:
+        case.conversation_state.reply_source = "CONFIRMATION"
         reply = build_department_confirmation_reply(case)
     elif reply is None and case.conversation_state.confirmed:
+        case.conversation_state.reply_source = "CONFIRMED_BACKEND"
         reply = "已確認分診結果，可呼叫 /recommend 取得推薦掛號方案。"
 
     if not batch_mode and not urgent_terminal:
@@ -541,6 +551,22 @@ async def chat(req: ChatRequest) -> TriageResult:
                 fallback_reply=reply or "",
             )
 
+    logger.info(
+        "chat ownership case_id=%s clarification_before=%s clarification_after=%s "
+        "safety_check_turn=%s safety_completed_this_turn=%s safety_answer_validation=%s "
+        "safety_answer_attempts=%s dialogue_act=%s pending_before=%s pending_after=%s "
+        "department_before=%s department_after=%s question_accepted=%s rejection_reason=%s "
+        "repair_attempted=%s final_reply_source=%s",
+        case.case_id, clarification_before, case.conversation_state.clarification_status,
+        safety_check_turn, safety_completed_this_turn, case.conversation_state.safety_answer_validation,
+        case.conversation_state.safety_answer_attempts,
+        getattr(getattr(ai_suggestion, "dialogue_act", None), "act", "unknown"),
+        pending_before, case.conversation_state.pending_clarification_intent,
+        department_before, case.conversation_state.department_status,
+        case.conversation_state.reply_source in {"AI_PLANNER", "AI_REPAIR"},
+        case.conversation_state.question_rejection_reason,
+        case.conversation_state.question_repair_attempted, case.conversation_state.reply_source,
+    )
     with perf.measure("response_build"):
         response = TriageResult(
             case_id=case.case_id,
@@ -695,6 +721,7 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.next_information_needed = []
     case.conversation_state.asked_clarification_intents = []
     case.conversation_state.pending_clarification_intent = None
+    case.conversation_state.pending_clarification_question = None
     case.conversation_state.clarification_evidence = {}
     case.conversation_state.department_status = "unresolved"
     case.conversation_state.candidate_departments = []

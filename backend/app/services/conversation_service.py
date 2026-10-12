@@ -8,7 +8,7 @@ import math
 import re
 from dataclasses import dataclass
 
-from app.schemas import PendingAnswerInterpretation, SemanticExtraction, TriageCase
+from app.schemas import DialogueActInterpretation, PendingAnswerInterpretation, SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark_questions_asked
@@ -22,6 +22,7 @@ SAFETY_UNRESOLVED_REPLY = (
 )
 SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
 SAFETY_PENDING_INTENT = "safety_screen"
+# Retained only for import compatibility and tests asserting they never reach patients.
 FALLBACK_QUESTIONS = (
     "可以再描述一下目前最困擾你的不舒服，以及它什麼情況下會變嚴重嗎？",
     "剛才提到的不舒服，還有什麼變化或細節是你覺得重要的？",
@@ -33,17 +34,19 @@ NEUTRAL_PENDING_RETRIES = (
     "請再說明一下和剛才問題相關的症狀變化或感受。",
 )
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
+TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
-_UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科別|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
+_UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
 _MULTI_QUESTION = re.compile(r"[?？].*[?？]|[;；]", re.DOTALL)
 _MULTI_DIMENSION_QUESTION = re.compile(
-    r"(?:，|、|和|以及|並且|同時|另外|還有).{0,80}(?:是否|有沒有|多久|何時|哪裡|什麼|如何|多少|幾次|幾天)"
+    r"(?:另外|並且|還有|以及).{0,12}(?:是否|有沒有|多久|何時|哪裡|什麼|如何|多少|幾次|幾天)|"
+    r"(?:如何|多少|多久|幾次|幾天)[^？?]{0,40}[，、](?:是否|有沒有|何時|哪裡)"
 )
 _INTERNAL_STATE_TEXT = re.compile(
     r"已記錄本輪新資訊|上一個澄清(?:面向|問題)|目前仍需更多可靠|"
     r"科別仍不確定|科別.*(?:不確定|未收斂)|workflow|工作流程|"
-    r"本輪症狀抽取|尚無\s*grounded|目前仍缺少可區分症狀"
+    r"本輪症狀抽取|尚無\s*grounded|目前仍缺少可區分症狀|安全篩檢所列|確認是否有目前安全"
 )
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
@@ -63,6 +66,10 @@ class ClarificationSuggestion:
     answer_source_text: str | None = None
     answer_status: str | None = None
     answer_confidence: float | None = None
+    information_need: str | None = None
+    rejection_reason: str | None = None
+    repair_attempted: bool = False
+    reply_source: str = "AI_PLANNER"
 
 
 @dataclass(frozen=True)
@@ -74,6 +81,8 @@ class PendingAnswerClassification:
 
 
 def _pending_question(case: TriageCase) -> str | None:
+    if case.conversation_state.pending_clarification_intent and case.conversation_state.pending_clarification_question:
+        return case.conversation_state.pending_clarification_question
     return next(
         (item.content for item in reversed(case.history_records) if item.role == "assistant"),
         None,
@@ -145,30 +154,38 @@ async def request_clarification(
     *,
     classify_answer_fields: bool = True,
     focused_answer_status: str | None = None,
+    dialogue_act: DialogueActInterpretation | None = None,
 ) -> ClarificationSuggestion | None:
     """Treat the provider's JSON as a proposal, never a workflow transition."""
     state = case.conversation_state
     safety_planning = state.clarification_status == "safety_check" and not safety_screen_resolved(case)
+    required_intent = (
+        SAFETY_PENDING_INTENT if safety_planning else
+        state.pending_clarification_intent or state.department_next_question_intent
+    )
+    if required_intent in state.clarification_evidence:
+        required_intent = None
     payload = {
         "conversation_history": [item.model_dump() for item in case.history_records[-24:]],
         "current_user_text": user_sources,
         "grounded_patient_evidence": case.patient_input.model_dump(),
         "semantic_extractions": [item.model_dump() for item in case.semantic_extractions[-20:]],
         "uncertainty_reasons": state.uncertainty_reasons,
-        "next_information_needed": state.next_information_needed,
+        "next_information_needed": _patient_information_needs(state.next_information_needed),
         "asked_clarification_intents": state.asked_clarification_intents,
         "pending_clarification_intent": state.pending_clarification_intent,
-        "pending_question": _pending_question(case) if state.pending_clarification_intent else None,
+        "pending_question": _pending_question(case) if state.pending_clarification_intent or safety_planning else None,
         "focused_pending_answer_status": focused_answer_status,
         "clarification_evidence": state.clarification_evidence,
         "department_status": state.department_status,
         "candidate_departments": [item.model_dump() for item in state.candidate_departments],
         "department_uncertainty_reason": state.department_uncertainty_reason,
-        "department_next_information_needed": state.department_next_information_needed,
-        "required_next_question_intent": SAFETY_PENDING_INTENT if safety_planning else state.department_next_question_intent,
+        "department_next_information_needed": _patient_information_need(state.department_next_information_needed),
+        "required_next_question_intent": required_intent,
         "safety_planning": safety_planning,
         "safety_screen_question": QUESTION_TEXTS[RED_FLAG_QUESTION_KEY] if safety_planning else None,
         "safety_answer_validation": state.safety_answer_validation,
+        "dialogue_act": (dialogue_act or DialogueActInterpretation()).model_dump(),
     }
     answer_contract = (
         "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
@@ -192,6 +209,10 @@ async def request_clarification(
         "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
         f"{answer_contract}"
         "partial 或 unclear 時維持同一 intent，提出一個更精確、不重複、只問同一面向的追問。"
+        "dialogue_act=request_explanation 時，具體解釋目前要確認的單一資訊並提出可回答的聚焦問題；"
+        "claims_already_answered 時，先參照 accepted clarification_evidence，不得重問已回答 intent，"
+        "也不得僅因使用者表示說過就新增證據。若仍缺資訊，明確指出那一個資訊。"
+        "不要使用『剛才問題』『再補充細節』『換個方式』等沒有具體資訊的罐頭。"
         "department_status=ambiguous 時，優先問最能區分候選的一個自然問題；"
         "若有 required_next_question_intent，它只是 Backend/AI 間的 opaque correlation key：輸出的 intent 必須"
         "原樣 echo 並與它完全一致，但 question 仍然只問一個聚焦臨床面向。不得解析 key 名稱，也不得因 key"
@@ -203,71 +224,119 @@ async def request_clarification(
         "如果症狀資訊足夠，可建議 status=sufficient，但最終完成與否由 Backend 決定。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
         "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, intent, reason, "
-        "answered_intent, answer_source_text, answer_status, answer_confidence。"
+        "answered_intent, answer_source_text, answer_status, answer_confidence, information_needs。"
+        "information_needs 是僅含一個患者能回答的具體資訊需求的字串陣列；不能寫安全狀態或工作流程。"
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
-    try:
-        raw = await complete_runtime_json(prompt, purpose="conversation_clarification")
-        data = json.loads(str(raw).strip())
-        if not isinstance(data, dict):
-            return None
-        status = data.get("status")
-        reason = data.get("reason")
-        if status not in {"clarification_needed", "sufficient"} or not isinstance(reason, str):
-            return None
-        reason = reason.strip()[:240]
-        if not reason:
-            return None
-        question = data.get("question")
-        intent = data.get("intent")
-        if status == "clarification_needed":
-            if isinstance(question, str):
-                question = question.strip()
-            if (
-                not isinstance(question, str) or not 4 <= len(question) <= 180
-                or _UNSAFE_QUESTION.search(question) or _MULTI_QUESTION.search(question)
-                or _MULTI_DIMENSION_QUESTION.search(question)
-                or _INTERNAL_STATE_TEXT.search(question)
-                or not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent)
-            ):
-                question = None
-                intent = None
+    compatibility_answer = (None, None, None, None)
+    rejection = None
+    initial_rejection = None
+    for attempt in range(2):
+        proposal = None
+        try:
+            raw = await complete_runtime_json(
+                prompt, purpose="conversation_clarification" if attempt == 0 else "conversation_clarification_repair",
+            )
+        except Exception as exc:
+            rejection = "provider_timeout" if isinstance(exc, TimeoutError) else "provider_failure"
+            logger.warning("clarification failed case_id=%s reason=%s error_type=%s", case.case_id, rejection, type(exc).__name__)
+            break
+        try:
+            proposal = json.loads(str(raw).strip())
+        except (TypeError, ValueError):
+            rejection = "invalid_json"
         else:
-            question = None
-            intent = None
-        answered_intent = data.get("answered_intent") if classify_answer_fields else None
-        answer_source = data.get("answer_source_text") if classify_answer_fields else None
-        answer_status = data.get("answer_status") if classify_answer_fields else None
-        answer_confidence = data.get("answer_confidence") if classify_answer_fields else None
-        if classify_answer_fields and not _grounded_clarification_answer(
-            answered_intent, answer_source, answer_status, answer_confidence,
-            state.pending_clarification_intent, user_sources,
-        ):
-            answered_intent = None
-            answer_source = None
-            answer_status = None
-            answer_confidence = None
-        if safety_planning and (intent != SAFETY_PENDING_INTENT or question == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]):
-            question = None
-            intent = None
-        elif not safety_planning and status == "clarification_needed" and state.department_status == "ambiguous" and state.department_next_question_intent:
-            if intent != state.department_next_question_intent:
-                if not (
-                    state.pending_clarification_intent == intent
-                    and (answer_status in {"partial", "unclear"}
-                         or focused_answer_status in {"partial", "unclear"})
-                ):
-                    question = None
-                    intent = None
-        return ClarificationSuggestion(
-            status, question, intent, reason, answered_intent,
-            answer_source.strip() if answer_source else None,
-            answer_status, answer_confidence,
+            if classify_answer_fields and isinstance(proposal, dict):
+                fields = tuple(proposal.get(key) for key in (
+                    "answered_intent", "answer_source_text", "answer_status", "answer_confidence",
+                ))
+                if _grounded_clarification_answer(*fields, state.pending_clarification_intent, user_sources):
+                    compatibility_answer = fields
+            rejection = _question_rejection(case, proposal, required_intent, safety_planning)
+        logger.info(
+            "clarification proposal case_id=%s accepted=%s rejection_reason=%s repair_attempted=%s",
+            case.case_id, rejection is None, rejection, bool(attempt),
         )
-    except Exception as exc:
-        logger.warning("clarification provider failed case_id=%s error_type=%s", case.case_id, type(exc).__name__)
-        return None
+        if rejection is None:
+            needs = (proposal.get("information_needs") or []) if proposal["status"] == "clarification_needed" else []
+            return ClarificationSuggestion(
+                proposal["status"],
+                proposal.get("question", "").strip() if proposal["status"] == "clarification_needed" else None,
+                proposal.get("intent") if proposal["status"] == "clarification_needed" else None,
+                proposal["reason"].strip()[:240], *compatibility_answer,
+                information_need=needs[0].strip() if needs else None,
+                rejection_reason=initial_rejection,
+                repair_attempted=bool(attempt), reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
+            )
+        if attempt == 0:
+            initial_rejection = rejection
+            repair_context = dict(payload, original_proposal=proposal if proposal is not None else str(raw),
+                                  rejection_reason=rejection)
+            prompt = (
+                prompt + "\n這是唯一一次修復：依下列 validator rejection_reason 修正 proposal，"
+                "只產生目前 required intent 的一個具體問句，不得新增患者事實或控制 state。\n"
+                + json.dumps(repair_context, ensure_ascii=False)
+            )
+    return ClarificationSuggestion(
+        "clarification_needed", None, None, "clarification_generation_failed", *compatibility_answer,
+        rejection_reason=rejection, repair_attempted=bool(attempt), reply_source="TECHNICAL_FALLBACK",
+    )
+
+
+def _question_rejection(case: TriageCase, proposal: object, required_intent: str | None,
+                        safety_planning: bool) -> str | None:
+    if not isinstance(proposal, dict):
+        return "invalid_schema"
+    if set(proposal) & {"stage", "confirmed", "red_flags_checked", "department_result", "is_complete", "doctor_id", "schedule_id"}:
+        return "workflow_authority"
+    if not isinstance(proposal.get("status"), str) or proposal["status"] not in {"clarification_needed", "sufficient"}:
+        return "invalid_status"
+    if not isinstance(proposal.get("reason"), str) or not proposal["reason"].strip():
+        return "invalid_reason"
+    if proposal["status"] == "sufficient":
+        return "safety_still_pending" if safety_planning else None
+    question, intent = proposal.get("question"), proposal.get("intent")
+    if not isinstance(question, str) or not 4 <= len(question.strip()) <= 180:
+        return "invalid_question_length"
+    if not isinstance(intent, str) or not _INTENT_PATTERN.fullmatch(intent):
+        return "invalid_intent"
+    if intent in case.conversation_state.clarification_evidence:
+        return "intent_already_answered"
+    state = case.conversation_state
+    if (intent in state.asked_clarification_intents
+            and intent not in {state.pending_clarification_intent, state.department_next_question_intent}):
+        return "intent_has_no_current_owner"
+    if required_intent and intent != required_intent:
+        return "required_intent_mismatch"
+    if _UNSAFE_QUESTION.search(question) or _INTERNAL_STATE_TEXT.search(question):
+        return "unsafe_or_internal_question"
+    if _MULTI_QUESTION.search(question) or _MULTI_DIMENSION_QUESTION.search(question):
+        return "multiple_information_needs"
+    needs = proposal.get("information_needs")
+    if needs is not None and (not isinstance(needs, list) or len(needs) != 1
+                              or _patient_information_need(needs[0]) is None):
+        return "invalid_information_need"
+    if question.strip() in (*FALLBACK_QUESTIONS, *NEUTRAL_PENDING_RETRIES):
+        return "generic_retry"
+    if any(item.role == "assistant" and item.content == question.strip() for item in case.history_records):
+        return "duplicate_question"
+    if safety_planning and question.strip() == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
+        return "repeated_safety_checklist"
+    if not safety_planning and _asks_filled_duration(case, intent, question):
+        return "already_collected_duration"
+    return None
+
+
+def clear_answered_pending(case: TriageCase) -> bool:
+    """Reconcile stale workflow ownership only with an already accepted answer."""
+    state = case.conversation_state
+    if state.pending_clarification_intent in state.clarification_evidence:
+        state.pending_clarification_intent = None
+        state.pending_clarification_question = None
+        state.next_information_needed = []
+        return True
+    return False
 
 
 def capture_pending_answer(
@@ -286,6 +355,7 @@ def capture_pending_answer(
         return False
     state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text or ""
     state.pending_clarification_intent = None
+    state.pending_clarification_question = None
     state.next_information_needed = []
     return True
 
@@ -335,6 +405,16 @@ def capture_safety_screen_answer(
     state.field_statuses[RED_FLAG_QUESTION_KEY] = "unavailable"
     state.field_confidence[RED_FLAG_QUESTION_KEY] = suggestion.answer_confidence
     state.safety_answer_validation = "accepted_complete_negative"
+    # Release safety ownership before department recomputation in this same turn.
+    state.clarification_status = "collecting"
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.next_information_needed = []
+    state.department_next_question_intent = None
+    state.department_next_information_needed = None
+    state.uncertainty_reasons = []
+    state.last_question_key = None
+    case.triage.next_question = None
     logger.info("safety answer accepted=true reason=complete_negative attempt=%s", state.safety_answer_attempts)
     return True
 
@@ -342,14 +422,21 @@ def capture_safety_screen_answer(
 def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion | None) -> None:
     """Bound safety workflow retries without interpreting patient language."""
     state = case.conversation_state
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.next_information_needed = []
     if state.safety_answer_attempts >= SAFETY_ANSWER_CAP:
         _unresolved(case)
         state.uncertainty_reasons = ["safety_information_unresolved"]
         state.next_information_needed = []
+        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
     if not question or any(m.role == "assistant" and m.content == question for m in case.history_records):
         question = SAFETY_RETRY_REPLY
+        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+    else:
+        state.reply_source = suggestion.reply_source
     state.clarification_status = "safety_check"
     state.last_question_key = RED_FLAG_QUESTION_KEY
     state.is_complete = False
@@ -367,6 +454,9 @@ def advance_conversation(
 ) -> None:
     """Apply only validated clarification proposals and Backend-owned state gates."""
     state = case.conversation_state
+    state.reply_source = None
+    state.question_rejection_reason = suggestion.rejection_reason if suggestion else "planner_unavailable"
+    state.question_repair_attempted = suggestion.repair_attempted if suggestion else False
     state.next_information_needed = _patient_information_needs(state.next_information_needed)
     state.department_next_information_needed = _patient_information_need(
         state.department_next_information_needed
@@ -386,6 +476,7 @@ def advance_conversation(
     )
     if grounded_answer and suggestion.answer_status == "answered" and suggestion.answer_confidence >= ACCEPT_THRESHOLD:
         capture_pending_answer(case, suggestion, user_sources)
+    clear_answered_pending(case)
 
     grounded_symptom = bool(case.patient_input.symptom) and any(
         case.patient_input.symptom in item.content
@@ -429,6 +520,7 @@ def advance_conversation(
             case.triage.next_question = None
             case.triage.is_final = True
             case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
+            state.reply_source = "CONFIRMATION"
             return
 
     if state.turn_count >= HARD_TURN_CAP:
@@ -445,51 +537,30 @@ def advance_conversation(
         and suggestion.status == "clarification_needed"
         and bool(suggestion.question)
         and bool(suggestion.intent)
+        and suggestion.intent not in state.clarification_evidence
         and (same_pending_intent or (
             state.pending_clarification_intent is None
-            and suggestion.intent not in state.asked_clarification_intents
+            and (suggestion.intent not in state.asked_clarification_intents
+                 or suggestion.intent == state.department_next_question_intent)
         ))
         and not any(item.role == "assistant" and item.content == suggestion.question for item in case.history_records)
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
-    pending_focus = _pending_focus(state.next_information_needed)
-    if pending_focus is None:
-        pending_focus = _patient_information_need(state.department_next_information_needed)
     if valid_question:
         question = suggestion.question or ""
         if state.pending_clarification_intent is None:
             state.pending_clarification_intent = suggestion.intent
-            state.asked_clarification_intents.append(suggestion.intent or "")
+            if suggestion.intent not in state.asked_clarification_intents:
+                state.asked_clarification_intents.append(suggestion.intent or "")
+        state.pending_clarification_question = question
         reason = suggestion.reason
-    elif state.pending_clarification_intent:
-        new_evidence = _new_grounded_medical_evidence(current_extractions, user_sources)
-        question = _focused_pending_retry(case, pending_focus, acknowledge=new_evidence)
-        if question is None:
-            _unresolved(case)
-            return
-        reason = "已記錄本輪新資訊，上一個澄清面向仍需確認" if new_evidence else "上一個澄清問題尚未可靠回答"
+        # Information needs belong to this proposal, never to the previous owner.
+        state.next_information_needed = [suggestion.information_need] if suggestion.information_need else []
+        state.reply_source = suggestion.reply_source
     else:
-        required_intent = (
-            state.department_next_question_intent
-            if state.department_status == "ambiguous"
-            else None
-        )
-        if required_intent:
-            state.pending_clarification_intent = required_intent
-            if required_intent not in state.asked_clarification_intents:
-                state.asked_clarification_intents.append(required_intent)
-            question = _focused_pending_retry(case, None, acknowledge=False)
-            if question is None:
-                _unresolved(case)
-                return
-        else:
-            question = next(
-                (text for text in FALLBACK_QUESTIONS if not any(
-                    item.role == "assistant" and item.content == text for item in case.history_records
-                )),
-                FALLBACK_QUESTIONS[-1],
-            )
-        reason = "目前仍需更多可靠的症狀描述"
+        question = TECHNICAL_CLARIFICATION_REPLY
+        reason = "clarification_generation_failed"
+        state.reply_source = "TECHNICAL_FALLBACK"
     if low_confidence:
         reason = "本輪症狀抽取信心不足，仍需釐清"
     elif not grounded_symptom:
@@ -500,7 +571,6 @@ def advance_conversation(
         reason = state.department_uncertainty_reason
     state.clarification_status = "clarifying"
     state.uncertainty_reasons = [reason]
-    state.next_information_needed = [pending_focus] if state.pending_clarification_intent and pending_focus else []
     state.last_question_key = None
     state.is_complete = False
     case.triage.need_more_info = True
@@ -511,9 +581,17 @@ def advance_conversation(
 
 def _enter_safety_check(case: TriageCase) -> None:
     state = case.conversation_state
+    if state.clarification_status != "safety_check":
+        state.safety_answer_attempts = 0
+        state.safety_answer_validation = None
     state.clarification_status = "safety_check"
     state.uncertainty_reasons = ["急迫症狀篩檢尚未完成"]
-    state.next_information_needed = ["確認是否有目前安全篩檢所列的急迫症狀"]
+    state.next_information_needed = []
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.department_next_question_intent = None
+    state.department_next_information_needed = None
+    state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     state.is_complete = False
     mark_questions_asked(case, [RED_FLAG_QUESTION_KEY])
     case.triage.need_more_info = True
@@ -526,27 +604,6 @@ def _asks_filled_duration(case: TriageCase, intent: str | None, question: str | 
     return bool(
         case.patient_input.duration
         and ((intent and "duration" in intent) or (question and _DURATION_QUESTION.search(question)))
-    )
-
-
-def _new_grounded_medical_evidence(extractions: list[SemanticExtraction], user_sources: list[str]) -> bool:
-    return any(
-        item.field in _MEDICAL_FIELDS
-        and item.semantic_status in {"available", "partial"}
-        and isinstance(item.confidence, (int, float))
-        and not isinstance(item.confidence, bool)
-        and math.isfinite(item.confidence)
-        and item.confidence >= ACCEPT_THRESHOLD
-        and item.source_text.strip()
-        and any(item.source_text.strip() in source for source in user_sources)
-        for item in extractions
-    )
-
-
-def _pending_focus(reasons: list[str]) -> str | None:
-    return next(
-        (focus for focus in (_patient_information_need(reason) for reason in reasons) if focus),
-        None,
     )
 
 
@@ -564,29 +621,9 @@ def _patient_information_need(value: object) -> str | None:
         or len(focus) > 60
         or _UNSAFE_QUESTION.search(focus)
         or _INTERNAL_STATE_TEXT.search(focus)
-        or "科" in focus
-        or re.search(r"與|和|及|、|以及|或", focus)
     ):
         return None
     return focus
-
-
-def _focused_pending_retry(case: TriageCase, focus: str | None, *, acknowledge: bool) -> str | None:
-    if focus:
-        prefix = "謝謝補充。" if acknowledge else ""
-        candidates = (
-            f"{prefix}關於「{focus}」，可以再具體描述一下嗎？",
-            f"關於「{focus}」，可以換個方式說明目前的情況嗎？",
-            *FALLBACK_QUESTIONS,
-        )
-    else:
-        candidates = (*NEUTRAL_PENDING_RETRIES, *FALLBACK_QUESTIONS)
-    return next(
-        (question for question in candidates if not any(
-            item.role == "assistant" and item.content == question for item in case.history_records
-        )),
-        None,
-    )
 
 
 def _grounded_clarification_answer(
@@ -599,6 +636,7 @@ def _grounded_clarification_answer(
         and isinstance(source_text, str)
         and source_text.strip()
         and any(source_text.strip() in source for source in user_sources)
+        and isinstance(status, str)
         and status in {"answered", "partial", "unclear"}
         and isinstance(confidence, (int, float))
         and not isinstance(confidence, bool)
@@ -610,9 +648,11 @@ def _grounded_clarification_answer(
 def _unresolved(case: TriageCase) -> None:
     state = case.conversation_state
     state.clarification_status = "unresolved"
+    state.reply_source = "UNRESOLVED"
     state.uncertainty_reasons = ["多輪後仍無法可靠釐清症狀"]
     state.next_information_needed = []
     state.pending_clarification_intent = None
+    state.pending_clarification_question = None
     state.is_complete = False
     state.last_question_key = None
     case.triage.need_more_info = True

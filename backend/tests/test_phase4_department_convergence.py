@@ -537,7 +537,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertIsNone(state["pending_clarification_intent"])
         self.assertEqual(state["asked_clarification_intents"], [])
-        self.assertEqual(state["department_next_question_intent"], "cardiac_symptom")
+        self.assertIsNone(state["department_next_question_intent"])
         self.assertNotEqual(result["next_question"], "請問您近期有沒有感覺胸口悸動或胸痛？")
 
     def test_completed_safety_turn_recomputes_department_and_plans_next_question(self):
@@ -639,7 +639,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(semantic.await_count, 2)
         self.assertFalse(apply_message.call_args_list[-1].kwargs["apply_legacy_safety"])
         self.assertEqual(department.await_count, 2)
-        self.assertEqual(intent_before_recompute, [None, "stale_before_safety"])
+        self.assertEqual(intent_before_recompute, [None, None])
         self.assertEqual(planner.await_count, 2)
         self.assertEqual(planner_seen_intents, [
             "ask_hearing_related_symptoms", "ask_hearing_related_symptoms",
@@ -860,7 +860,8 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(case.patient_input.red_flags_checked)
         self.assertIsNone(state.pending_clarification_intent)
         self.assertEqual(state.asked_clarification_intents, [])
-        self.assertEqual(state.department_next_question_intent, "differentiate_signal")
+        # Safety owns the active turn; only fresh reasoning may restore an intent.
+        self.assertIsNone(state.department_next_question_intent)
 
     def test_partial_negative_outside_safety_question_does_not_complete_screen(self):
         case = TriageCase(case_id="phase4-partial-negative-outside-safety")

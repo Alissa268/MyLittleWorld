@@ -89,6 +89,13 @@ class SemanticExtraction(BaseModel):
     extractor: str = "deterministic"
 
 
+class DialogueActInterpretation(BaseModel):
+    act: Literal["answer", "request_explanation", "claims_already_answered", "correction",
+                 "new_information", "unknown", "off_topic"] = "unknown"
+    source_text: str = ""
+    confidence: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
+
+
 class PendingAnswerInterpretation(BaseModel):
     answered_intent: str
     answer_status: PendingAnswerStatus
@@ -292,11 +299,15 @@ class ConversationState(BaseModel):
     turn_count: int = 0
     safety_answer_attempts: int = 0
     safety_answer_validation: Optional[str] = None
+    reply_source: Optional[str] = None
+    question_rejection_reason: Optional[str] = None
+    question_repair_attempted: bool = False
     clarification_status: str = "collecting"
     uncertainty_reasons: List[str] = Field(default_factory=list)
     next_information_needed: List[str] = Field(default_factory=list)
     asked_clarification_intents: List[str] = Field(default_factory=list)
     pending_clarification_intent: Optional[str] = None
+    pending_clarification_question: Optional[str] = None
     clarification_evidence: Dict[str, str] = Field(default_factory=dict)
     department_status: Literal["unresolved", "ambiguous", "resolved"] = "unresolved"
     candidate_departments: List[CandidateDepartment] = Field(default_factory=list)

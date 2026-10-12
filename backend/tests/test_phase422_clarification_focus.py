@@ -91,7 +91,7 @@ def test_valid_same_intent_planner_followup_is_accepted():
     assert case.conversation_state.next_information_needed == []
 
 
-def test_invalid_provider_followup_uses_neutral_nonleaking_retry():
+def test_invalid_provider_followup_reports_technical_failure_without_internal_leak():
     case = ambiguous_flank_case()
     proposal = {
         "status": "clarification_needed",
@@ -115,7 +115,7 @@ def test_invalid_provider_followup_uses_neutral_nonleaking_retry():
     )
 
     question = case.triage.next_question or ""
-    assert question == "可以再補充和剛才問題相關的症狀細節嗎？"
+    assert question == "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
     assert INTERNAL_REASON not in question
     assert "上一個澄清面向仍需確認" not in question
     assert "科別仍不確定" not in question
@@ -123,7 +123,7 @@ def test_invalid_provider_followup_uses_neutral_nonleaking_retry():
     assert case.conversation_state.department_status == "ambiguous"
 
 
-def test_duplicate_provider_question_uses_nonduplicate_fallback():
+def test_duplicate_provider_question_does_not_invent_normal_chat_fallback():
     case = ambiguous_flank_case()
     case.history_records.append(Message(role="assistant", content=FLANK_QUESTION))
     suggestion = ClarificationSuggestion(
@@ -136,7 +136,7 @@ def test_duplicate_provider_question_uses_nonduplicate_fallback():
     advance_conversation(case, suggestion, user_sources=["不太確定"], current_extractions=[])
 
     assert case.triage.next_question != FLANK_QUESTION
-    assert case.triage.next_question == "可以再補充和剛才問題相關的症狀細節嗎？"
+    assert case.triage.next_question == "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
     assert case.conversation_state.pending_clarification_intent == "flank_pain"
 
 

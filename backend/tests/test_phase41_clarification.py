@@ -205,7 +205,7 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(capture_pending_answer(case, suggestion, [text]))
         self.assertIsNone(case.conversation_state.pending_clarification_intent)
 
-    async def test_new_grounded_detail_gets_nonduplicate_focused_retry(self):
+    async def test_new_detail_without_ai_question_preserves_evidence_and_reports_technical_failure(self):
         case = pending_case()
         text = "尿尿時有灼熱感"
         case.history_records.append(Message(role="user", content=text))
@@ -215,12 +215,12 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
         )
         advance_conversation(case, None, user_sources=[text], current_extractions=[detail])
         first_retry = case.triage.next_question
-        self.assertIn("血尿的程度", first_retry)
+        self.assertEqual(first_retry, conversation_service.TECHNICAL_CLARIFICATION_REPLY)
         self.assertNotIn("可以先補充上一個追問的答案", first_retry)
         self.assertEqual(case.conversation_state.pending_clarification_intent, "severity")
         case.history_records.append(Message(role="assistant", content=first_retry))
         case.history_records.append(Message(role="user", content="我已經回答了"))
         advance_conversation(case, None, user_sources=["我已經回答了"], current_extractions=[])
-        self.assertNotEqual(case.triage.next_question, first_retry)
+        self.assertEqual(case.triage.next_question, conversation_service.TECHNICAL_CLARIFICATION_REPLY)
         self.assertNotEqual(case.triage.next_question, SEVERITY_QUESTION)
         self.assertEqual(case.conversation_state.pending_clarification_intent, "severity")

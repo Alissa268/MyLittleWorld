@@ -10,6 +10,7 @@ from typing import Any
 from app.config import get_settings
 from app.schemas import (
     DepartmentResult,
+    DialogueActInterpretation,
     PendingAnswerInterpretation,
     SemanticExtraction,
     TTASEvidence,
@@ -50,6 +51,7 @@ class RagTriageSuggestion:
     ttas_evidence: list[TTASEvidence] | None = None
     time_preferences: list[TimePreference] | None = None
     interpretation_complete: bool = True
+    dialogue_act: DialogueActInterpretation | None = None
 
 
 async def refine_case_with_ai(
@@ -99,6 +101,7 @@ async def refine_case_with_ai(
                 len(repair_raw),
             )
             repair_data = _parse_json_object(repair_raw)
+            data = repair_data
             semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
                 repair_data,
                 pending_intent=pending_intent,
@@ -149,7 +152,23 @@ async def refine_case_with_ai(
         pending_answer=pending_answer,
         ttas_evidence=ttas_evidence,
         time_preferences=time_preferences,
+        dialogue_act=_dialogue_act_from_ai(data.get("dialogue_act"), user_sources),
     )
+
+
+def _dialogue_act_from_ai(value: Any, user_sources: list[str]) -> DialogueActInterpretation:
+    """Dialogue interpretation has no authority over accepted medical facts or state."""
+    if isinstance(value, dict) and set(value) == {"act", "source_text", "confidence"}:
+        source, confidence = value.get("source_text"), value.get("confidence")
+        if (isinstance(source, str) and source.strip()
+                and any(source.strip() in text for text in user_sources)
+                and type(confidence) in {int, float} and math.isfinite(confidence)
+                and ACCEPT_THRESHOLD <= confidence <= 1):
+            try:
+                return DialogueActInterpretation(**value)
+            except (TypeError, ValueError):
+                pass
+    return DialogueActInterpretation()
 
 
 def _validated_turn_interpretation(
@@ -432,14 +451,14 @@ def _pending_answer_from_ai(
     assertion = value.get("answer_assertion")
     if (
         intent != pending_intent
-        or status not in {"answered", "partial", "unclear"}
+        or not isinstance(status, str) or status not in {"answered", "partial", "unclear"}
         or not isinstance(source, str)
         or not source.strip()
         or not any(source.strip() in user_text for user_text in user_sources)
         or type(confidence) not in {int, float}
         or not math.isfinite(confidence)
         or not 0.0 <= confidence <= 1.0
-        or (assertion is not None and assertion not in _EVIDENCE_ASSERTIONS)
+        or (assertion is not None and (not isinstance(assertion, str) or assertion not in _EVIDENCE_ASSERTIONS))
         or (pending_intent == SAFETY_PENDING_INTENT and assertion not in _EVIDENCE_ASSERTIONS)
     ):
         reason = (
@@ -505,7 +524,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
         original_prompt
         + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
         "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
-        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence 與 time_preferences。"
+        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence、time_preferences 與 dialogue_act。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
         " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
     )
@@ -521,7 +540,7 @@ def _build_symptom_collection_prompt(
     )
     current_input = case.patient_input.model_dump()
     pending_intent = _active_pending_intent(case)
-    pending_question = next(
+    pending_question = case.conversation_state.pending_clarification_question or next(
         (message.content for message in reversed(case.history_records) if message.role == "assistant"),
         None,
     ) if pending_intent else None
@@ -573,6 +592,7 @@ def _build_symptom_collection_prompt(
   24. age_years / age_months 只在本輪有逐字年齡證據時抽取；若 Backend 另有 trusted profile，該 trusted fact 由 Backend 合併，不需要你猜。
   25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
   26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
+  27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、unknown、off_topic。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
 
 時間偏好正例：
 current_user_text:「這週都不行，最好下週二，不然下週三，其他平日也可以。上午不行，下午最好。」

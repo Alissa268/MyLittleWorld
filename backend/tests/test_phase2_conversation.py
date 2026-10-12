@@ -292,12 +292,12 @@ class Phase2ConversationTest(unittest.TestCase):
                 result, _, clarification, department = self.post(
                     "我頭暈", [extraction("symptom", "頭暈", "頭暈")], plan,
                 )
-                clarification.assert_awaited_once()
+                self.assertEqual(clarification.await_count, 1 if isinstance(plan, Exception) else 2)
                 department.assert_not_awaited()
                 self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "頭暈")
                 self.assertIsNone(result["triage_case"]["patient_input"]["duration"])
                 self.assertTrue(result["needMoreInfo"])
-                self.assertIn("描述", result["next_question"])
+                self.assertEqual(result["next_question"], conversation_service.TECHNICAL_CLARIFICATION_REPLY)
 
     def test_ai_cannot_set_workflow_or_complete_blank_case(self):
         result, _, _, department = self.post(
