@@ -141,7 +141,18 @@ async def complete_prompt(
 
 def runtime_ai_available(settings: Any | None = None) -> bool:
     active_settings = settings or get_settings()
-    return bool(str(getattr(active_settings, "cerebras_api_key", "") or "").strip())
+    if not str(getattr(active_settings, "cerebras_api_key", "") or "").strip():
+        logger.info("[AI] available=false reason=no_key")
+        return False
+    try:
+        _initialize_cerebras(active_settings)
+    except Exception as exc:
+        logger.warning("[AI] available=false reason=initialization_failed error_type=%s", type(exc).__name__)
+        return False
+    available = _cerebras_client is not None
+    if not available:
+        logger.warning("[AI] available=false reason=sdk_unavailable")
+    return available
 
 
 async def complete_runtime_json(prompt: str, *, purpose: str) -> str:
@@ -195,7 +206,7 @@ def _initialize_cerebras(settings: Any) -> None:
         return
     _cerebras_client = AsyncCerebras(
         api_key=settings.cerebras_api_key,
-        timeout=settings.ai_timeout_seconds,
+        timeout=getattr(settings, "ai_timeout_seconds", 8.0),
         max_retries=0,
     )
     _cerebras_initialized = True

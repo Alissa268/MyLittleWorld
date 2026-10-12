@@ -63,13 +63,14 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.last_question_key = field
         return case
 
-    async def test_clear_symptom_and_duration_skip_semantic_provider(self):
+    async def test_unavailable_ai_does_not_guess_symptom_or_duration(self):
         response, semantic, contextual = self._post_with_mocked_ai(
             {"message": "我頭暈兩天"}
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["triage_case"]["patient_input"]["duration"], "2天")
+        self.assertIsNone(response.json()["triage_case"]["patient_input"]["duration"])
+        self.assertFalse(response.json()["triage_case"]["patient_input"]["symptom"])
         semantic.assert_not_awaited()
         contextual.assert_awaited_once()
 
@@ -105,7 +106,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
         semantic.assert_not_awaited()
 
-    async def test_clear_severity_skips_semantic_provider(self):
+    async def test_unavailable_ai_does_not_guess_severity(self):
         case = self._case_waiting_for("severity")
         response, semantic, _ = self._post_with_mocked_ai(
             {
@@ -115,10 +116,10 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["triage_case"]["patient_input"]["severity"], "中度")
+        self.assertIsNone(response.json()["triage_case"]["patient_input"]["severity"])
         semantic.assert_not_awaited()
 
-    async def test_clear_day_skips_semantic_provider(self):
+    async def test_unavailable_ai_does_not_guess_day(self):
         case = self._case_waiting_for("preferred_days")
         response, semantic, _ = self._post_with_mocked_ai(
             {
@@ -128,10 +129,10 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["triage_case"]["availability"]["preferred_days"], ["週二"])
+        self.assertEqual(response.json()["triage_case"]["availability"]["preferred_days"], [])
         semantic.assert_not_awaited()
 
-    async def test_clear_session_skips_semantic_provider(self):
+    async def test_unavailable_ai_does_not_guess_session(self):
         case = self._case_waiting_for("preferred_sessions")
         response, semantic, _ = self._post_with_mocked_ai(
             {
@@ -141,7 +142,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.json()["triage_case"]["availability"]["preferred_sessions"], ["上午"])
+        self.assertEqual(response.json()["triage_case"]["availability"]["preferred_sessions"], [])
         semantic.assert_not_awaited()
 
     async def test_unresolved_requested_field_is_not_blocked_by_plausibility_rule(self):
@@ -174,7 +175,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 200)
         semantic.assert_awaited_once()
 
-    async def test_weak_tone_half_year_duration_skips_semantic_provider(self):
+    async def test_unavailable_ai_does_not_guess_approximate_duration(self):
         case = self._case_waiting_for("duration")
         case.patient_input.duration = None
 
@@ -187,7 +188,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         semantic.assert_not_awaited()
-        self.assertEqual(response.json()["triage_case"]["patient_input"]["duration"], "6個月")
+        self.assertIsNone(response.json()["triage_case"]["patient_input"]["duration"])
 
     async def test_ambiguous_natural_language_calls_semantic_provider(self):
         contextual = (
@@ -330,7 +331,9 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             summaries.append(perf.summary())
             original_finish(perf, token)
 
-        with patch.object(chat_route, "refine_case_with_ai", new=semantic), patch.object(
+        with patch.object(chat_route, "runtime_ai_available", return_value=True), patch.object(
+            chat_route, "refine_case_with_ai", new=semantic,
+        ), patch.object(
             ai_reply_generator,
             "get_settings",
             return_value=settings,

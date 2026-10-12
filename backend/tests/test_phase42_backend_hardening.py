@@ -3,7 +3,8 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-from datetime import date
+from datetime import date, timedelta
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
@@ -230,6 +231,9 @@ def test_db_unavailable_is_globally_503_for_chat_preference(monkeypatch):
 
 
 def test_db_unavailable_is_globally_503_for_structured_department_detection(monkeypatch):
+    monkeypatch.setattr("app.routes.chat.get_settings", lambda: SimpleNamespace(
+        batch_triage_enabled=True, cerebras_api_key="",
+    ))
     case = TriageCase(case_id="case_db_detection", visit_type=VisitType.INITIAL)
     case.patient_input.symptom = "grounded symptom"
     case.patient_input.body_part = "頭部"
@@ -251,7 +255,7 @@ def test_db_unavailable_is_globally_503_for_structured_department_detection(monk
     )
     response = TestClient(app, raise_server_exceptions=False).post(
         "/chat",
-        json={"case_id": case.case_id, "visit_type": "initial"},
+        json={"case_id": case.case_id, "visit_type": "initial", "legacy_batch": True},
     )
     assert response.status_code == 503
     assert response.json() == {"detail": "正式資料目前無法查詢，請稍後重試。"}
@@ -383,7 +387,7 @@ def test_followup_canonical_relationship_passes_and_db_failure_is_503(monkeypatc
     row = {
         "parent_dept": "外科系", "child_dept": "一般骨科", "doctor": "原醫師",
         "doctor_id": "101", "dept_id": "7", "schedule_id": "901",
-        "date": "2026-10-10", "session": "上午", "room": "A1", "status": "open",
+        "date": (date.today() + timedelta(days=7)).isoformat(), "session": "上午", "room": "A1", "status": "open",
     }
     monkeypatch.setattr(followup_service, "fetch_return_visit_slots", lambda **_kwargs: [row])
     response = TestClient(app).post("/followup/recommend", json={

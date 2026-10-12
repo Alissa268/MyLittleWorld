@@ -79,6 +79,8 @@ class Phase2ConversationTest(unittest.TestCase):
         ), patch.object(rag_triage_adapter, "complete_prompt", new=semantic), patch.object(
             conversation_service, "complete_runtime_json", new=clarification,
         ), patch.object(chat_route, "detect_department_result", new=department), patch.object(
+            chat_route, "reason_about_departments", new=AsyncMock(),
+        ), patch.object(
             chat_route, "generate_triage_reply",
             new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
         ):
@@ -192,7 +194,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_awaited_once()
         department.assert_not_awaited()
-        self.assertEqual(completed["conversation_state"]["turn_count"], 8)
+        self.assertEqual(completed["conversation_state"]["turn_count"], 9)
         self.assertEqual(completed["conversation_state"]["clarification_status"], "unresolved")
         self.assertFalse(completed["conversation_state"]["is_complete"])
         self.assertTrue(completed["triage_case"]["patient_input"]["red_flags_checked"])
@@ -485,7 +487,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(state["clarification_status"], "unresolved")
         self.assertFalse(state["is_complete"])
         self.assertIsNone(result["next_question"])
-        self.assertIn("不會替你猜測科別", result["reply"])
+        self.assertIn("不能繼續一般掛號", result["reply"])
         self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "")
         self.assertIsNone(result["department_result"])
         repeated, semantic, clarification, department = self.post(

@@ -468,7 +468,8 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         result = self.no_ai_chat("不太確定", triage_case=case.model_dump(mode="json"))
         self.assertEqual(result["conversation_state"]["clarification_status"], "safety_check")
         self.assertEqual(result["conversation_state"]["last_question_key"], RED_FLAG_QUESTION_KEY)
-        self.assertIn("胸痛", result["next_question"])
+        self.assertTrue(result["next_question"])
+        self.assertNotEqual(result["next_question"], QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
         self.assertIsNone(result["department_result"])
         self.assertEqual(result["conversation_state"]["stage"], "collecting")
 

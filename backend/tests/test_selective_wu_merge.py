@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import unittest
 import importlib
+import json
+from unittest.mock import AsyncMock, patch
 from datetime import date, timedelta
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import DepartmentResult, TriageCase
+from app.services.conversation_service import ClarificationSuggestion
 from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter, specialty_scoring
 from app.services.project_smart_department_adapter import detect_department_with_project_smart_adapter
 from app.services.rule_engine import apply_user_message
@@ -125,10 +128,29 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
     def test_main_chat_confirm_recommend_generate_script_flow_still_runs(self):
         client = TestClient(app)
 
-        chat_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
-        )
+        async def converge(case):
+            case.department_result = DepartmentResult(
+                dept_id=203, parentDept="外科系", childDept="一般骨科", confidence=0.9,
+            )
+            case.conversation_state.department_status = "resolved"
+
+        proposal = dict(semantic_extractions=[dict(field=field, normalized_value=value,
+            assertion="present" if field == "symptom" else None, source_text=source,
+            semantic_status="available", confidence=0.98) for field, value, source in (
+                ("symptom", "膝痛", "左膝痛"), ("duration", "2週", "2週"),
+                ("preferred_days", ["週一"], "週一"), ("preferred_sessions", ["上午"], "上午"),
+            )], pending_answer=None, ttas_evidence=[])
+        with patch.object(self.chat_route, "runtime_ai_available", return_value=True), patch.object(
+            rag_triage_adapter, "_ai_available", return_value=True,
+        ), patch.object(rag_triage_adapter, "complete_prompt", AsyncMock(return_value=json.dumps(proposal))), patch.object(
+            self.chat_route, "reason_about_departments", AsyncMock(side_effect=converge),
+        ), patch.object(self.chat_route, "request_clarification", AsyncMock(return_value=ClarificationSuggestion(
+            status="sufficient", question=None, intent=None, reason="grounded fixture",
+        ))):
+            chat_response = client.post(
+                "/chat",
+                json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，週一上午可以看診", "visit_type": "initial"},
+            )
         self.assertEqual(chat_response.status_code, 200)
         chat_data = chat_response.json()
         self.assertEqual(chat_data["conversation_state"]["stage"], "waiting_confirmation")

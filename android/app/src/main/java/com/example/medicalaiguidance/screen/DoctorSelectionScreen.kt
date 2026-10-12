@@ -396,7 +396,7 @@ private fun FilterSummaryCard(
     } else if (mode == DoctorRecommendationMode.SPECIALTY_FIRST) {
         "優先比對症狀與醫師專長"
     } else {
-        "優先符合可看診時間"
+        "依後端時間偏好與可掛班表排序"
     }
 
     Card(
@@ -716,16 +716,12 @@ private fun RecommendationDoctorCard(
 private const val COMPACT_REASON_MAX_LENGTH = 55
 private const val DETAIL_REASON_MAX_LENGTH = 68
 
-internal fun RecommendationItemDto.compactCardReason(): String? = matchReason
-    ?.trim()
-    ?.takeIf { it.isNotBlank() }
+internal fun RecommendationItemDto.compactCardReason(): String? = specialtyTags
+    .filter { it.isNotBlank() }
+    .takeIf { it.isNotEmpty() }
+    ?.joinToString("、")
+    ?.let { "SQL 專長資料：$it" }
     ?.take(COMPACT_REASON_MAX_LENGTH)
-    ?: reasons
-        .firstOrNull { it.startsWith("推薦理由：") }
-        ?.removePrefix("推薦理由：")
-        ?.trim()
-        ?.takeIf { it.isNotBlank() }
-        ?.take(COMPACT_REASON_MAX_LENGTH)
 
 @Composable
 private fun DoctorSpecialtyContent(
@@ -974,7 +970,6 @@ private enum class BreakdownType {
 
 private data class RecommendationBreakdown(
     val title: String,
-    val stars: Double,
     val description: String
 )
 
@@ -1033,11 +1028,6 @@ private fun RecommendationBreakdownRow(
                 fontWeight = FontWeight.Bold
             )
 
-            StarRatingBar(
-                rating = breakdown.stars,
-                starColor = accentColor,
-                starSize = 16.dp
-            )
 
         }
         Text(
@@ -1050,135 +1040,37 @@ private fun RecommendationBreakdownRow(
     }
 }
 
-@Composable
-private fun StarRatingBar(
-    rating: Double,
-    maxStars: Int = 5,
-    starColor: Color,
-    starSize: Dp = 16.dp
-) {
-    Row(
-        horizontalArrangement = Arrangement.spacedBy(2.dp),
-        verticalAlignment = Alignment.CenterVertically
-    ) {
-        for (i in 1..maxStars) {
-            val starIcon = when {
-                rating >= i -> Icons.Default.Star
-                rating >= i - 0.5 -> Icons.AutoMirrored.Filled.StarHalf
-                else -> Icons.Default.StarOutline
-            }
-            Icon(
-                imageVector = starIcon,
-                contentDescription = null,
-                tint = starColor,
-                modifier = Modifier.size(starSize)
-            )
-        }
-    }
-}
 
 private fun buildRecommendationBreakdown(
     recommendation: RecommendationItemDto,
     type: BreakdownType
 ): RecommendationBreakdown? {
-    val score = when (type) {
-        BreakdownType.SPECIALTY -> recommendation.specialtyScore ?: recommendation.score
-        BreakdownType.TIME -> recommendation.timeScore ?: recommendation.score
-    }
-    val stars = scoreToStars(score)
     return when (type) {
         BreakdownType.SPECIALTY -> RecommendationBreakdown(
             title = SPECIALTY_MATCH_TITLE,
-            stars = stars,
             description = recommendation.specialtyDescription()
         )
         BreakdownType.TIME -> RecommendationBreakdown(
             title = TIME_MATCH_TITLE,
-            stars = stars,
             description = recommendation.timeDescription()
         )
     }
 }
 
-internal fun scoreToStars(rawScore: Double): Double {
-    val score = (if (rawScore > 1.0) rawScore / 100.0 else rawScore).coerceIn(0.0, 1.0)
-    return (score * 10.0).roundToInt() / 2.0
-}
 
-internal const val SPECIALTY_MATCH_TITLE = "症狀與專長相符"
-internal const val TIME_MATCH_TITLE = "看診時間符合"
+internal const val SPECIALTY_MATCH_TITLE = "醫師專長資料"
+internal const val TIME_MATCH_TITLE = "可掛號診次"
 
 internal fun RecommendationItemDto.specialtyDescription(): String {
-    matchReason
-        ?.trim()
-        ?.takeIf { it.isNotBlank() }
-        ?.let { return it.take(DETAIL_REASON_MAX_LENGTH) }
-    val symptom = departmentBasisReason()?.let(::extractUserSymptom)
-    val department = childDept.ifBlank { parentDept }.ifBlank { "目前科別" }
-    val opening = symptom
-        ?.let { "您先前提到「$it」，目前建議科別為$department。" }
-        ?: "目前建議科別為$department。"
-    val matchedSpecialties = relevantSpecialtyTags(symptom, department).ifEmpty {
-        specialtyTags
-            .takeIf { (specialtyScore ?: 0.0) > 0.5 }
-            .orEmpty()
-            .map(::compactSpecialtyTag)
-            .filter { it.isNotBlank() }
-            .distinct()
-            .take(2)
-    }
-    return if (matchedSpecialties.isNotEmpty()) {
-        val specialties = matchedSpecialties.joinToString("、") { "「$it」" }
-        "${opening}這位醫師的專長包含$specialties，與目前需要由${department}評估的症狀方向相關，因此專長匹配度較高。"
-    } else {
-        "${opening}這位醫師可提供${department}診療範圍內的評估；目前沒有更明確的專長匹配資料。"
-    }
+    val tags = specialtyTags.filter { it.isNotBlank() }.joinToString("、")
+    return if (tags.isBlank()) "目前沒有可顯示的正式專長資料。"
+        else "班表提供的醫師專長：$tags。此資料不是醫師能力或疾病診斷評價。"
 }
 
 internal fun RecommendationItemDto.timeDescription(): String {
-    val visitTime = naturalVisitTime()
-    val timeReason = reasons.firstOrNull { it.startsWith("時間依據：") }.orEmpty()
-    val isRelaxed = timeReason.contains("未完全符合") ||
-        reasons.any { it.contains("改推薦時間最接近") }
-    val preference = compactTimePreference(timeReason)
-    return when {
-        isRelaxed -> "此門診為 $visitTime，是目前較接近您看診時間偏好的選擇。"
-        preference != null -> "$preference，此門診為 $visitTime，符合您的需求。"
-        else -> "此門診為 $visitTime，符合您的看診時間偏好。"
-    }
+    return "可掛號診次：${naturalVisitTime()}。繼續前仍會重新確認班表。"
 }
 
-private fun RecommendationItemDto.relevantSpecialtyTags(
-    symptom: String?,
-    department: String
-): List<String> {
-    val context = listOfNotNull(symptom, department).joinToString(" ")
-    val keywords = when {
-        context.containsAny("膝", "關節", "骨", "骨科") -> listOf("膝", "關節", "骨科", "運動傷害", "復健")
-        context.containsAny("鼻", "鼻科") -> listOf("鼻", "鼻炎", "鼻竇", "過敏")
-        context.containsAny("耳", "耳科") -> listOf("耳", "耳鳴", "聽力", "中耳")
-        context.containsAny("皮膚", "皮膚科") -> listOf("皮膚", "濕疹", "過敏", "蕁麻疹")
-        context.containsAny("頭", "神經") -> listOf("頭痛", "神經", "腦", "眩暈")
-        context.containsAny("胸", "心臟") -> listOf("心臟", "心血管", "心律", "冠心")
-        context.containsAny("胃", "腹", "腸", "消化") -> listOf("胃", "腸", "消化", "肝膽")
-        else -> emptyList()
-    }
-    if (keywords.isEmpty()) return emptyList()
-    return specialtyTags
-        .asSequence()
-        .map { it.trim() }
-        .filter { tag -> tag.isNotBlank() && keywords.any { keyword -> tag.contains(keyword) } }
-        .map(::compactSpecialtyTag)
-        .filter { it.isNotBlank() }
-        .distinct()
-        .take(2)
-        .toList()
-}
-
-private fun compactSpecialtyTag(raw: String): String {
-    val text = raw.substringBefore(":").substringBefore("：").trim()
-    return if (text.length <= 22) text else "${text.take(22)}…"
-}
 
 private fun RecommendationItemDto.naturalVisitTime(): String {
     val parsedDate = parseVisitDate(date)
@@ -1192,95 +1084,14 @@ private fun RecommendationItemDto.naturalVisitTime(): String {
     return "$month 月 $day 日週${weekdayText(parsedDate)}$sessionLabel"
 }
 
-private fun compactTimePreference(rawReason: String): String? {
-    val rawPreference = Regex("""使用者偏好\s*([^；]+)""")
-        .find(rawReason)
-        ?.groupValues
-        ?.getOrNull(1)
-        ?.trim()
-        ?: return null
-    val allDays = listOf("週一", "週二", "週三", "週四", "週五", "週六", "週日")
-    val selectedDays = allDays.filter(rawPreference::contains)
-    val excludedDay = allDays.singleOrNull { it !in selectedDays }
-        ?.takeIf { selectedDays.size == allDays.size - 1 }
-    val session = when {
-        rawPreference.contains("下午") -> "下午"
-        rawPreference.contains("上午") || rawPreference.contains("早上") -> "上午"
-        rawPreference.contains("夜間") || rawPreference.contains("晚上") -> "晚上"
-        else -> null
-    }
-    val explicitDate = Regex("""(\d{4})-(\d{2})-(\d{2})""")
-        .find(rawPreference)
-        ?.let { match ->
-            val month = match.groupValues[2].toIntOrNull()
-            val day = match.groupValues[3].toIntOrNull()
-            if (month != null && day != null) "$month 月 $day 日" else null
-        }
-    return when {
-        explicitDate != null && session != null -> "您偏好 $explicitDate$session"
-        explicitDate != null -> "您偏好 $explicitDate"
-        excludedDay != null && session != null -> "您偏好${excludedDay}以外的${session}時段"
-        session != null -> "您偏好${session}時段"
-        excludedDay != null -> "您偏好${excludedDay}以外的時段"
-        else -> null
-    }
-}
 
 private fun RecommendationItemDto.departmentBasisReason(): String? =
     reasons.firstOrNull { it.startsWith("科別依據：") }?.takeIf { it.isNotBlank() }
 
 private fun RecommendationItemDto.friendlyDepartmentSummary(): String? {
-    val raw = departmentBasisReason() ?: return null
-    val symptom = extractUserSymptom(raw)
-    val scope = inferCareScope(raw, childDept.ifBlank { parentDept }, specialtyTags)
-    return if (symptom != null) {
-        "根據您描述的「$symptom」，判定屬$scope。"
-    } else {
-        sanitizeEngineeringReason(raw)?.let { "$it。" }
-    }
+    return childDept.ifBlank { parentDept }.takeIf { it.isNotBlank() }?.let { "已確認科別：$it。" }
 }
 
-private fun extractUserSymptom(raw: String): String? =
-    Regex("""使用者症狀「([^」]+)」""").find(raw)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
-        ?: Regex("""症狀「([^」]+)」""").find(raw)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
-        ?: Regex("""「([^」]+)」""").find(raw)?.groupValues?.getOrNull(1)?.trim()?.takeIf { it.isNotBlank() }
-
-private fun inferCareScope(
-    raw: String,
-    department: String,
-    specialtyTags: List<String>
-): String {
-    val text = listOf(raw, department, specialtyTags.joinToString("、")).joinToString(" ")
-    return when {
-        text.containsAny("骨", "關節", "膝", "腰", "運動傷害", "骨科") -> "骨骼與關節診治範疇"
-        text.containsAny("皮膚", "紅疹", "發癢", "濕疹", "皮膚科") -> "皮膚診治範疇"
-        text.containsAny("眼", "視力", "眼科") -> "眼科診治範疇"
-        text.containsAny("耳", "鼻", "喉", "耳鼻喉") -> "耳鼻喉診治範疇"
-        text.containsAny("牙", "口腔") -> "口腔與牙科診治範疇"
-        text.containsAny("婦", "孕", "月經") -> "婦女醫學診治範疇"
-        text.containsAny("心臟", "胸痛", "血壓") -> "心血管診治範疇"
-        text.containsAny("胃", "腹", "腸", "肝膽") -> "消化系統診治範疇"
-        department.isNotBlank() -> "${department}診治範疇"
-        else -> "相關科別診治範疇"
-    }
-}
-
-private fun String.containsAny(vararg keywords: String): Boolean =
-    keywords.any { contains(it) }
-
-private fun sanitizeEngineeringReason(raw: String): String? {
-    val cleaned = raw
-        .replace(Regex("""科別依據[:：]\s*"""), "")
-        .replace(Regex("""科別判斷理由[:：]\s*"""), "")
-        .replace(Regex("""分數\s*\d+(?:\.\d+)?"""), "")
-        .replace(Regex("""score\s*=?\s*\d+(?:\.\d+)?""", RegexOption.IGNORE_CASE), "")
-        .replace("使用者症狀", "根據您描述的症狀")
-        .replace("對應到", "判定屬")
-        .replace("；", "，")
-        .replace(Regex("""[，、\s]+$"""), "")
-        .trim()
-    return cleaned.takeIf { it.isNotBlank() }
-}
 
 @Composable
 private fun ProfileBulletList(

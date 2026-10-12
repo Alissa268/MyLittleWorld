@@ -19,6 +19,8 @@ from app.schemas import (
     BatchAnswer,
     ConversationStage,
     DepartmentResult,
+    Message,
+    SemanticExtraction,
     TriageCase,
     TriageResult,
     VisitType,
@@ -28,7 +30,9 @@ from app.services import (
     appointment_service,
     batch_extraction_service,
     department_preference_service,
+    rag_triage_adapter,
 )
+from app.services.conversation_service import ClarificationSuggestion
 from app.services.batch_extraction_service import extract_batch_answers
 from app.services.batch_question_service import build_question_batch
 from app.services.case_store import save_case
@@ -114,7 +118,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
     def test_initial_response_contains_only_the_true_next_question(self):
         response = TestClient(app).post(
             "/chat",
-            json={"case_id": _case_id("initial"), "visit_type": "initial"},
+            json={"case_id": _case_id("initial"), "visit_type": "initial", "legacy_batch": True},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -130,7 +134,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
     def test_followup_first_batch(self):
         response = TestClient(app).post(
             "/chat",
-            json={"case_id": _case_id("followup"), "visit_type": "followup"},
+            json={"case_id": _case_id("followup"), "visit_type": "followup", "legacy_batch": True},
         )
 
         self.assertEqual(response.status_code, 200)
@@ -151,7 +155,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
 
     def test_batch_answers_update_multiple_fields_and_next_batch(self):
         case_id = _case_id("multi")
-        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
 
         response = TestClient(app).post(
             "/chat",
@@ -225,7 +229,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
         for _ in range(3):
             response = TestClient(app).post(
                 "/chat",
-                json={"case_id": case_id, "visit_type": "initial"},
+                json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True},
             )
 
         assert response is not None
@@ -244,7 +248,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
 
     def test_complete_batch_waits_for_confirmation_then_confirms(self):
         case_id = _case_id("complete")
-        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
         response = TestClient(app).post(
             "/chat",
             json={
@@ -278,7 +282,7 @@ class BatchQuestionFlowTest(unittest.TestCase):
         family = DepartmentResult(dept_id=1233, parentDept="內科", childDept="家庭醫學科", confidence=1.0)
         self.department_detector.side_effect = [ear, family]
         case_id = _case_id("stable_department")
-        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+        TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
         completed = TestClient(app).post(
             "/chat",
             json={
@@ -306,8 +310,8 @@ class BatchQuestionFlowTest(unittest.TestCase):
 
     def test_visit_type_conflict_is_rejected(self):
         case_id = _case_id("conflict")
-        first = TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial"})
-        second = TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "followup"})
+        first = TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
+        second = TestClient(app).post("/chat", json={"case_id": case_id, "visit_type": "followup", "legacy_batch": True})
 
         self.assertEqual(first.status_code, 200)
         self.assertEqual(second.status_code, 409)
@@ -809,6 +813,11 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
 
     def _completed_sleep_case(self, prefix: str) -> TriageCase:
         case = TriageCase(case_id=_case_id(prefix), visit_type=VisitType.INITIAL)
+        case.history_records = [Message(role="user", content="半夜睡不著，頭不舒服，已經3週")]
+        case.semantic_extractions = [SemanticExtraction(
+            field="duration", normalized_value="3週", semantic_status="available",
+            source_text="3週", confidence=0.98,
+        )]
         case.patient_input.symptom = "半夜睡不著"
         case.patient_input.body_part = "頭"
         case.patient_input.duration = "3週"
@@ -838,8 +847,45 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
         begin = client.post("/chat", json={"case_id": case.case_id, "revision_requested": True})
         self.assertEqual(begin.status_code, 200)
         self.assertIn("科別", begin.json()["reply"])
-        with patch("app.services.semantic_normalizer._taipei_today", return_value=date(2026, 9, 14)):
+        # Explicit AI fixture proposals replace the former free-text keyword assumptions.
+        proposed_dates = {
+            "我想要看一般內科9月21號的上午": "2026-09-21",
+            "改成9月21日上午": "2026-09-21",
+            "我想改成神經內科9/23上午": "2026-09-23",
+            "9月21號上午": "2026-09-21",
+            "9/21上午": "2026-09-21",
+        }
+        extractions = []
+        time_preferences = []
+        if message in proposed_dates:
+            target = proposed_dates[message]
+            time_preferences = [
+                dict(kind="date", relation="prefer", priority=1, date_value=target,
+                     source_text=message, confidence=0.98),
+                dict(kind="session", relation="prefer", priority=1, session="morning",
+                     source_text="上午", confidence=0.98),
+            ]
+        if message == "我想把症狀改成頭暈":
+            extractions = [dict(field="symptom", normalized_value="頭暈", assertion="present",
+                semantic_status="available", confidence=0.98, source_text="頭暈")]
+
+        async def converge(current):
+            current.department_result = department_preference_service.resolve_requested_department(current)
+            current.conversation_state.department_status = "resolved" if current.department_result else "unresolved"
+
+        provider = AsyncMock(return_value=json.dumps(dict(semantic_extractions=extractions,
+            pending_answer=None, ttas_evidence=[], time_preferences=time_preferences), ensure_ascii=False))
+        with patch.object(chat_route, "runtime_ai_available", return_value=True), patch.object(
+            chat_route, "refine_case_with_ai", rag_triage_adapter.refine_case_with_ai,
+        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
+            rag_triage_adapter, "complete_prompt", provider,
+        ), patch.object(chat_route, "reason_about_departments", AsyncMock(side_effect=converge)), patch.object(
+            chat_route, "request_clarification", AsyncMock(return_value=ClarificationSuggestion(
+                status="sufficient", question=None, intent=None, reason="fixture evidence sufficient",
+            )),
+        ):
             response = client.post("/chat", json={"case_id": case.case_id, "message": message})
+        provider.assert_awaited_once()
         self.assertEqual(response.status_code, 200)
         return response
 
@@ -857,7 +903,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 case_id = _case_id("direct_department")
                 client = TestClient(app)
-                client.post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+                client.post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
                 response = client.post(
                     "/chat",
                     json={
@@ -905,7 +951,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
             with self.subTest(answer=answer):
                 case_id = _case_id("direct_department_availability")
                 client = TestClient(app)
-                client.post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+                client.post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
                 with patch("app.services.semantic_normalizer._taipei_today", return_value=date(2026, 9, 14)):
                     response = client.post(
                         "/chat",
@@ -932,7 +978,7 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
     def test_direct_department_availability_survives_to_final_confirmation(self):
         case_id = _case_id("direct_department_complete")
         client = TestClient(app)
-        client.post("/chat", json={"case_id": case_id, "visit_type": "initial"})
+        client.post("/chat", json={"case_id": case_id, "visit_type": "initial", "legacy_batch": True})
         with patch("app.services.semantic_normalizer._taipei_today", return_value=date(2026, 9, 14)):
             first = client.post(
                 "/chat",
@@ -993,9 +1039,8 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
         self.assertEqual(patient["requested_department_name"], "一般內科")
         self.assertEqual(patient["requested_department_id"], 1232)
         self.assertEqual(patient["duration"], "3週")
-        self.assertEqual(case["availability"]["preferred_dates"], ["2026-09-21"])
-        self.assertEqual(case["availability"]["preferred_days"], ["週一"])
-        self.assertEqual(case["availability"]["preferred_sessions"], ["上午"])
+        self.assertEqual(case["availability"]["time_preferences"][0]["resolved_dates"], ["2026-09-21"])
+        self.assertEqual(case["availability"]["time_preferences"][1]["session"], "morning")
         self.assertEqual(data["department_result"]["dept_id"], 1232)
         self.assertIn("使用者明確指定", data["department_result"]["reason"][0])
         self.assertEqual(data["conversation_state"]["department_status"], "resolved")
@@ -1009,8 +1054,8 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
             "改成9月21日上午",
         )
         time_case = time_response.json()["triage_case"]
-        self.assertEqual(time_case["availability"]["preferred_dates"], ["2026-09-21"])
-        self.assertEqual(time_case["availability"]["preferred_sessions"], ["上午"])
+        self.assertEqual(time_case["availability"]["time_preferences"][0]["resolved_dates"], ["2026-09-21"])
+        self.assertEqual(time_case["availability"]["time_preferences"][1]["session"], "morning")
         self.assertEqual(time_case["patient_input"]["duration"], "3週")
 
         department_response = self._revise(
@@ -1028,8 +1073,8 @@ class DepartmentPreferenceRevisionTest(unittest.TestCase):
         )
         combined_case = combined_response.json()["triage_case"]
         self.assertEqual(combined_case["patient_input"]["requested_department_name"], "神經內科")
-        self.assertEqual(combined_case["availability"]["preferred_dates"], ["2026-09-23"])
-        self.assertEqual(combined_case["availability"]["preferred_sessions"], ["上午"])
+        self.assertEqual(combined_case["availability"]["time_preferences"][0]["resolved_dates"], ["2026-09-23"])
+        self.assertEqual(combined_case["availability"]["time_preferences"][1]["session"], "morning")
 
     def test_calendar_month_does_not_replace_real_duration(self):
         for message in ("9月21號上午", "9/21上午"):

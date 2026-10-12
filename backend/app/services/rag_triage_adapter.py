@@ -20,6 +20,7 @@ from app.schemas import (
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
 from app.services.conversation_service import SAFETY_PENDING_INTENT
+from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
@@ -56,7 +57,7 @@ async def refine_case_with_ai(
 ) -> RagTriageSuggestion | None:
     """Extract grounded evidence from the current free-text turn."""
     if not _ai_available():
-        logger.info("rag_triage_adapter refine skipped: AI key is not configured")
+        logger.info("rag_triage_adapter refine skipped: runtime_unavailable deterministic_fallback=true")
         return None
 
     if user_sources is None:
@@ -71,7 +72,7 @@ async def refine_case_with_ai(
         logger.warning(
             "rag_triage_adapter refine failed case_id=%s error_type=%s",
             case.case_id,
-            type(exc).__name__,
+            "invalid_json" if isinstance(exc, (ValueError, json.JSONDecodeError)) else "provider_timeout" if isinstance(exc, TimeoutError) else type(exc).__name__,
         )
         return None
 
@@ -422,6 +423,7 @@ def _pending_answer_from_ai(
         return None
     base_keys = {"answered_intent", "answer_status", "answer_source_text", "answer_confidence"}
     if set(value) not in {frozenset(base_keys), frozenset(base_keys | {"answer_assertion"})}:
+        logger.info("turn pending answer accepted=false reason=invalid_schema")
         return None
     intent = value.get("answered_intent")
     status = value.get("answer_status")
@@ -440,6 +442,13 @@ def _pending_answer_from_ai(
         or (assertion is not None and assertion not in _EVIDENCE_ASSERTIONS)
         or (pending_intent == SAFETY_PENDING_INTENT and assertion not in _EVIDENCE_ASSERTIONS)
     ):
+        reason = (
+            "wrong_intent" if intent != pending_intent else
+            "ungrounded_source" if not isinstance(source, str) or not source.strip()
+            or not any(source.strip() in text for text in user_sources) else
+            "invalid_status_confidence_or_assertion"
+        )
+        logger.info("turn pending answer accepted=false reason=%s", reason)
         return None
     return PendingAnswerInterpretation(
         answered_intent=intent,
@@ -520,6 +529,7 @@ def _build_symptom_collection_prompt(
         "pending_clarification_intent": pending_intent,
         "pending_question": pending_question,
         "current_user_text": current_user_text or [],
+        "complete_safety_screen": QUESTION_TEXTS[RED_FLAG_QUESTION_KEY] if pending_intent == SAFETY_PENDING_INTENT else None,
     }
     try:
         prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
@@ -551,7 +561,7 @@ def _build_symptom_collection_prompt(
 14. 同一次 interpretation 也要判斷本輪是否回答 pending clarification。pending context 如下：
 {json.dumps(pending_context, ensure_ascii=False, indent=2)}
 15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 包含 answered_intent、answer_status、answer_source_text、answer_confidence，並可包含 answer_assertion；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
-  15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報 safety 問題中的一項或多項狀況，absent 表示患者明確否認整份 safety 問題，uncertain 表示無法確定。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為 safety negative。
+  15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報安全問題中的狀況，absent 只表示患者明確否認 complete_safety_screen 整份問題，uncertain 表示無法確定。即使 pending_question 已縮小成聚焦追問，僅否認這一項也不能當成整份陰性。部分否認應為 partial，不知道或離題應為 unclear；抱怨跳針不得當成陰性。保留本輪回報的頭痛、頭暈等 evidence，不得由「其他沒有」否定已回報的症狀。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為整份 safety negative。明確陽性仍須抽對應 catalog 內 TTAS evidence，不能由 answer_assertion 決定級數。
   16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
   17. 同一次 Turn Interpretation 必須完成 TTAS evidence 掃描。請逐一對照下方「目前 production 可執行的 TTAS evidence catalog」與 current_user_text。凡本輪患者原文直接支持的 evidence，都必須輸出；即使同一個事實已經同時出現在 semantic_extractions，也不可因此省略 ttas_evidence。
   18. catalog 的 label_zh / meaning_zh 是語意概念，不是固定關鍵字清單。患者可以使用不同自然說法；只要語意直接等價，而且 source_text 能逐字在 current_user_text 找到，即可抽取。不得只因出現相似字詞就硬套欄位。

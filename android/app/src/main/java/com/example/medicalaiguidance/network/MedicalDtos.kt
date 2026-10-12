@@ -9,7 +9,8 @@ data class ChatRequest(
     val visitType: String? = null,
     val answers: List<BatchAnswerDto> = emptyList(),
     val confirmed: Boolean = false,
-    val revisionRequested: Boolean = false
+    val revisionRequested: Boolean = false,
+    val legacyBatch: Boolean = false
 )
 
 data class QuestionItemDto(
@@ -330,6 +331,7 @@ fun ChatRequest.toJson(): String = JSONObject().apply {
     }
     if (confirmed) put("confirmed", true)
     if (revisionRequested) put("revision_requested", true)
+    if (legacyBatch) put("legacy_batch", true)
 }.toString()
 
 fun RecommendRequest.toJson(): String = JSONObject().apply {

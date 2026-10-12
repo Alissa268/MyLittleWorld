@@ -35,6 +35,9 @@ internal data class ChatLatencyTrace(
     val replyMessageId: String
 )
 
+internal fun shouldAppendAssistantReply(previous: ChatMessage?, reply: String): Boolean =
+    previous?.sender != MessageSender.AI || previous.content != reply
+
 internal fun currentQuestionAnswer(question: QuestionItemDto?, answer: String): BatchAnswerDto? =
     question?.let { current ->
         answer.trim().takeIf { it.isNotBlank() }?.let { BatchAnswerDto(current.key, it) }
@@ -324,7 +327,7 @@ class ChatViewModel(
         viewModelScope.launch {
             _chatError.value = null
             try {
-                val result = repository.startBatchTriage(visitPlan.apiValue)
+                val result = repository.startNaturalTriage(visitPlan.apiValue)
                 caseId = result.caseId
                 consumeTriageResponse(result)
             } catch (error: Exception) {
@@ -345,10 +348,6 @@ class ChatViewModel(
         val text = _inputText.value.trim()
         if (historyReadOnly() || text.isBlank() || _isAiThinking.value || _isConfirmingRecommendation.value ||
             _isListening.value || _isVoiceTranscribing.value) return
-        if (_currentBatchQuestion.value != null) {
-            submitCurrentBatchAnswer(text, onAnalysisComplete)
-            return
-        }
 
         _isAiThinking.value = true
         viewModelScope.launch {
@@ -370,14 +369,15 @@ class ChatViewModel(
                 repository.setActiveCaseId(caseId)
 
                 updateBatchAndSafetyState(result)
-                val reply = _currentBatchQuestion.value?.question
-                    ?: result.reply
+                val reply = result.reply
                     ?: result.nextQuestion
                     ?: result.triage.warningMessage
                     ?: "I received your information. Please continue describing your symptoms or preferred visit time."
 
-                val replyMessage = ChatMessage(content = reply, sender = MessageSender.AI)
-                repository.addMessage(replyMessage)
+                val previous = repository.getChatMessages().lastOrNull()
+                val replyMessage = if (shouldAppendAssistantReply(previous, reply)) {
+                    ChatMessage(content = reply, sender = MessageSender.AI).also(repository::addMessage)
+                } else previous!!
                 if (requestStartElapsedMs != null) {
                     latencyTrace = ChatLatencyTrace(
                         requestStartElapsedMs = requestStartElapsedMs,
@@ -788,12 +788,13 @@ class ChatViewModel(
     ) {
         repository.setActiveCaseId(result.caseId)
         updateBatchAndSafetyState(result)
-        val reply = _currentBatchQuestion.value?.question
-            ?: result.reply
+        val reply = result.reply
             ?: result.nextQuestion
             ?: result.triage.warningMessage
             ?: if (result.questionBatch.isNotEmpty()) "請一次回答以下問題。" else "請繼續描述症狀或可看診時間。"
-        repository.addMessage(ChatMessage(content = reply, sender = MessageSender.AI))
+        if (shouldAppendAssistantReply(repository.getChatMessages().lastOrNull(), reply)) {
+            repository.addMessage(ChatMessage(content = reply, sender = MessageSender.AI))
+        }
 
         val readyForRecommendation = result.isReadyForRecommendation()
         _showDecisionButtons.value = readyForRecommendation
@@ -804,9 +805,10 @@ class ChatViewModel(
 
     private fun updateBatchAndSafetyState(result: TriageResultDto) {
         _chatError.value = null
-        _currentQuestionBatch.value = result.questionBatch
+        // The natural chat UI never promotes legacy keyed questions to input authority.
+        _currentQuestionBatch.value = emptyList()
         _currentQuestionIndex.value = 0
-        _currentBatchQuestion.value = result.questionBatch.firstOrNull()
+        _currentBatchQuestion.value = null
         _batchAnswers.value = emptyMap()
         _batchValidationError.value = null
         _urgentWarning.value = result.triage.warningMessage

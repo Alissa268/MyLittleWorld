@@ -12,6 +12,10 @@ import com.example.medicalaiguidance.repository.parseHistoryJson
 import com.example.medicalaiguidance.viewmodel.ChatViewModel
 import com.example.medicalaiguidance.viewmodel.DoctorViewModel
 import com.example.medicalaiguidance.viewmodel.canNavigateToRecommendations
+import com.example.medicalaiguidance.viewmodel.shouldAppendAssistantReply
+import com.example.medicalaiguidance.model.VisitPlan
+import com.example.medicalaiguidance.model.ChatMessage
+import com.example.medicalaiguidance.model.MessageSender
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -55,6 +59,36 @@ class Phase7IntegrationRepairUnitTest {
         repository.clearRecommendationFlow()
         repository.clearChatMessages()
         Dispatchers.resetMain()
+    }
+
+    @Test
+    fun naturalStartAndFreeTextIgnoreLegacyBatchAuthority() = runTest(dispatcher) {
+        val question = "頭暈時有沒有伴隨耳鳴？"
+        client.chatResponse = { result(stage = "collecting").copy(
+            needMoreInfo = true, reply = question, nextQuestion = question,
+            questionBatch = listOf(QuestionItemDto(key = "duration", question = "舊固定題"))
+        ) }
+        val model = ChatViewModel(repository, { ttsSession }).also(models::add)
+        model.startNewConversation(VisitPlan.INITIAL)
+        runCurrent()
+        assertFalse(client.chatRequests.single().legacyBatch)
+        assertTrue(client.chatRequests.single().answers.isEmpty())
+        assertEquals(question, model.messages.value.last().content)
+        assertNull(model.currentBatchQuestion.value)
+        model.onInputTextChanged("有耳鳴")
+        model.sendMessage({ fail("collecting cannot navigate") })
+        runCurrent()
+        assertEquals("有耳鳴", client.chatRequests.last().message)
+        assertTrue(client.chatRequests.last().answers.isEmpty())
+        assertEquals(HistoryStatus.UNCOMPLETED, repository.getHistoryById(caseId)?.status)
+    }
+
+    @Test
+    fun identicalAssistantQuestionIsNotInsertedTwice() {
+        val question = "頭暈是在什麼時候開始的？"
+        assertFalse(shouldAppendAssistantReply(ChatMessage(content = question, sender = MessageSender.AI), question))
+        assertTrue(shouldAppendAssistantReply(ChatMessage(content = question, sender = MessageSender.USER), question))
+        assertTrue(shouldAppendAssistantReply(null, question))
     }
 
     @Test

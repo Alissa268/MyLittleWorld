@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import unittest
+from types import SimpleNamespace
 from uuid import uuid4
 from unittest.mock import AsyncMock, patch
 
@@ -24,6 +25,13 @@ DEPARTMENTS = [
 
 
 class StrictKeyedAcceptanceTest(unittest.IsolatedAsyncioTestCase):
+    def setUp(self):
+        # Explicit legacy keyed compatibility, not the primary natural chat path.
+        settings = SimpleNamespace(batch_triage_enabled=True, cerebras_api_key="")
+        settings_patch = patch.object(chat_route, "get_settings", return_value=settings)
+        settings_patch.start()
+        self.addCleanup(settings_patch.stop)
+
     @staticmethod
     def _semantic_provider(*extractions: dict) -> AsyncMock:
         return AsyncMock(

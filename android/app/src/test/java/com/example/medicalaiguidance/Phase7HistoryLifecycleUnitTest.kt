@@ -182,7 +182,7 @@ class Phase7HistoryLifecycleUnitTest {
         assertEquals(item().recommendationId, repository.getHistoryById(id)?.selectedRecommendationId)
     }
 
-    @Test fun restartedAndroidRestoresBackendQuestionAndCorrectBatchKey() = runTest(dispatcher) {
+    @Test fun restartedAndroidRestoresBackendQuestionWithoutForcingKeyedBatch() = runTest(dispatcher) {
         repository.saveToHistory(history())
         assertNull(repository.getLiveTriageResult(id))
         client.resumeResponse = { resume() }
@@ -192,12 +192,13 @@ class Phase7HistoryLifecycleUnitTest {
         assertEquals("原對話", model.messages.value.single().content)
         runCurrent()
         assertFalse(model.isHistoryReadOnly.value)
-        assertEquals("duration", model.currentBatchQuestion.value?.key)
+        assertNull(model.currentBatchQuestion.value)
         assertEquals("請問持續多久？", model.messages.value.last().content)
         model.onInputTextChanged("三天")
         model.sendMessage({})
         runCurrent()
-        assertEquals("duration", client.chats.single().answers.single().key)
+        assertTrue(client.chats.single().answers.isEmpty())
+        assertEquals("三天", client.chats.single().message)
         assertEquals(id, client.chats.single().caseId)
     }
 

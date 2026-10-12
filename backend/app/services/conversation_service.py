@@ -15,6 +15,12 @@ from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark
 
 logger = logging.getLogger(__name__)
 HARD_TURN_CAP = 8
+SAFETY_ANSWER_CAP = 3
+SAFETY_UNRESOLVED_REPLY = (
+    "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
+    "若情況緊急，請立即尋求緊急醫療協助。"
+)
+SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
 SAFETY_PENDING_INTENT = "safety_screen"
 FALLBACK_QUESTIONS = (
     "可以再描述一下目前最困擾你的不舒服，以及它什麼情況下會變嚴重嗎？",
@@ -142,6 +148,7 @@ async def request_clarification(
 ) -> ClarificationSuggestion | None:
     """Treat the provider's JSON as a proposal, never a workflow transition."""
     state = case.conversation_state
+    safety_planning = state.clarification_status == "safety_check" and not safety_screen_resolved(case)
     payload = {
         "conversation_history": [item.model_dump() for item in case.history_records[-24:]],
         "current_user_text": user_sources,
@@ -158,7 +165,10 @@ async def request_clarification(
         "candidate_departments": [item.model_dump() for item in state.candidate_departments],
         "department_uncertainty_reason": state.department_uncertainty_reason,
         "department_next_information_needed": state.department_next_information_needed,
-        "required_next_question_intent": state.department_next_question_intent,
+        "required_next_question_intent": SAFETY_PENDING_INTENT if safety_planning else state.department_next_question_intent,
+        "safety_planning": safety_planning,
+        "safety_screen_question": QUESTION_TEXTS[RED_FLAG_QUESTION_KEY] if safety_planning else None,
+        "safety_answer_validation": state.safety_answer_validation,
     }
     answer_contract = (
         "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
@@ -172,6 +182,9 @@ async def request_clarification(
         "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
     )
     prompt = (
+        ("目前仍在安全澄清，不能改問科別問題。只針對目前原文與已接受證據中仍未確認的一個安全面向自然追問，"
+         "不要重貼整份安全清單，不要把不知道、離題或部分否認當成整份陰性；不得新增醫療判級規則。"
+         "intent 必須為 safety_screen；即使你認為已足夠，Backend 仍決定安全狀態。" if safety_planning else "") +
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
         "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
         "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向、一個聚焦問句、一次詢問要求；"
@@ -235,7 +248,10 @@ async def request_clarification(
             answer_source = None
             answer_status = None
             answer_confidence = None
-        if status == "clarification_needed" and state.department_status == "ambiguous" and state.department_next_question_intent:
+        if safety_planning and (intent != SAFETY_PENDING_INTENT or question == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]):
+            question = None
+            intent = None
+        elif not safety_planning and status == "clarification_needed" and state.department_status == "ambiguous" and state.department_next_question_intent:
             if intent != state.department_next_question_intent:
                 if not (
                     state.pending_clarification_intent == intent
@@ -280,6 +296,15 @@ def capture_safety_screen_answer(
     user_sources: list[str],
 ) -> bool:
     """Complete a negative safety screen from validated AI interpretation only."""
+    state = case.conversation_state
+    if state.clarification_status != "safety_check" or not user_sources:
+        return False
+    state.safety_answer_attempts += 1
+    state.safety_answer_validation = (
+        "missing_or_invalid_interpretation" if suggestion is None else
+        "low_confidence" if suggestion.answer_confidence < ACCEPT_THRESHOLD else
+        f"{suggestion.answer_status}_{suggestion.answer_assertion}"
+    )
     if (
         case.conversation_state.clarification_status != "safety_check"
         or suggestion is None
@@ -295,6 +320,7 @@ def capture_safety_screen_answer(
             user_sources,
         )
     ):
+        logger.info("safety answer accepted=false reason=%s attempt=%s", state.safety_answer_validation, state.safety_answer_attempts)
         return False
 
     patient = case.patient_input
@@ -308,7 +334,28 @@ def capture_safety_screen_answer(
         state.consumed_fields.append(RED_FLAG_QUESTION_KEY)
     state.field_statuses[RED_FLAG_QUESTION_KEY] = "unavailable"
     state.field_confidence[RED_FLAG_QUESTION_KEY] = suggestion.answer_confidence
+    state.safety_answer_validation = "accepted_complete_negative"
+    logger.info("safety answer accepted=true reason=complete_negative attempt=%s", state.safety_answer_attempts)
     return True
+
+
+def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion | None) -> None:
+    """Bound safety workflow retries without interpreting patient language."""
+    state = case.conversation_state
+    if state.safety_answer_attempts >= SAFETY_ANSWER_CAP:
+        _unresolved(case)
+        state.uncertainty_reasons = ["safety_information_unresolved"]
+        state.next_information_needed = []
+        return
+    question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
+    if not question or any(m.role == "assistant" and m.content == question for m in case.history_records):
+        question = SAFETY_RETRY_REPLY
+    state.clarification_status = "safety_check"
+    state.last_question_key = RED_FLAG_QUESTION_KEY
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = question
+    case.triage.is_final = False
 
 
 def advance_conversation(
@@ -327,8 +374,10 @@ def advance_conversation(
     if state.clarification_status == "unresolved":
         _unresolved(case)
         return
-    if state.clarification_status != "safety_check":
-        state.turn_count += len(user_sources)
+    state.turn_count += len(user_sources)
+    if state.clarification_status == "safety_check" and not safety_screen_resolved(case):
+        continue_safety_check(case, suggestion)
+        return
 
     grounded_answer = bool(suggestion) and _grounded_clarification_answer(
         suggestion.answered_intent, suggestion.answer_source_text,

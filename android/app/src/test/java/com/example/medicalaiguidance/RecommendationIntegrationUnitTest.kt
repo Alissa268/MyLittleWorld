@@ -12,7 +12,6 @@ import com.example.medicalaiguidance.screen.compactCardReason
 import com.example.medicalaiguidance.screen.SPECIALTY_MATCH_TITLE
 import com.example.medicalaiguidance.screen.TIME_MATCH_TITLE
 import com.example.medicalaiguidance.screen.specialtyDescription
-import com.example.medicalaiguidance.screen.scoreToStars
 import com.example.medicalaiguidance.screen.timeDescription
 import com.example.medicalaiguidance.viewmodel.revalidationError
 import org.json.JSONException
@@ -260,7 +259,7 @@ class RecommendationIntegrationUnitTest {
     }
 
     @Test
-    fun doctorCardDisplaysOnlyBackendCompactRecommendationReason() {
+    fun legacyReasonWithoutStructuredBasisDoesNotBecomeMedicalClaim() {
         val recommendation = RecommendationItemDto(
             recommendationId = "rec_reason",
             parentDept = "五官科",
@@ -276,171 +275,49 @@ class RecommendationIntegrationUnitTest {
             ),
         )
 
-        assertEquals(
-            "醫師專長相符：過敏性鼻炎診療、鼻塞",
-            recommendation.compactCardReason(),
-        )
+        assertNull(recommendation.compactCardReason())
     }
 
-    @Test
-    fun doctorDetailUsesNaturalSpecialtyAndTimeReasonsWithoutInternalScores() {
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_detail",
-            parentDept = "外科系",
-            childDept = "一般骨科",
-            doctor = "測試醫師",
-            date = "2026-09-14",
-            session = "下午",
-            score = 90.2,
-            specialtyScore = 0.86,
-            timeScore = 1.0,
-            specialtyTags = listOf("骨科復健", "膝關節診療", "兒童骨科"),
-            matchReason = "症狀與膝、膝關節/骨科或復健相關；醫師專長包含骨科復健",
-            reasons = listOf(
-                "科別依據：使用者症狀「膝蓋怪怪的」對應到 一般骨科",
-                "時間依據：使用者偏好 週一/週二/週四/週五/週六/週日 下午；Schedule 為 2026-09-14 週一 下午，符合偏好，時間分數 1.00",
-                "排序依據：specialty_score*70 + time_score*30，總分=90.20",
-            ),
-        )
+    private fun displayRecommendation(score: Double? = 0.5, time: Double? = null) = RecommendationItemDto(
+        recommendationId = "rec_facts", parentDept = "五官科", childDept = "耳科",
+        doctor = "測試醫師", date = "2026-10-20", session = "下午", score = 99.0,
+        specialtyScore = score, timeScore = time, specialtyTags = listOf("聽力評估"),
+        matchReason = "舊版高度符合症狀", reasons = listOf("排序依據：70/30")
+    )
 
-        val specialty = recommendation.specialtyDescription()
-        val time = recommendation.timeDescription()
-
-        assertEquals("症狀與專長相符", SPECIALTY_MATCH_TITLE)
-        assertEquals("看診時間符合", TIME_MATCH_TITLE)
-        assertEquals(
-            "症狀與膝、膝關節/骨科或復健相關；醫師專長包含骨科復健",
-            specialty,
-        )
-        assertEquals(
-            "您偏好週三以外的下午時段，此門診為 9 月 14 日週一下午，符合您的需求。",
-            time,
-        )
-        listOf(specialty, time).forEach { text ->
-            assertFalse(text.contains("時間分數"))
-            assertFalse(text.contains("score", ignoreCase = true))
-            assertFalse(text.contains("90.20"))
-            assertFalse(text.contains("1.00"))
-        }
+    @Test fun neutralScoreIsNotInterpretedAsClinicalRating() {
+        val item = displayRecommendation()
+        assertTrue(item.specialtyDescription().contains("聽力評估"))
+        assertFalse(item.specialtyDescription().contains("高度符合"))
+        assertFalse(item.specialtyDescription().contains("星"))
+        assertEquals("SQL 專長資料：聽力評估", item.compactCardReason())
     }
 
-    @Test
-    fun specialtyReasonPrefersBackendMatchReason() {
-        val backendReason = "飯後胃痛與反胃屬消化道不適方向；此醫師具胃鏡相關診療專長，與目前就診需求較相符。"
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_backend_reason",
-            parentDept = "內科系",
-            childDept = "胃腸肝膽科",
-            doctor = "測試醫師",
-            date = "2026-09-20",
-            session = "下午",
-            score = 0.9,
-            specialtyTags = listOf("胃鏡、大腸鏡診斷及治療"),
-            matchReason = backendReason,
-            reasons = listOf("推薦理由：Android 舊版固定理由"),
-        )
-
-        assertEquals(backendReason, recommendation.specialtyDescription())
-        assertEquals(backendReason.take(55), recommendation.compactCardReason())
+    @Test fun noAiScoreStillShowsOnlySqlSpecialties() {
+        assertEquals(displayRecommendation().specialtyDescription(), displayRecommendation(null).specialtyDescription())
     }
 
-    @Test
-    fun specialtyReasonFallsBackWhenBackendMatchReasonIsNull() {
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_reason_fallback",
-            parentDept = "五官科",
-            childDept = "鼻科",
-            doctor = "測試醫師",
-            date = "2026-09-20",
-            session = "上午",
-            score = 0.8,
-            specialtyTags = listOf("過敏性鼻炎診斷與治療"),
-            reasons = listOf(
-                "推薦理由：既有卡片 fallback",
-                "科別依據：使用者症狀「鼻塞」對應到鼻科",
-            ),
-        )
-
-        assertEquals("既有卡片 fallback", recommendation.compactCardReason())
-        assertTrue(recommendation.specialtyDescription().contains("過敏性鼻炎"))
+    @Test fun semanticScoreDoesNotInventPatientMedicalRelationship() {
+        assertEquals(displayRecommendation(0.5).specialtyDescription(), displayRecommendation(0.99).specialtyDescription())
     }
 
-    @Test
-    fun backendReasonIsBoundedForCompactCardAndDetail() {
-        val longReason = "長".repeat(100)
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_long_reason",
-            parentDept = "內科系",
-            childDept = "胃腸肝膽科",
-            doctor = "測試醫師",
-            date = "2026-09-20",
-            session = "下午",
-            score = 0.9,
-            matchReason = longReason,
-        )
-
-        assertEquals(55, recommendation.compactCardReason()?.length)
-        assertEquals(68, recommendation.specialtyDescription().length)
+    @Test fun noTimePreferenceDoesNotClaimTimeMatch() {
+        assertFalse(displayRecommendation().timeDescription().contains("符合"))
+        assertTrue(displayRecommendation().timeDescription().contains("下午"))
     }
 
-    @Test
-    fun doctorDetailUsesExactDateAndSessionFromBackendReason() {
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_exact_date",
-            parentDept = "內科系",
-            childDept = "神經內科",
-            doctor = "測試醫師",
-            date = "2026-09-20",
-            session = "下午",
-            score = 0.9,
-            specialtyScore = 0.86,
-            timeScore = 1.0,
-            specialtyTags = listOf("腦血管疾病", "腦血管剝離"),
-            reasons = listOf(
-                "科別依據：使用者症狀「頭部不舒服」，目前建議科別為 神經內科",
-                "時間依據：使用者偏好 2026-09-20 下午；Schedule 為 2026-09-20 週日 下午，符合偏好，時間分數 1.00",
-            ),
-        )
-
-        assertEquals(
-            "您先前提到「頭部不舒服」，目前建議科別為神經內科。這位醫師的專長包含「腦血管疾病」、「腦血管剝離」，與目前需要由神經內科評估的症狀方向相關，因此專長匹配度較高。",
-            recommendation.specialtyDescription(),
-        )
-        assertEquals(
-            "您偏好 9 月 20 日下午，此門診為 9 月 20 日週日下午，符合您的需求。",
-            recommendation.timeDescription(),
-        )
+    @Test fun legacyTimeScoreDoesNotBecomeMatchClaim() {
+        assertEquals(displayRecommendation(time = 0.0).timeDescription(), displayRecommendation(time = 1.0).timeDescription())
     }
 
-    @Test
-    fun starRatingReflectsActualBackendScoreWithoutArtificialMinimum() {
-        assertEquals(5.0, scoreToStars(1.0), 0.001)
-        assertEquals(4.5, scoreToStars(0.86), 0.001)
-        assertEquals(2.5, scoreToStars(0.50), 0.001)
-        assertEquals(0.0, scoreToStars(0.0), 0.001)
+    @Test fun presentationTitlesDescribeFactsNotAccuracy() {
+        assertEquals("醫師專長資料", SPECIALTY_MATCH_TITLE)
+        assertEquals("可掛號診次", TIME_MATCH_TITLE)
     }
 
-    @Test
-    fun doctorDetailFallsBackToCompactVisitTimeWithoutListingWeekdayArray() {
-        val recommendation = RecommendationItemDto(
-            recommendationId = "rec_time_fallback",
-            parentDept = "五官科",
-            childDept = "耳科",
-            doctor = "測試醫師",
-            date = "2026-09-15",
-            session = "上午",
-            score = 0.8,
-            reasons = listOf("時間依據：符合偏好，時間分數 0.80"),
-        )
-
-        val description = recommendation.timeDescription()
-
-        assertEquals(
-            "此門診為 9 月 15 日週二上午，符合您的看診時間偏好。",
-            description,
-        )
-        assertFalse(description.contains("週一/"))
-        assertFalse(description.contains("分數"))
+    @Test fun missingSqlSpecialtiesDoesNotInferFromDepartmentOrSymptom() {
+        val item = displayRecommendation().copy(specialtyTags = emptyList(), matchReason = null)
+        assertEquals("目前沒有可顯示的正式專長資料。", item.specialtyDescription())
     }
 
     @Test

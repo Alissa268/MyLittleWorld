@@ -19,6 +19,8 @@ from app.services.chat_perf import (
 )
 from app.services.conversation_service import (
     UNRESOLVED_REPLY,
+    SAFETY_UNRESOLVED_REPLY,
+    SAFETY_ANSWER_CAP,
     advance_conversation,
     capture_pending_answer,
     capture_safety_screen_answer,
@@ -81,9 +83,15 @@ async def chat(req: ChatRequest) -> TriageResult:
             batch_enabled
             and not safety_check_turn
             and case.visit_type in {VisitType.INITIAL, VisitType.FOLLOWUP}
-            and (bool(req.answers) or not _request_has_text_input(req))
+            and (bool(req.answers) or req.legacy_batch or (
+                bool(case.history_records) and not case.conversation_state.free_text_mode
+                and not _request_has_text_input(req)
+            ))
         )
-    record_chat_route_trace(case_id=case.case_id, triage_branch="rule_engine")
+    record_chat_route_trace(
+        case_id=case.case_id,
+        triage_branch="legacy_batch" if batch_mode else "ai_first_free_text",
+    )
     logger.info(
         "chat request case_id=%s confirmed=%s has_message=%s has_triage_case=%s history_len=%s stage=%s",
         case.case_id,
@@ -161,14 +169,19 @@ async def chat(req: ChatRequest) -> TriageResult:
         ai_suggestion = None
         department_preference_name = None
         has_user_input = False
-        semantic_first = runtime_ai_available(settings)
-        if free_text_request:
+        ai_available = runtime_ai_available(settings)
+        semantic_first = ai_available or not batch_mode
+        if not batch_mode:
             case.conversation_state.free_text_mode = True
         semantic_ai_allowed = (
-            semantic_first
+            ai_available
             and case.conversation_state.clarification_status != "unresolved"
         )
-        conversational_mode = (semantic_first or safety_check_turn) and not batch_mode
+        logger.info(
+            "chat interpretation available=%s allowed=%s safety_turn=%s legacy_batch=%s deterministic_fallback=%s",
+            ai_available, semantic_ai_allowed, safety_check_turn, batch_mode, not ai_available,
+        )
+        conversational_mode = not batch_mode
         user_text_parts: list[str] = []
         messages = req.messages or []
         should_auto_revision = _should_treat_user_input_as_revision(case, req)
@@ -254,7 +267,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                 preference = capture_department_preference(case, user_text)
                 if preference and preference.resolved:
                     department_preference_name = preference.name
-        if free_text_request and not semantic_first and not safety_check_turn:
+        if free_text_request and not ai_available and not safety_check_turn:
             has_explicit_preference = (
                 case.patient_input.requested_department_id is not None
                 or bool(case.patient_input.requested_department_name)
@@ -266,11 +279,7 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.conversation_state.candidate_departments = []
 
     with perf.measure("rule_engine"):
-        confirmation_only = bool(
-    req.confirmed
-    and not has_user_input
-    and case.conversation_state.is_complete
-)
+        confirmation_only = bool(not has_user_input and case.conversation_state.is_complete)
         if not confirmation_only and not preserve_urgent_terminal:
             case.triage = apply_ttas_evaluation(case)
             if not conversational_mode and not case.triage.warning_required:
@@ -344,7 +353,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     has_user_input
                     and turn_interpretation_complete
                     and semantic_ai_allowed
-                    and (not safety_check_turn or safety_completed_this_turn)
+                    and case.conversation_state.clarification_status != "unresolved"
+                    and (not safety_check_turn or safety_completed_this_turn or case.conversation_state.safety_answer_attempts < SAFETY_ANSWER_CAP)
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
@@ -363,13 +373,9 @@ async def chat(req: ChatRequest) -> TriageResult:
                     user_sources=user_text_parts,
                     current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
                 )
-                if safety_check_turn and not safety_completed_this_turn:
-                    case.conversation_state.clarification_status = "safety_check"
-                    case.conversation_state.last_question_key = RED_FLAG_QUESTION_KEY
-                    case.conversation_state.is_complete = False
-                    case.triage.need_more_info = True
-                    case.triage.next_question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
-                    case.triage.is_final = False
+                if not has_user_input and not safety_check_turn and not case.history_records:
+                    case.conversation_state.last_question_key = "symptom"
+                    case.triage.next_question = QUESTION_TEXTS["symptom"]
                 if case.triage.next_question:
                     case.history_records.append(Message(role="assistant", content=case.triage.next_question))
         else:
@@ -521,7 +527,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
         reply = DEPARTMENT_UNRESOLVED_REPLY
     elif conversational_mode and case.conversation_state.clarification_status == "unresolved":
-        reply = UNRESOLVED_REPLY
+        reply = SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else UNRESOLVED_REPLY
     elif reply is None and case.conversation_state.awaiting_confirmation and case.department_result:
         reply = build_department_confirmation_reply(case)
     elif reply is None and case.conversation_state.confirmed:

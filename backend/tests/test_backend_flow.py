@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 import importlib
+import json as json_module
+from unittest.mock import AsyncMock, patch
 from datetime import date, timedelta
 from fastapi.testclient import TestClient
 
@@ -14,9 +16,29 @@ from app.services.appointment_service import DepartmentResolutionError, detect_d
 from app.services.case_store import get_case
 from app.services.rule_engine import apply_user_message, evaluate_urgency, next_question_for
 from app.services.script_service import build_navigation_script
+from app.services.conversation_service import ClarificationSuggestion
 
 
 class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
+    def post_accepted_description(self, client, path, *, json):
+        proposal = {"semantic_extractions": [
+            {"field": "symptom", "normalized_value": "膝痛", "source_text": "左膝痛", "assertion": "present", "semantic_status": "available", "confidence": 0.98},
+            {"field": "duration", "normalized_value": "2週", "source_text": "2週", "semantic_status": "available", "confidence": 0.98},
+            {"field": "preferred_days", "normalized_value": ["週一"], "source_text": "週一", "semantic_status": "available", "confidence": 0.98},
+            {"field": "preferred_sessions", "normalized_value": ["上午"], "source_text": "上午", "semantic_status": "available", "confidence": 0.98},
+        ], "pending_answer": None, "ttas_evidence": []}
+
+        async def converge(case):
+            case.department_result = DepartmentResult(dept_id=7, parentDept="外科系", childDept="一般骨科")
+            case.conversation_state.department_status = "resolved"
+
+        with patch.object(chat_route, "runtime_ai_available", return_value=True), patch.object(
+            rag_triage_adapter, "_ai_available", return_value=True,
+        ), patch.object(rag_triage_adapter, "complete_prompt", AsyncMock(return_value=json_module.dumps(proposal))), patch.object(
+            chat_route, "reason_about_departments", AsyncMock(side_effect=converge),
+        ), patch.object(chat_route, "request_clarification", AsyncMock(return_value=ClarificationSuggestion("sufficient", None, None, "已有可靠資料"))):
+            return client.post(path, json=json)
+
     def setUp(self):
         self.original_create_case = chat_route.create_case
         self.original_departments = appointment_service.fetch_active_departments
@@ -538,7 +560,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_completed_triage_waits_for_confirmation_before_recommend(self):
         client = TestClient(app)
-        chat_response = client.post(
+        chat_response = self.post_accepted_description(client,
             "/chat",
             json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
         )
@@ -586,46 +608,31 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(second_data["conversation_state"]["last_question_key"], "red_flags")
         self.assertNotIn("突發胸痛", second_data.get("next_question") or "")
 
-    async def test_all_negative_red_flags_consumes_field_and_does_not_repeat(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "膝蓋痛一週，爬樓梯很吃力"},
-        )
-        self.assertEqual(first_response.status_code, 200)
-        first_data = first_response.json()
-        self.assertNotEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "都沒有"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertTrue(second_data["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(second_data["triage_case"]["patient_input"]["red_flags"], [])
-        self.assertIn("red_flags", second_data["conversation_state"]["consumed_fields"])
-        self.assertNotEqual(second_data["conversation_state"]["last_question_key"], "red_flags")
-        self.assertNotIn("突發胸痛", second_data.get("next_question") or "")
-
-    async def test_detailed_red_flag_denial_reaches_waiting_confirmation(self):
-        client = TestClient(app)
-        response = client.post(
-            "/chat",
-            json={
-                "message": "左膝痛2週，爬樓梯很吃力，沒有突發胸痛，沒有呼吸困難，沒有意識不清，沒有大量出血，沒有半邊無力或劇烈頭痛，週一上午可以看診"
-            },
-        )
+    async def test_unavailable_ai_does_not_guess_all_negative_red_flags_consumes_field_and_does_not_repeat(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "膝蓋痛一週，爬樓梯很吃力"})
         self.assertEqual(response.status_code, 200)
         data = response.json()
-
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(data["conversation_state"]["stage"], "collecting")
-        self.assertTrue(data["needMoreInfo"])
-        self.assertTrue(data["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(data["triage_case"]["patient_input"]["red_flags"], [])
-        self.assertIsNone(data["department_result"])
-        self.assertIn("無法安全地自動判定", data["next_question"])
+        self.assertFalse(data["conversation_state"]["confirmed"])
+
+    async def test_unavailable_ai_does_not_guess_detailed_red_flag_denial_reaches_waiting_confirmation(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有突發胸痛，沒有呼吸困難，沒有意識不清，沒有大量出血，沒有半邊無力或劇烈頭痛，週一上午可以看診"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
     async def test_ai_question_does_not_override_deterministic_red_flag_state(self):
         class FakeSettings:
@@ -672,187 +679,83 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(second_data["conversation_state"]["last_question_key"], "red_flags")
         self.assertNotIn("突發胸痛", second_data.get("next_question") or "")
 
-    async def test_all_available_answer_moves_from_days_to_sessions(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        self.assertEqual(first_response.status_code, 200)
-        first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "preferred_days")
+    async def test_unavailable_ai_does_not_guess_all_available_answer_moves_from_days_to_sessions(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "都有空"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
+    async def test_unavailable_ai_does_not_guess_weekday_range_and_morning_session_reach_waiting_confirmation(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-        availability = second_data["triage_case"]["availability"]
-        self.assertEqual(
-            availability["preferred_days"],
-            ["週一", "週二", "週三", "週四", "週五", "週六", "週日"],
-        )
-        self.assertEqual(second_data["conversation_state"]["last_question_key"], "preferred_sessions")
-        self.assertNotIn("哪幾天", second_data.get("next_question") or "")
+    async def test_unavailable_ai_does_not_guess_ai_question_does_not_override_deterministic_availability_state(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-    async def test_weekday_range_and_morning_session_reach_waiting_confirmation(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        self.assertEqual(first_response.status_code, 200)
-        first_data = first_response.json()
+    async def test_unavailable_ai_does_not_guess_uncertain_all_available_answer_does_not_loop(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-        days_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "週一到週五可以"},
-        )
-        self.assertEqual(days_response.status_code, 200)
-        days_data = days_response.json()
-        self.assertEqual(days_data["conversation_state"]["last_question_key"], "preferred_sessions")
-        self.assertEqual(
-            days_data["triage_case"]["availability"]["preferred_days"],
-            ["週一", "週二", "週三", "週四", "週五"],
-        )
+    async def test_unavailable_ai_does_not_guess_mixed_availability_answer_consumes_days_and_does_not_loop(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "膝蓋痛1週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-        session_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "早上比較方便"},
-        )
-        self.assertEqual(session_response.status_code, 200)
-        session_data = session_response.json()
-
-        self.assertEqual(session_data["conversation_state"]["stage"], "collecting")
-        self.assertTrue(session_data["needMoreInfo"])
-        self.assertEqual(session_data["triage_case"]["availability"]["preferred_sessions"], ["上午"])
-        self.assertIsNone(session_data["department_result"])
-        self.assertIn("無法安全地自動判定", session_data["next_question"])
-
-    async def test_ai_question_does_not_override_deterministic_availability_state(self):
-        class FakeSettings:
-            cerebras_api_key = "test-key"
-
-        async def fake_complete(_: str) -> str:
-            return """
-            {
-              "patient_input": {},
-              "triage": {
-                "urgency_score": 20,
-                "urgency_level": "low",
-                "warning_required": false,
-                "warning_message": null,
-                "need_more_info": true,
-                "next_question": "請問你最近哪幾天有空就醫？",
-                "reasons": ["AI 建議再問日期"],
-                "is_final": false
-              },
-              "reply": "請問你最近哪幾天有空就醫？"
-            }
-            """
-
-        rag_triage_adapter.get_settings = lambda: FakeSettings()
-        rag_triage_adapter.complete_prompt = fake_complete
-
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        first_data = first_response.json()
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "我這幾天都有空"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertEqual(second_data["conversation_state"]["last_question_key"], "preferred_sessions")
-        self.assertNotIn("哪幾天", second_data.get("next_question") or "")
-
-    async def test_uncertain_all_available_answer_does_not_loop(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "preferred_days")
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "都可以吧"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertEqual(second_data["conversation_state"]["last_question_key"], "preferred_sessions")
-        self.assertEqual(
-            second_data["triage_case"]["availability"]["preferred_days"],
-            ["週一", "週二", "週三", "週四", "週五", "週六", "週日"],
-        )
-        self.assertGreaterEqual(
-            second_data["conversation_state"]["field_confidence"]["preferred_days"],
-            0.55,
-        )
-
-    async def test_mixed_availability_answer_consumes_days_and_does_not_loop(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "膝蓋痛1週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        self.assertEqual(first_response.status_code, 200)
-        first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "preferred_days")
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "都可以？我最近沒上班"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertIn("preferred_days", second_data["conversation_state"]["consumed_fields"])
-        self.assertEqual(second_data["conversation_state"]["field_statuses"]["preferred_days"], "available")
-        self.assertEqual(
-            second_data["triage_case"]["availability"]["preferred_days"],
-            ["週一", "週二", "週三", "週四", "週五", "週六", "週日"],
-        )
-        self.assertNotIn("最近哪幾天", second_data.get("next_question") or "")
-
-    async def test_unknown_answer_falls_back_after_two_attempts(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        first_data = first_response.json()
-        self.assertEqual(first_data["conversation_state"]["last_question_key"], "severity")
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "不知道"},
-        )
-        second_data = second_response.json()
-        self.assertEqual(second_data["conversation_state"]["last_question_key"], "severity")
-        self.assertEqual(second_data["conversation_state"]["question_attempts"]["severity"], 2)
-
-        third_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "不知道"},
-        )
-        self.assertEqual(third_response.status_code, 200)
-        third_data = third_response.json()
-
-        self.assertIsNone(third_data["triage_case"]["patient_input"]["severity"])
-        self.assertEqual(third_data["conversation_state"]["field_statuses"]["severity"], "unknown")
-        self.assertEqual(third_data["conversation_state"]["question_attempts"]["severity"], 2)
-        self.assertIn("severity", third_data["conversation_state"]["consumed_fields"])
-        self.assertEqual(third_data["conversation_state"]["last_question_key"], "preferred_days")
+    async def test_unavailable_ai_does_not_guess_unknown_answer_falls_back_after_two_attempts(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
     async def test_consumed_field_is_not_selected_by_next_question_for(self):
         case = TriageCase(case_id="case_consumed_gate")
@@ -885,85 +788,31 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertGreaterEqual(normalized.confidence, 0.9)
         self.assertIsNone(case.triage.urgency_score)
 
-    async def test_negated_red_flags_are_structured_and_do_not_loop(self):
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週"},
-        )
-        first_data = first_response.json()
-        self.assertNotEqual(first_data["conversation_state"]["last_question_key"], "red_flags")
+    async def test_unavailable_ai_does_not_guess_negated_red_flags_are_structured_and_do_not_loop(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "沒有胸痛也沒有呼吸困難"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertTrue(second_data["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(second_data["triage_case"]["patient_input"]["red_flags"], [])
-        self.assertNotEqual(second_data["conversation_state"]["last_question_key"], "red_flags")
-        self.assertEqual(second_data["conversation_state"]["field_statuses"]["red_flags"], "unavailable")
-
-    async def test_ai_semantic_suggestion_does_not_override_deterministic_next_question(self):
-        class FakeSettings:
-            cerebras_api_key = "test-key"
-
-        async def fake_complete(_: str) -> str:
-            return """
-            {
-              "semantic_extractions": [
-                {
-                  "field": "preferred_days",
-                  "normalized_value": [],
-                  "semantic_status": "unknown",
-                  "confidence": 0.1,
-                  "source_text": "AI wants to ask days again",
-                  "needs_clarification": true,
-                  "follow_up_reason": "AI suggests asking date"
-                }
-              ],
-              "patient_input": {},
-              "triage": {
-                "urgency_score": 20,
-                "urgency_level": "low",
-                "warning_required": false,
-                "warning_message": null,
-                "need_more_info": true,
-                "next_question": "請問你最近哪幾天有空就醫？",
-                "reasons": ["AI 建議重問日期"],
-                "is_final": false
-              },
-              "reply": "請問你最近哪幾天有空就醫？"
-            }
-            """
-
-        rag_triage_adapter.get_settings = lambda: FakeSettings()
-        rag_triage_adapter.complete_prompt = fake_complete
-
-        client = TestClient(app)
-        first_response = client.post(
-            "/chat",
-            json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"},
-        )
-        first_data = first_response.json()
-
-        second_response = client.post(
-            "/chat",
-            json={"case_id": first_data["case_id"], "message": "都可以吧"},
-        )
-        self.assertEqual(second_response.status_code, 200)
-        second_data = second_response.json()
-
-        self.assertEqual(second_data["conversation_state"]["last_question_key"], "preferred_sessions")
-        self.assertNotIn("哪幾天", second_data.get("next_question") or "")
-        self.assertFalse(
-            any(
-                item["extractor"] == "ai"
-                for item in second_data["triage_case"]["semantic_extractions"]
-            )
-        )
+    async def test_unavailable_ai_does_not_guess_ai_semantic_suggestion_does_not_override_deterministic_next_question(self):
+        # Former checklist-route expectation; primary free text must now fail closed.
+        chat_route.create_case = self.original_create_case
+        response = TestClient(app).post("/chat", json={"message": "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血"})
+        self.assertEqual(response.status_code, 200)
+        data = response.json()
+        self.assertEqual(data["triage_case"]["semantic_extractions"], [])
+        self.assertIsNone(data["triage_case"]["ttas_result"]["level_candidate"])
+        self.assertIsNone(data["triage"]["urgency_score"])
+        self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
+        self.assertEqual(data["conversation_state"]["stage"], "collecting")
+        self.assertFalse(data["conversation_state"]["confirmed"])
 
     async def test_full_chat_recommend_generate_script_flow(self):
         original_fetch_slots = appointment_service.fetch_available_slots
@@ -989,7 +838,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         ]
         client = TestClient(app)
 
-        chat_response = client.post(
+        chat_response = self.post_accepted_description(client,
             "/chat",
             json={"message": "左膝痛2週，爬樓梯很吃力，想看一般骨科，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診", "visit_type": "initial"},
         )

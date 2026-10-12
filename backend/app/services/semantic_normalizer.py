@@ -224,6 +224,11 @@ def normalize_preferred_days(text: str, last_question_key: str | None = None) ->
 
     days: list[str] = []
     confidence = 0.0
+    # Preserve chronological relative-day order even when Sunday precedes Monday.
+    for offset, term in ((1, "明天"), (2, "後天"), (3, "大後天")):
+        if term in (text.replace("大後天", "") if offset == 2 else text):
+            days.append(ALL_WEEKDAYS[(_taipei_today() + timedelta(days=offset)).weekday()])
+            confidence = 0.9
     exact_dates = normalize_preferred_dates(text, last_question_key)
     if exact_dates is not None:
         for value in exact_dates.normalized_value:

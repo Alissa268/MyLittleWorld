@@ -178,6 +178,9 @@ class MedicalRepository(
     }
 
     suspend fun startBatchTriage(visitType: String): TriageResultDto =
+        apiClient.chat(ChatRequest(visitType = visitType, legacyBatch = true)).also(::consumeTriageResult)
+
+    suspend fun startNaturalTriage(visitType: String): TriageResultDto =
         apiClient.chat(ChatRequest(visitType = visitType)).also(::consumeTriageResult)
 
     suspend fun submitBatchAnswers(

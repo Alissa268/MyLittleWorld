@@ -290,6 +290,8 @@ class ConversationState(BaseModel):
     field_confidence: Dict[str, float] = Field(default_factory=dict)
     clarification_reasons: Dict[str, str] = Field(default_factory=dict)
     turn_count: int = 0
+    safety_answer_attempts: int = 0
+    safety_answer_validation: Optional[str] = None
     clarification_status: str = "collecting"
     uncertainty_reasons: List[str] = Field(default_factory=list)
     next_information_needed: List[str] = Field(default_factory=list)
@@ -342,6 +344,7 @@ class TriageCase(BaseModel):
 
 
 class ChatRequest(BaseModel):
+    legacy_batch: bool = False
     case_id: Optional[str] = None
     message: Optional[str] = None
     messages: List[Message] = Field(default_factory=list)
