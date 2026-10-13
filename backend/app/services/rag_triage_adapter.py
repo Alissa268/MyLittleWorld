@@ -102,10 +102,24 @@ async def refine_case_with_ai(
         user_sources=user_sources,
         reference_date=time_preference_reference_date,
     )
-    if _answered_without_clinical_evidence(
+    repair_reason = _turn_interpretation_rejection_reason(
+        data,
+        pending_intent=pending_intent,
+        user_sources=user_sources,
+        dialogue_act=dialogue_act,
+        semantic_extractions=semantic_extractions,
+        pending_answer=pending_answer,
+        ttas_evidence=ttas_evidence,
+        time_preferences=time_preferences,
+    )
+    if repair_reason is None and _answered_without_clinical_evidence(
         pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
     ):
-        repair_prompt = _build_turn_interpretation_repair_prompt(prompt)
+        repair_reason = "answered_without_clinical_evidence"
+
+    if repair_reason is not None:
+        logger.info("turn interpretation accepted=false reason=%s repair_attempted=true", repair_reason)
+        repair_prompt = _build_turn_interpretation_repair_prompt(prompt, repair_reason)
         try:
             repair_raw = await complete_prompt(repair_prompt)
             logger.debug(
@@ -140,13 +154,31 @@ async def refine_case_with_ai(
             return RagTriageSuggestion(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
-        if _answered_without_clinical_evidence(
+
+        remaining_rejection = _turn_interpretation_rejection_reason(
+            repair_data,
+            pending_intent=pending_intent,
+            user_sources=user_sources,
+            dialogue_act=dialogue_act,
+            semantic_extractions=semantic_extractions,
+            pending_answer=pending_answer,
+            ttas_evidence=ttas_evidence,
+            time_preferences=time_preferences,
+        )
+        if remaining_rejection is None and _answered_without_clinical_evidence(
             pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
         ):
-            logger.warning("rag_triage_adapter repair incomplete case_id=%s", case.case_id)
+            remaining_rejection = "answered_without_clinical_evidence"
+        if remaining_rejection is not None:
+            logger.warning(
+                "rag_triage_adapter repair incomplete case_id=%s reason=%s",
+                case.case_id,
+                remaining_rejection,
+            )
             return RagTriageSuggestion(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
+        logger.info("turn interpretation accepted=true repair_attempted=true")
     replace_existing_fields = {
         item.field for item in semantic_extractions
         if dialogue_act.act == "correction" and _is_accepted_clinical_evidence(item)
@@ -206,19 +238,70 @@ def _prior_user_sources(case: TriageCase, current_user_sources: list[str]) -> li
     return user_texts
 
 
+def _dialogue_act_rejection_reason(value: Any, user_sources: list[str]) -> str | None:
+    """Validate the AI dialogue act without interpreting patient wording in Python."""
+    if value is None:
+        return "missing_dialogue_act"
+    if not isinstance(value, dict) or set(value) != {"act", "source_text", "confidence"}:
+        return "invalid_dialogue_act_schema"
+    source, confidence = value.get("source_text"), value.get("confidence")
+    if not isinstance(source, str) or not source.strip():
+        return "missing_dialogue_act_source"
+    if not any(source.strip() in text for text in user_sources):
+        return "ungrounded_dialogue_act_source"
+    if (type(confidence) not in {int, float} or not math.isfinite(confidence)
+            or not ACCEPT_THRESHOLD <= confidence <= 1):
+        return "invalid_dialogue_act_confidence"
+    try:
+        DialogueActInterpretation(**value)
+    except (TypeError, ValueError):
+        return "invalid_dialogue_act_value"
+    return None
+
+
 def _dialogue_act_from_ai(value: Any, user_sources: list[str]) -> DialogueActInterpretation:
     """Dialogue interpretation has no authority over accepted medical facts or state."""
-    if isinstance(value, dict) and set(value) == {"act", "source_text", "confidence"}:
-        source, confidence = value.get("source_text"), value.get("confidence")
-        if (isinstance(source, str) and source.strip()
-                and any(source.strip() in text for text in user_sources)
-                and type(confidence) in {int, float} and math.isfinite(confidence)
-                and ACCEPT_THRESHOLD <= confidence <= 1):
-            try:
-                return DialogueActInterpretation(**value)
-            except (TypeError, ValueError):
-                pass
-    return DialogueActInterpretation()
+    reason = _dialogue_act_rejection_reason(value, user_sources)
+    if reason is not None:
+        logger.info("turn dialogue act accepted=false reason=%s", reason)
+        return DialogueActInterpretation()
+    return DialogueActInterpretation(**value)
+
+
+def _turn_interpretation_rejection_reason(
+    data: dict[str, Any],
+    *,
+    pending_intent: str | None,
+    user_sources: list[str],
+    dialogue_act: DialogueActInterpretation,
+    semantic_extractions: list[SemanticExtraction],
+    pending_answer: PendingAnswerInterpretation | None,
+    ttas_evidence: list[TTASEvidence],
+    time_preferences: list[TimePreference],
+) -> str | None:
+    """Reject structurally incomplete AI turns; never infer user semantics here."""
+    dialogue_reason = _dialogue_act_rejection_reason(data.get("dialogue_act"), user_sources)
+    if dialogue_reason is not None and (pending_intent is not None or not semantic_extractions):
+        return dialogue_reason
+    if dialogue_act.act == "correction" and not any(
+        _is_accepted_clinical_evidence(item) for item in semantic_extractions
+    ):
+        return "correction_without_grounded_evidence"
+    if dialogue_act.act == "new_information" and not (
+        any(_is_accepted_clinical_evidence(item) for item in semantic_extractions)
+        or ttas_evidence or time_preferences
+    ):
+        return "new_information_without_grounded_evidence"
+    if pending_intent is not None and dialogue_act.act == "answer" and pending_answer is None:
+        return "answer_without_pending_answer"
+    if (
+        pending_intent is not None
+        and pending_answer is None
+        and not any(_is_accepted_clinical_evidence(item) for item in semantic_extractions)
+        and dialogue_act.act in {"unknown", "off_topic"}
+    ):
+        return "unresolved_pending_turn"
+    return None
 
 
 def _validated_turn_interpretation(
@@ -569,12 +652,17 @@ def _case_text(case: TriageCase) -> str:
     return strip_negated_red_flags("；".join(part for part in parts if part))
 
 
-def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
+def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_reason: str) -> str:
     return (
         original_prompt
-        + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
-        "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
-        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act 與 prior_answer_reference。"
+        + "\n\n修復要求：上一份 Turn Interpretation 未通過 Backend 結構驗證。"
+        f" rejection_reason={rejection_reason}。"
+        "請重新解析同一份 current_user_text；不要改寫患者事實，也不要控制 workflow。"
+        "這次必須完整輸出 semantic_extractions、pending_answer、ttas_evidence、time_preferences、"
+        "dialogue_act、prior_answer_reference 六個頂層欄位；不適用時用 [] 或 null，不得省略。"
+        "若 dialogue_act=request_explanation，pending_answer 可以為 null，且不得捏造 medical evidence。"
+        "若 dialogue_act=correction，必須輸出本輪逐字原文可支持的更正 evidence；"
+        "correction act 本身不能取代 evidence。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
         " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
     )
@@ -627,7 +715,7 @@ def _build_symptom_collection_prompt(
   6. 不得輸出 red_flags。急迫性只能抽成 ttas_evidence，由 Backend 依正式規則判斷。
   7. 不要輸出 patient_input、triage、TTAS level、urgency_score、warning_required、red_flags_checked、next_question、stage、科別、確認狀態或掛號資訊。
 8. duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
-9. source_text 必須是直接支持該 extraction 的最短連續逐字原文（患者原話），不可改寫；不得包含無關的前後症狀、否定句或其他子句。
+9. source_text 必須是直接支持該 extraction 的最短連續逐字原文（患者原話），不可改寫；不得包含與該 extraction 無關的前後症狀或其他子句。若 assertion=absent，source_text 應保留直接表達否定的最短原文，不得移除否定詞。
 10. symptom 與 accompanying_symptoms 只要 normalized_value 含有 medical concept，就必須輸出 assertion：present 表示患者陳述存在、absent 表示患者否認、uncertain 表示患者不確定；其他欄位可省略 assertion 或輸出 null。
 11. 同一 extraction 中的所有 normalized concept 必須具有相同 assertion；若同一句包含不同 polarity，必須拆成多筆 extraction，且每筆各自引用最短的 grounded source_text。不得把 mixed-polarity 整句共用為單一 medical extraction。
 12. severity 的 normalized_value 只能輸出字串 "mild"、"moderate" 或 "severe"：輕微／還好 → mild，普通／中等／中度 → moderate，嚴重／很嚴重／痛到無法睡覺 → severe；不得輸出「輕微」「中等」「嚴重程度低」等其他字串。
@@ -650,6 +738,78 @@ def _build_symptom_collection_prompt(
   27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、unknown、off_topic。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
   28. 新增 prior_answer_reference，預設為 null。只有 dialogue_act=claims_already_answered、有 active pending intent 且不是 safety_screen 時，才可引用 prior_accepted_semantic_evidence 中真正回答該 pending question 的既有證據；只輸出 answered_intent、answer_source_text、answer_confidence。answered_intent 必須完全等於 pending intent，source 必須逐字等於一筆 prior accepted extraction 的 source_text，confidence 為 0 到 1。不得只引用 raw history、不得引用本輪剛抽的新證據、不得把 uncertain 當已回答；找不到可靠答案就保持 null。此 reference 不代表科別已收斂，也絕不可完成 safety screen。
   29. dialogue_act=correction 時，仍須逐欄抽出本輪直接支持的更正 evidence；若修正 medical concept，分別輸出舊概念的 grounded absent 與新概念的 grounded present，不得刪掉無關症狀。correction act 本身不會改值；Backend 只接受 grounded、高信心且 schema 合法的本輪欄位。不得輸出 revision_mode 或其他 workflow 指令。
+  30. 每次回覆都必須包含六個頂層欄位：semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act、prior_answer_reference。沒有內容時分別使用 [] 或 null，不得省略。dialogue_act 一律必須輸出。
+
+對話行為正例 A（要求解釋，不是 medical answer）：
+current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀況？」
+{{
+  "semantic_extractions": [],
+  "pending_answer": null,
+  "ttas_evidence": [],
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "request_explanation",
+    "source_text": "我有點搞不懂",
+    "confidence": 0.98
+  }},
+  "prior_answer_reference": null
+}}
+
+對話行為正例 B（更正舊症狀，同時保留未被更正的新資訊）：
+current_user_text:「我剛剛講錯了，主要不是頭暈，是頭痛，右耳嗡嗡叫還是有。」
+{{
+  "semantic_extractions": [
+    {{
+      "field": "symptom",
+      "normalized_value": "頭暈",
+      "semantic_status": "unavailable",
+      "assertion": "absent",
+      "confidence": 0.99,
+      "source_text": "不是頭暈",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "symptom",
+      "normalized_value": "頭痛",
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.99,
+      "source_text": "頭痛",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "body_part",
+      "normalized_value": "右耳",
+      "semantic_status": "available",
+      "assertion": null,
+      "confidence": 0.98,
+      "source_text": "右耳",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }},
+    {{
+      "field": "accompanying_symptoms",
+      "normalized_value": ["耳鳴"],
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.98,
+      "source_text": "右耳嗡嗡叫還是有",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }}
+  ],
+  "pending_answer": null,
+  "ttas_evidence": [],
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "correction",
+    "source_text": "我剛剛講錯了",
+    "confidence": 0.99
+  }},
+  "prior_answer_reference": null
+}}
 
 時間偏好正例：
 current_user_text:「這週都不行，最好下週二，不然下週三，其他平日也可以。上午不行，下午最好。」
@@ -719,7 +879,13 @@ time_preferences 應輸出：
     "answer_assertion": "absent"
   }},
   "ttas_evidence": [],
-  "time_preferences": []
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "answer",
+    "source_text": "沒有聽力下降",
+    "confidence": 0.98
+  }},
+  "prior_answer_reference": null
 }}
 
 TTAS 正例（同一句可同時產生 semantic_extractions 與 ttas_evidence）：
@@ -757,7 +923,13 @@ current_user_text:「剛剛清潔劑濺到我的右眼，現在眼睛灼痛。�
       "source_text": "清潔劑濺到我的右眼"
     }}
   ],
-  "time_preferences": []
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "new_information",
+    "source_text": "眼睛灼痛",
+    "confidence": 0.99
+  }},
+  "prior_answer_reference": null
 }}
 
 TTAS 反例（不能從症狀倒推暴露原因）：
@@ -787,5 +959,11 @@ current_user_text:「我的右眼很痛。」
   ],
   "pending_answer": null,
   "ttas_evidence": [],
-  "time_preferences": []
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "new_information",
+    "source_text": "右眼很痛",
+    "confidence": 0.99
+  }},
+  "prior_answer_reference": null
 }}"""
