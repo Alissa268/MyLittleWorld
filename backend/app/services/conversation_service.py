@@ -461,12 +461,22 @@ def capture_safety_screen_answer(
     case: TriageCase,
     suggestion: PendingAnswerInterpretation | None,
     user_sources: list[str],
+    *, dialogue_act: DialogueActInterpretation | None = None,
 ) -> bool:
     """Complete a negative safety screen from validated AI interpretation only."""
     state = case.conversation_state
     if state.clarification_status != "safety_check" or not user_sources:
         return False
+    if (dialogue_act is not None and dialogue_act.act == "request_explanation"
+            and dialogue_act.confidence >= ACCEPT_THRESHOLD):
+        state.safety_answer_validation = "request_explanation"
+        logger.info(
+            "safety answer case_id=%s dialogue_act=request_explanation attempt_incremented=false "
+            "reason=safety_request_explanation_no_attempt", case.case_id,
+        )
+        return False
     state.safety_answer_attempts += 1
+    logger.info("safety answer case_id=%s attempt_incremented=true", case.case_id)
     state.safety_answer_validation = (
         "missing_or_invalid_interpretation" if suggestion is None else
         "low_confidence" if suggestion.answer_confidence < ACCEPT_THRESHOLD else
@@ -522,7 +532,9 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
     state.pending_clarification_intent = None
     state.pending_clarification_question = None
     state.next_information_needed = []
-    if state.safety_answer_attempts >= SAFETY_ANSWER_CAP:
+    if state.safety_answer_attempts >= SAFETY_ANSWER_CAP or (
+        state.safety_answer_validation == "request_explanation" and state.turn_count >= HARD_TURN_CAP
+    ):
         _unresolved(case)
         state.uncertainty_reasons = ["safety_information_unresolved"]
         state.next_information_needed = []

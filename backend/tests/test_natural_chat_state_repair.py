@@ -689,3 +689,150 @@ def test_second_b_valid_prior_reference_does_not_trigger_extra_interpretation_or
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
     interpreter.assert_awaited_once()
     assert result["conversation_state"]["clarification_evidence"][INTENT] == "房子一直在轉"
+
+
+def resolved_after_answer(expected_source):
+    async def recompute(case):
+        state = case.conversation_state
+        assert state.clarification_evidence[INTENT] == expected_source
+        assert state.pending_clarification_intent is None
+        state.department_status = "resolved"
+        state.department_next_question_intent = None
+        case.department_result = DepartmentResult(dept_id=1333, parentDept="五官科", childDept="耳科")
+    return recompute
+
+
+def test_control_prior_reference_precedes_meta_pending_answer_with_new_evidence(runtime, caplog):
+    client, interpreter, planner, department = runtime
+    case = prior_case()
+    save_case(case)
+    text = "我說過了，而且今天還有耳鳴"
+    interpreter.return_value = json.dumps(dict(
+        semantic_extractions=[evidence("accompanying_symptoms", ["耳鳴"], "還有耳鳴")],
+        ttas_evidence=[], dialogue_act=act("我說過了", "claims_already_answered"),
+        prior_answer_reference=prior_reference(), pending_answer=dict(answered_intent=INTENT,
+            answer_status="answered", answer_source_text="我說過了", answer_confidence=0.99)))
+    planner.return_value = json.dumps(dict(status="sufficient", reason="資訊已足夠"))
+    department.side_effect = resolved_after_answer("房子一直在轉")
+    with caplog.at_level(logging.INFO):
+        result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    assert result["conversation_state"]["clarification_evidence"][INTENT] == "房子一直在轉"
+    assert result["conversation_state"]["clarification_evidence"][INTENT] != "我說過了"
+    assert result["conversation_state"]["pending_clarification_intent"] is None
+    assert any(item["normalized_value"] == ["耳鳴"] for item in result["triage_case"]["semantic_extractions"])
+    interpreter.assert_awaited_once()
+    planner.assert_awaited_once()
+    department.assert_awaited_once()
+    assert "prior_answer_reference_accepted" in caplog.text
+    assert text not in caplog.text
+
+
+@pytest.mark.parametrize("reference", [None, prior_reference("我以前說過會昏倒")])
+def test_control_invalid_prior_reference_falls_back_to_valid_direct_answer(runtime, reference):
+    client, interpreter, planner, department = runtime
+    case = prior_case()
+    save_case(case)
+    text = "我說過了，房子在旋轉，而且有耳鳴"
+    interpreter.return_value = json.dumps(dict(
+        semantic_extractions=[evidence("accompanying_symptoms", ["耳鳴"], "有耳鳴")],
+        ttas_evidence=[], dialogue_act=act("我說過了", "claims_already_answered"),
+        prior_answer_reference=reference, pending_answer=dict(answered_intent=INTENT,
+            answer_status="answered", answer_source_text="房子在旋轉", answer_confidence=0.99)))
+    planner.return_value = json.dumps(dict(status="sufficient", reason="資訊已足夠"))
+    department.side_effect = resolved_after_answer("房子在旋轉")
+    result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    assert result["conversation_state"]["clarification_evidence"][INTENT] == "房子在旋轉"
+    assert result["conversation_state"]["pending_clarification_intent"] is None
+    interpreter.assert_awaited_once()
+    department.assert_awaited_once()
+
+
+def active_safety_case():
+    case = clinical_case()
+    case.patient_input.red_flags_checked = False
+    cs._enter_safety_check(case)
+    case.conversation_state.safety_answer_attempts = 1
+    case.history_records.append(Message(role="assistant", content=QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]))
+    return case
+
+
+SAFETY_EXPLANATION_QUESTION = "我想確認這次不舒服是否突然出現？"
+
+
+def safety_explanation_plan():
+    return {**plan(SAFETY_EXPLANATION_QUESTION, "safety_screen"), "information_needs": ["不舒服是否突然出現"]}
+
+
+def test_control_safety_explanation_does_not_consume_answer_attempt(runtime, caplog):
+    client, interpreter, planner, department = runtime
+    case = active_safety_case()
+    save_case(case)
+    text = "我聽不懂，你在問什麼？"
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+        dialogue_act=act("我聽不懂", "request_explanation")))
+    planner.return_value = json.dumps(safety_explanation_plan())
+    with caplog.at_level(logging.INFO):
+        result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    state = result["conversation_state"]
+    assert state["safety_answer_attempts"] == 1
+    assert state["safety_answer_validation"] == "request_explanation"
+    assert state["clarification_status"] == "safety_check"
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    assert result["triage_case"]["patient_input"]["red_flags_status"] == "not_checked"
+    assert result["reply"] == SAFETY_EXPLANATION_QUESTION
+    assert state["reply_source"] == "AI_PLANNER"
+    department.assert_not_awaited()
+    planner.assert_awaited_once()
+    interpreter.assert_awaited_once()
+    assert "safety_request_explanation_no_attempt" in caplog.text
+    assert text not in caplog.text
+
+
+@pytest.mark.parametrize("status", ["partial", "unclear"])
+def test_control_safety_medical_answer_still_consumes_attempt(runtime, status):
+    client, interpreter, planner, department = runtime
+    case = active_safety_case()
+    save_case(case)
+    text = "不確定"
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+        pending_answer=pending(text, status, "uncertain"), dialogue_act=act(text, "answer")))
+    planner.return_value = json.dumps(safety_explanation_plan())
+    result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    assert result["conversation_state"]["safety_answer_attempts"] == 2
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    department.assert_not_awaited()
+
+
+@pytest.mark.parametrize("interpretation", [
+    {**act("我聽不懂", "request_explanation"), "confidence": 0.1},
+    act("本輪沒有這段原文", "request_explanation"),
+])
+def test_control_invalid_explanation_act_does_not_get_attempt_exemption(runtime, interpretation):
+    client, interpreter, planner, department = runtime
+    case = active_safety_case()
+    save_case(case)
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+        dialogue_act=interpretation))
+    planner.return_value = json.dumps(safety_explanation_plan())
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，你在問什麼？")).json()
+    assert result["conversation_state"]["safety_answer_attempts"] == 2
+    assert '"act": "unknown"' in planner.await_args.args[0]
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    department.assert_not_awaited()
+
+
+def test_control_safety_explanations_remain_bounded_by_existing_turn_cap(runtime):
+    client, interpreter, planner, department = runtime
+    case = active_safety_case()
+    case.conversation_state.turn_count = cs.HARD_TURN_CAP - 1
+    save_case(case)
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+        dialogue_act=act("我聽不懂", "request_explanation")))
+    planner.return_value = json.dumps(safety_explanation_plan())
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂")).json()
+    assert result["conversation_state"]["clarification_status"] == "unresolved"
+    assert result["conversation_state"]["safety_answer_attempts"] == 1
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    assert result["conversation_state"]["confirmed"] is False
+    assert result["next_question"] is None
+    department.assert_not_awaited()

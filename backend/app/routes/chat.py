@@ -304,7 +304,10 @@ async def chat(req: ChatRequest) -> TriageResult:
             if safety_check_turn and ai_suggestion is not None
             else None
         )
-        capture_safety_screen_answer(case, safety_interpretation, user_text_parts)
+        capture_safety_screen_answer(
+            case, safety_interpretation, user_text_parts,
+            dialogue_act=getattr(ai_suggestion, "dialogue_act", None),
+        )
         safety_completed_this_turn = bool(
             safety_check_turn
             and has_user_input
@@ -347,12 +350,13 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and getattr(ai_suggestion, "interpretation_complete", True)
                 )
                 if not safety_check_turn:
-                    capture_pending_answer(case, pending_interpretation, user_text_parts)
-                    capture_prior_answer_reference(
+                    prior_captured = capture_prior_answer_reference(
                         case, getattr(ai_suggestion, "prior_answer_reference", None),
                         getattr(ai_suggestion, "dialogue_act", None),
                         prior_extractions=prior_extractions, prior_user_sources=prior_user_sources,
                     )
+                    if not prior_captured:
+                        capture_pending_answer(case, pending_interpretation, user_text_parts)
                     clear_answered_pending(case)
                 department_reasoning_allowed = bool(
                     has_user_input
