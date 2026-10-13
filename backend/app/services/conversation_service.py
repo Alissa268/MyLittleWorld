@@ -8,9 +8,10 @@ import math
 import re
 from dataclasses import dataclass
 
-from app.schemas import DialogueActInterpretation, PendingAnswerInterpretation, SemanticExtraction, TriageCase
+from app.schemas import DialogueActInterpretation, PendingAnswerInterpretation, PriorAnswerReference, SemanticExtraction, TriageCase
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
+from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark_questions_asked
 
 logger = logging.getLogger(__name__)
@@ -50,6 +51,12 @@ _INTERNAL_STATE_TEXT = re.compile(
 )
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
+# Output-only guards for empty conversational filler, not patient medical NLP.
+_GENERIC_INFORMATION_NEED = re.compile(r"更多(?:資訊|細節)|症狀細節|目前情況|剛才問題|上述問題|其他資訊")
+_GENERIC_CLARIFICATION_QUESTION = re.compile(
+    r"(?:請|可以|能否|可否)?(?:再)?(?:詳細)?(?:說明|補充|描述)(?:一下|目前情況)?(?:嗎)?[？?。]?|"
+    r"(?:請|可以|能否|可否)?(?:再)?換個方式(?:說明|描述)(?:一下)?(?:嗎)?[？?。]?"
+)
 
 
 def safety_screen_resolved(case: TriageCase) -> bool:
@@ -295,7 +302,13 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
     if not isinstance(proposal.get("reason"), str) or not proposal["reason"].strip():
         return "invalid_reason"
     if proposal["status"] == "sufficient":
-        return "safety_still_pending" if safety_planning else None
+        if safety_planning:
+            return "safety_still_pending"
+        if required_intent is not None:
+            return "unresolved_information_remaining"
+        if case.conversation_state.department_status == "ambiguous":
+            return "department_still_ambiguous"
+        return None
     question, intent = proposal.get("question"), proposal.get("intent")
     if not isinstance(question, str) or not 4 <= len(question.strip()) <= 180:
         return "invalid_question_length"
@@ -314,9 +327,14 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
     if _MULTI_QUESTION.search(question) or _MULTI_DIMENSION_QUESTION.search(question):
         return "multiple_information_needs"
     needs = proposal.get("information_needs")
-    if needs is not None and (not isinstance(needs, list) or len(needs) != 1
-                              or _patient_information_need(needs[0]) is None):
+    if not isinstance(needs, list) or len(needs) != 1 or not isinstance(needs[0], str) or not needs[0].strip():
         return "invalid_information_need"
+    if _GENERIC_INFORMATION_NEED.fullmatch(needs[0].strip().strip("。？！? ")):
+        return "generic_information_need"
+    if _patient_information_need(needs[0]) is None:
+        return "invalid_information_need"
+    if _GENERIC_CLARIFICATION_QUESTION.fullmatch(question.strip()):
+        return "generic_question"
     if question.strip() in (*FALLBACK_QUESTIONS, *NEUTRAL_PENDING_RETRIES):
         return "generic_retry"
     if any(item.role == "assistant" and item.content == question.strip() for item in case.history_records):
@@ -337,6 +355,85 @@ def clear_answered_pending(case: TriageCase) -> bool:
         state.next_information_needed = []
         return True
     return False
+
+
+def validate_prior_answer_reference(
+    value: object, dialogue_act: DialogueActInterpretation | None, pending_intent: str | None,
+    prior_extractions: tuple[SemanticExtraction, ...], prior_user_sources: list[str],
+) -> PriorAnswerReference | None:
+    """Only the AI relates intent to meaning; Backend verifies a prior accepted source."""
+    if (dialogue_act is None or dialogue_act.act != "claims_already_answered"
+            or dialogue_act.confidence < ACCEPT_THRESHOLD
+            or not pending_intent or pending_intent == SAFETY_PENDING_INTENT):
+        return None
+    try:
+        reference = PriorAnswerReference.model_validate(value)
+    except (ValueError, TypeError):
+        return None
+    if (reference.answered_intent != pending_intent or reference.answer_confidence < ACCEPT_THRESHOLD
+            or not reference.answer_source_text.strip()):
+        return None
+    if any(item.source_text == reference.answer_source_text for item in accepted_prior_answer_evidence(
+        prior_extractions, prior_user_sources,
+    )):
+        return reference
+    return None
+
+
+def accepted_prior_answer_evidence(
+    prior_extractions: tuple[SemanticExtraction, ...], prior_user_sources: list[str],
+) -> list[SemanticExtraction]:
+    accepted_items = []
+    for item in prior_extractions:
+        medical_assertion = item.field in {"symptom", "accompanying_symptoms"}
+        if (item.field not in _MEDICAL_FIELDS
+                or not item.source_text.strip()
+                or not any(item.source_text in text for text in prior_user_sources)
+                or type(item.confidence) not in {int, float} or not math.isfinite(item.confidence)
+                or not ACCEPT_THRESHOLD <= item.confidence <= 1
+                or item.semantic_status not in {"available", "partial", "unavailable"}
+                or (item.semantic_status == "unavailable" and not (medical_assertion and item.assertion == "absent"))
+                or (medical_assertion and item.assertion not in {"present", "absent"})
+                or not ai_normalized_value_valid(item.field, item.normalized_value, item.semantic_status, item.source_text)):
+            continue
+        accepted_items.append(item)
+    return accepted_items
+
+
+def capture_prior_answer_reference(
+    case: TriageCase, reference: PriorAnswerReference | None, dialogue_act: DialogueActInterpretation | None,
+    *, prior_extractions: tuple[SemanticExtraction, ...], prior_user_sources: list[str],
+) -> bool:
+    state = case.conversation_state
+    accepted_reference = None if state.clarification_status == "safety_check" else validate_prior_answer_reference(
+        reference, dialogue_act, state.pending_clarification_intent, prior_extractions, prior_user_sources,
+    )
+    if accepted_reference is None:
+        if reference is not None or (dialogue_act and dialogue_act.act == "claims_already_answered"):
+            logger.info("prior answer case_id=%s intent=%s accepted=false reason=prior_answer_reference_invalid",
+                        case.case_id, state.pending_clarification_intent)
+        return False
+    state.clarification_evidence[accepted_reference.answered_intent] = accepted_reference.answer_source_text
+    clear_answered_pending(case)
+    logger.info("prior answer case_id=%s intent=%s accepted=true reason=prior_answer_reference_accepted",
+                case.case_id, accepted_reference.answered_intent)
+    return True
+
+
+def invalidate_corrected_department_context(case: TriageCase) -> None:
+    """Release clinical decision ownership, without changing the safety lifecycle."""
+    state = case.conversation_state
+    case.department_result = None
+    state.department_status = "unresolved"
+    state.candidate_departments = []
+    state.department_uncertainty_reason = None
+    state.department_next_information_needed = None
+    state.department_next_question_intent = None
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.next_information_needed = []
+    case.confirmed = False
+    state.confirmed = False
 
 
 def capture_pending_answer(
@@ -621,6 +718,7 @@ def _patient_information_need(value: object) -> str | None:
         or len(focus) > 60
         or _UNSAFE_QUESTION.search(focus)
         or _INTERNAL_STATE_TEXT.search(focus)
+        or _GENERIC_INFORMATION_NEED.fullmatch(focus)
     ):
         return None
     return focus

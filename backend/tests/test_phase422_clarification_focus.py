@@ -65,6 +65,7 @@ def test_valid_same_intent_planner_followup_is_accepted():
     proposal = {
         "status": "clarification_needed",
         "question": FLANK_QUESTION,
+        "information_needs": ["腰側疼痛的位置"],
         "intent": "flank_pain",
         "reason": "需要區分目前官方候選證據",
         "answered_intent": None,
@@ -88,7 +89,7 @@ def test_valid_same_intent_planner_followup_is_accepted():
     assert case.triage.next_question == FLANK_QUESTION
     assert case.conversation_state.pending_clarification_intent == "flank_pain"
     assert case.conversation_state.department_status == "ambiguous"
-    assert case.conversation_state.next_information_needed == []
+    assert case.conversation_state.next_information_needed == ["腰側疼痛的位置"]
 
 
 def test_invalid_provider_followup_reports_technical_failure_without_internal_leak():

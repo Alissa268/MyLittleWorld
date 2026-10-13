@@ -12,6 +12,7 @@ from app.schemas import (
     DepartmentResult,
     DialogueActInterpretation,
     PendingAnswerInterpretation,
+    PriorAnswerReference,
     SemanticExtraction,
     TTASEvidence,
     TimePreference,
@@ -20,7 +21,10 @@ from app.schemas import (
 )
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
-from app.services.conversation_service import SAFETY_PENDING_INTENT
+from app.services.conversation_service import (
+    SAFETY_PENDING_INTENT, accepted_prior_answer_evidence, invalidate_corrected_department_context,
+    validate_prior_answer_reference,
+)
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.negation_utils import strip_negated_red_flags
@@ -52,6 +56,7 @@ class RagTriageSuggestion:
     time_preferences: list[TimePreference] | None = None
     interpretation_complete: bool = True
     dialogue_act: DialogueActInterpretation | None = None
+    prior_answer_reference: PriorAnswerReference | None = None
 
 
 async def refine_case_with_ai(
@@ -64,6 +69,8 @@ async def refine_case_with_ai(
 
     if user_sources is None:
         user_sources = [message.content for message in case.history_records if message.role == "user"]
+    prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
+    prior_user_sources = _prior_user_sources(case, user_sources)
     time_preference_reference_date = datetime.now(TAIPEI_ZONE).date()
     prompt = _build_symptom_collection_prompt(case, user_sources)
     try:
@@ -79,11 +86,17 @@ async def refine_case_with_ai(
         return None
 
     pending_intent = _active_pending_intent(case)
+    dialogue_act = _dialogue_act_from_ai(data.get("dialogue_act"), user_sources)
     semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
         data,
         pending_intent=pending_intent,
         user_sources=user_sources,
     )
+    prior_reference = validate_prior_answer_reference(
+        data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
+    )
+    if prior_reference and _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+        pending_answer = None
     time_preferences = validate_and_resolve_time_preferences(
         data.get("time_preferences"),
         user_sources=user_sources,
@@ -102,11 +115,17 @@ async def refine_case_with_ai(
             )
             repair_data = _parse_json_object(repair_raw)
             data = repair_data
+            dialogue_act = _dialogue_act_from_ai(data.get("dialogue_act"), user_sources)
             semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
                 repair_data,
                 pending_intent=pending_intent,
                 user_sources=user_sources,
             )
+            prior_reference = validate_prior_answer_reference(
+                data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
+            )
+            if prior_reference and _answered_without_clinical_evidence(pending_answer, semantic_extractions):
+                pending_answer = None
             time_preferences = validate_and_resolve_time_preferences(
                 repair_data.get("time_preferences"),
                 user_sources=user_sources,
@@ -128,6 +147,17 @@ async def refine_case_with_ai(
             return RagTriageSuggestion(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
+    replace_existing_fields = {
+        item.field for item in semantic_extractions
+        if dialogue_act.act == "correction" and _is_accepted_clinical_evidence(item)
+        and item.semantic_status in {"available", "partial", "unavailable"}
+        and item.assertion != "uncertain"
+    }
+    previous_values = {
+        field: value.copy() if isinstance(value, list) else value
+        for field in replace_existing_fields
+        for value in [getattr(case.patient_input, field)]
+    }
     if semantic_extractions:
         # Import locally to keep the adapter independent at module load time.
         # The rule engine performs field allow-listing, confidence checks and
@@ -138,7 +168,17 @@ async def refine_case_with_ai(
             case,
             semantic_extractions,
             allow_red_flag_completion=False,
+            replace_existing_fields=replace_existing_fields,
         )
+    corrected_fields = {
+        field for field, previous in previous_values.items()
+        if previous and previous != getattr(case.patient_input, field)
+    }
+    if corrected_fields:
+        invalidate_corrected_department_context(case)
+        for field in sorted(corrected_fields):
+            logger.info("semantic correction case_id=%s field=%s accepted=true reason=correction_replacement_applied",
+                        case.case_id, field)
     if ttas_evidence:
         apply_ttas_evidence(case, ttas_evidence)
     if time_preferences:
@@ -152,8 +192,18 @@ async def refine_case_with_ai(
         pending_answer=pending_answer,
         ttas_evidence=ttas_evidence,
         time_preferences=time_preferences,
-        dialogue_act=_dialogue_act_from_ai(data.get("dialogue_act"), user_sources),
+        dialogue_act=dialogue_act,
+        prior_answer_reference=prior_reference,
     )
+
+
+def _prior_user_sources(case: TriageCase, current_user_sources: list[str]) -> list[str]:
+    """Exclude the appended current request, including multi-message requests."""
+    user_texts = [item.content for item in case.history_records if item.role == "user"]
+    count = len(current_user_sources)
+    if count and user_texts[-count:] == [text.strip() for text in current_user_sources]:
+        return user_texts[:-count]
+    return user_texts
 
 
 def _dialogue_act_from_ai(value: Any, user_sources: list[str]) -> DialogueActInterpretation:
@@ -524,7 +574,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str) -> str:
         original_prompt
         + "\n\n修復要求：上一份輸出表示本輪已回答 clinical pending question，"
         "但沒有留下任何可接受的本輪 clinical semantic evidence，因此整份 Turn Interpretation 不完整。"
-        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence、time_preferences 與 dialogue_act。"
+        "請重新解析同一份 current_user_text，仍輸出完整的 semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act 與 prior_answer_reference。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
         " body_part、duration、severity、onset；不得猜測、不得只補 pending_answer。"
     )
@@ -549,6 +599,11 @@ def _build_symptom_collection_prompt(
         "pending_question": pending_question,
         "current_user_text": current_user_text or [],
         "complete_safety_screen": QUESTION_TEXTS[RED_FLAG_QUESTION_KEY] if pending_intent == SAFETY_PENDING_INTENT else None,
+        "prior_accepted_semantic_evidence": [
+            item.model_dump() for item in accepted_prior_answer_evidence(
+                tuple(case.semantic_extractions), _prior_user_sources(case, current_user_text or []),
+            )
+        ] if pending_intent and pending_intent != SAFETY_PENDING_INTENT else [],
     }
     try:
         prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
@@ -593,6 +648,8 @@ def _build_symptom_collection_prompt(
   25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
   26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
   27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、unknown、off_topic。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
+  28. 新增 prior_answer_reference，預設為 null。只有 dialogue_act=claims_already_answered、有 active pending intent 且不是 safety_screen 時，才可引用 prior_accepted_semantic_evidence 中真正回答該 pending question 的既有證據；只輸出 answered_intent、answer_source_text、answer_confidence。answered_intent 必須完全等於 pending intent，source 必須逐字等於一筆 prior accepted extraction 的 source_text，confidence 為 0 到 1。不得只引用 raw history、不得引用本輪剛抽的新證據、不得把 uncertain 當已回答；找不到可靠答案就保持 null。此 reference 不代表科別已收斂，也絕不可完成 safety screen。
+  29. dialogue_act=correction 時，仍須逐欄抽出本輪直接支持的更正 evidence；若修正 medical concept，分別輸出舊概念的 grounded absent 與新概念的 grounded present，不得刪掉無關症狀。correction act 本身不會改值；Backend 只接受 grounded、高信心且 schema 合法的本輪欄位。不得輸出 revision_mode 或其他 workflow 指令。
 
 時間偏好正例：
 current_user_text:「這週都不行，最好下週二，不然下週三，其他平日也可以。上午不行，下午最好。」

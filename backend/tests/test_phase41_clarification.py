@@ -103,7 +103,7 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
             "我最近有血尿，已經兩天了",
             [extraction("symptom", "血尿", "血尿"), extraction("duration", "2天", "兩天")],
             {"status": "clarification_needed", "question": SEVERITY_QUESTION,
-             "intent": "severity", "reason": "血尿的程度仍不清楚"},
+             "intent": "severity", "reason": "血尿的程度仍不清楚", "information_needs": ["血尿的程度"]},
             triage_case=initial.model_dump(mode="json"),
         )
         self.assertEqual(first["conversation_state"]["pending_clarification_intent"], "severity")

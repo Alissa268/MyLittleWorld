@@ -80,14 +80,6 @@ def apply_user_message(
     if record_history:
         case.history_records.append(Message(role="user", content=text))
     if semantic_first:
-        if revision_mode and _looks_like_symptom_revision(text):
-            _reset_symptom_dependent_fields(case)
-            case.patient_input.symptom = ""
-            case.patient_input.body_part = None
-            case.department_result = None
-            for field in ("symptom", "body_part"):
-                if field in case.conversation_state.consumed_fields:
-                    case.conversation_state.consumed_fields.remove(field)
         return case
     patient = case.patient_input
     symptom_value = text if has_symptom_semantics(text) else None
@@ -306,11 +298,23 @@ def apply_semantic_extractions(
     extractions: list[SemanticExtraction],
     *,
     allow_red_flag_completion: bool = True,
+    replace_existing_fields: set[str] | None = None,
 ) -> None:
     """Apply schema-validated extraction while preserving deterministic gates."""
     accepted_extractions: list[SemanticExtraction] = []
+    replacement_fields = (replace_existing_fields or set()) & {
+        "symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms",
+    }
     for extraction in extractions:
         is_ai_extraction = extraction.extractor.startswith("ai")
+        replace_existing = bool(
+            is_ai_extraction and extraction.field in replacement_fields
+            and type(extraction.confidence) in {int, float} and math.isfinite(extraction.confidence)
+            and ACCEPT_THRESHOLD <= extraction.confidence <= 1
+            and extraction.semantic_status in {"available", "partial", "unavailable"}
+            and extraction.source_text.strip()
+            and any(extraction.source_text in item.content for item in case.history_records if item.role == "user")
+        )
         if extraction.field not in {
             *CHECKLIST_FIELD_ORDER, PREFERRED_DATES_KEY, "onset", "accompanying_symptoms",
         }:
@@ -340,6 +344,7 @@ def apply_semantic_extractions(
         if (
             is_ai_extraction
             and not case.conversation_state.revision_mode
+            and not replace_existing
             and extraction.semantic_status in {"available", "partial"}
             and extraction.field != "accompanying_symptoms"
             and not (
@@ -385,6 +390,7 @@ def apply_semantic_extractions(
             if extraction.confidence < ACCEPT_THRESHOLD:
                 _log_ai_apply_decision(case, extraction, False, "confidence_too_low")
                 continue
+            _apply_semantic_extraction(case, extraction, replace_existing=replace_existing)
             _record_semantic_extraction(case, extraction)
             accepted_extractions.append(extraction)
             _log_ai_apply_decision(case, extraction, True, None)
@@ -405,7 +411,7 @@ def apply_semantic_extractions(
             _log_ai_apply_decision(case, extraction, False, reason)
             continue
         _record_semantic_extraction(case, extraction)
-        _apply_semantic_extraction(case, extraction)
+        _apply_semantic_extraction(case, extraction, replace_existing=replace_existing)
         accepted_extractions.append(extraction)
         if is_ai_extraction:
             _log_ai_apply_decision(case, extraction, True, None)
@@ -460,7 +466,7 @@ def _record_semantic_extraction(case: TriageCase, extraction: SemanticExtraction
         state.clarification_reasons[extraction.field] = extraction.follow_up_reason
 
 
-def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction) -> None:
+def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction, *, replace_existing: bool = False) -> None:
     availability = case.availability
     if extraction.field in {"preferred_dates", "preferred_days", "preferred_sessions", "can_take_leave"}:
         availability.semantic_status[extraction.field] = extraction.semantic_status
@@ -471,6 +477,11 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
         and extraction.field in _MEDICAL_ASSERTION_FIELDS
         and extraction.assertion != "present"
     ):
+        if replace_existing and extraction.field == "accompanying_symptoms" and extraction.assertion == "absent":
+            removed = set(_as_string_list(extraction.normalized_value))
+            case.patient_input.accompanying_symptoms = [
+                concept for concept in case.patient_input.accompanying_symptoms if concept not in removed
+            ]
         return
 
     if extraction.semantic_status != "uncertain" and not accepted(
@@ -495,6 +506,7 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
         )
         if text and (
             case.conversation_state.revision_mode
+            or replace_existing
             or not current
             or more_specific_batch_body_part
         ):
@@ -502,7 +514,7 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
             _consume_field(case, extraction.field, extraction.semantic_status, extraction.confidence)
     elif extraction.field == "onset":
         text = str(extraction.normalized_value or "").strip()
-        if text and (case.conversation_state.revision_mode or not case.patient_input.onset):
+        if text and (replace_existing or case.conversation_state.revision_mode or not case.patient_input.onset):
             case.patient_input.onset = text
     elif extraction.field == "accompanying_symptoms":
         _merge_list(case.patient_input.accompanying_symptoms, _as_string_list(extraction.normalized_value))
@@ -538,7 +550,7 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction)
             level = extraction.normalized_value.get("severity_level")
         else:
             level = extraction.normalized_value
-        if level and (case.conversation_state.revision_mode or not case.patient_input.severity):
+        if level and (replace_existing or case.conversation_state.revision_mode or not case.patient_input.severity):
             case.patient_input.severity = str(level)
             _consume_field(case, extraction.field, extraction.semantic_status, extraction.confidence)
 

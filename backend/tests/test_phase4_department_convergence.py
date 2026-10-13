@@ -926,6 +926,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         raw = {
             "status": "clarification_needed",
             "question": "請問眩暈時會不會伴隨噁心或想吐？",
+            "information_needs": ["是否伴隨噁心"],
             "intent": required,
             "reason": "需要區分目前候選",
             "answered_intent": None,

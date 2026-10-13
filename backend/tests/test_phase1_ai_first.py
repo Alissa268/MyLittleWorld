@@ -216,7 +216,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         self.assertNotIn("duration", result["conversation_state"]["consumed_fields"])
         self.assertTrue(result["needMoreInfo"])
 
-    def test_symptom_revision_clears_stale_dependent_values(self):
+    def test_symptom_revision_preserves_fields_without_grounded_replacement(self):
         case = TriageCase(case_id="phase1-symptom-revision")
         case.patient_input.symptom = "膝蓋痛"
         case.patient_input.body_part = "膝"
@@ -225,13 +225,15 @@ class Phase1AiFirstTest(unittest.TestCase):
         save_case(case)
         result, _ = self.post_text(
             "我想把症狀改成頭暈",
-            {"semantic_extractions": [extraction("symptom", "頭暈", "頭暈")]},
+            {"semantic_extractions": [extraction("symptom", "頭暈", "頭暈")],
+             "dialogue_act": {"act": "correction", "source_text": "我想把症狀改成頭暈", "confidence": 0.95}},
             triage_case=case.model_dump(mode="json"),
         )
         patient = result["triage_case"]["patient_input"]
         self.assertEqual(patient["symptom"], "頭暈")
-        self.assertIsNone(patient["body_part"])
-        self.assertIsNone(patient["duration"])
+        # Correction grants permission only to fields with accepted current evidence.
+        self.assertEqual(patient["body_part"], "膝")
+        self.assertEqual(patient["duration"], "3天")
 
     def test_ai_workflow_fields_and_red_flags_cannot_take_effect(self):
         result, _ = self.post_text(

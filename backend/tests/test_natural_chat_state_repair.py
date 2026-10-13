@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.schemas import Message, PendingAnswerInterpretation, TriageCase
+from app.schemas import DepartmentResult, Message, PendingAnswerInterpretation, SemanticExtraction, TriageCase
 from app.services import conversation_service as cs, rag_triage_adapter as adapter
 from app.services.case_store import save_case
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
@@ -369,3 +369,323 @@ def test_explicit_revision_releases_answered_intent_dedupe_only_through_backend(
     cs.advance_conversation(case, suggestion, user_sources=["更新資訊"], current_extractions=[])
     assert case.triage.next_question == FOCUSED
     assert case.conversation_state.pending_clarification_intent == INTENT
+
+
+def test_second_a1_missing_information_need_rejected_then_repaired():
+    invalid = plan("可以再詳細說明一下嗎？")
+    invalid.pop("information_needs")
+    provider = AsyncMock(side_effect=[json.dumps(invalid), json.dumps(plan())])
+    with patch.object(cs, "complete_runtime_json", provider):
+        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"], classify_answer_fields=False))
+    assert provider.await_count == 2
+    assert suggestion.rejection_reason == "invalid_information_need"
+    assert suggestion.reply_source == "AI_REPAIR"
+    assert suggestion.question == FOCUSED
+
+
+def test_second_a2_missing_need_after_repair_is_technical_failure():
+    invalid = plan("可以再詳細說明一下嗎？")
+    invalid.pop("information_needs")
+    provider = AsyncMock(return_value=json.dumps(invalid))
+    case = clinical_case()
+    with patch.object(cs, "complete_runtime_json", provider):
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+    cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
+    assert provider.await_count == 2
+    assert case.triage.next_question == TECHNICAL
+    assert case.conversation_state.reply_source == "TECHNICAL_FALLBACK"
+    assert not case.conversation_state.confirmed
+    assert case.conversation_state.department_status == "ambiguous"
+
+
+@pytest.mark.parametrize("question", ["可以再詳細說明一下嗎？", "可以再補充一下嗎？",
+    "可以換個方式說明嗎？", "可以再描述目前情況嗎？"])
+def test_second_a3_generic_question_with_concrete_need_requires_repair(question):
+    provider = AsyncMock(side_effect=[json.dumps(plan(question)), json.dumps(plan())])
+    with patch.object(cs, "complete_runtime_json", provider):
+        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"], classify_answer_fields=False))
+    assert suggestion.reply_source == "AI_REPAIR"
+    assert suggestion.rejection_reason == "generic_question"
+    assert provider.await_count == 2
+
+
+@pytest.mark.parametrize("need", ["更多資訊", "更多細節", "症狀細節", "目前情況", "剛才問題", "上述問題", "其他資訊"])
+def test_second_a_generic_information_need_is_not_concrete(need):
+    proposal = {**plan(), "information_needs": [need]}
+    assert cs._question_rejection(clinical_case(), proposal, INTENT, False) == "generic_information_need"
+
+
+def prior_case():
+    case = clinical_case()
+    case.history_records.insert(1, Message(role="user", content="我頭暈，感覺房子一直在轉，而且耳朵嗡嗡叫。"))
+    case.semantic_extractions = [SemanticExtraction(**evidence(
+        "symptom", "眩暈", "房子一直在轉"), extractor="ai")]
+    return case
+
+
+def prior_reference(source="房子一直在轉", intent=INTENT, confidence=0.99):
+    return dict(answered_intent=intent, answer_source_text=source, answer_confidence=confidence)
+
+
+def test_second_b1_prior_accepted_reference_captured_before_department_recompute(runtime):
+    client, interpreter, planner, department = runtime
+    case = prior_case()
+    save_case(case)
+
+    async def recompute(current):
+        assert current.conversation_state.pending_clarification_intent is None
+        assert current.conversation_state.clarification_evidence[INTENT] == "房子一直在轉"
+        current.conversation_state.department_next_question_intent = "hearing_changes"
+
+    department.side_effect = recompute
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+        dialogue_act=act("我說過了", "claims_already_answered"), prior_answer_reference=prior_reference()))
+    planner.return_value = json.dumps(plan("這次聽到的聲音有改變嗎？", "hearing_changes"))
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
+    department.assert_awaited_once()
+    assert result["conversation_state"]["pending_clarification_intent"] == "hearing_changes"
+    assert len(result["triage_case"]["semantic_extractions"]) == 1
+    assert "prior_answer_reference" in interpreter.await_args.args[0]
+
+
+@pytest.mark.parametrize("change", ["fabricated", "history_only", "low_confidence", "uncertain",
+    "low_prior_confidence", "wrong_intent", "wrong_act", "ungrounded_history", "extra_authority", "current_only"])
+def test_second_b2_invalid_prior_reference_preserves_pending_and_evidence(runtime, change):
+    client, interpreter, planner, department = runtime
+    case = prior_case()
+    reference = prior_reference()
+    kind = "claims_already_answered"
+    extractions = []
+    text = "我說過了"
+    if change == "fabricated":
+        reference["answer_source_text"] = "我以前說過會昏倒"
+    elif change == "history_only":
+        case.semantic_extractions = []
+    elif change == "low_confidence":
+        reference["answer_confidence"] = 0.1
+    elif change == "uncertain":
+        case.semantic_extractions[0].assertion = "uncertain"
+    elif change == "low_prior_confidence":
+        case.semantic_extractions[0].confidence = 0.1
+    elif change == "wrong_intent":
+        reference["answered_intent"] = "wrong_intent"
+    elif change == "wrong_act":
+        kind = "new_information"
+    elif change == "ungrounded_history":
+        case.history_records = case.history_records[:1] + case.history_records[-1:]
+    elif change == "extra_authority":
+        reference["stage"] = "done"
+    elif change == "current_only":
+        text = "我說過了，房子一直在轉"
+        case.semantic_extractions = []
+        case.history_records = case.history_records[:1] + case.history_records[-1:]
+        extractions = [evidence("accompanying_symptoms", ["眩暈"], "房子一直在轉")]
+    save_case(case)
+    interpreter.return_value = json.dumps(dict(semantic_extractions=extractions, ttas_evidence=[], pending_answer=None,
+        dialogue_act=act("我說過了", kind), prior_answer_reference=reference))
+    planner.return_value = json.dumps(plan())
+    result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    assert result["conversation_state"]["pending_clarification_intent"] == INTENT
+    assert result["conversation_state"]["clarification_evidence"] == {}
+    assert result["reply"] == FOCUSED
+    assert not result["conversation_state"]["confirmed"]
+
+
+def test_second_b3_prior_reference_never_completes_safety(runtime):
+    client, interpreter, planner, _ = runtime
+    case = prior_case()
+    case.patient_input.red_flags_checked = False
+    cs._enter_safety_check(case)
+    save_case(case)
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+        dialogue_act=act("我說過了", "claims_already_answered"),
+        prior_answer_reference=prior_reference(intent="safety_screen")))
+    planner.return_value = json.dumps(plan("這次不適是否突然開始？", "safety_screen"))
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    assert result["conversation_state"]["clarification_status"] == "safety_check"
+    assert result["conversation_state"]["safety_answer_attempts"] == 1
+    assert result["conversation_state"]["clarification_evidence"] == {}
+
+
+CORRECTION_TEXT = "我剛剛說錯，不是頭暈，是頭痛"
+
+
+def correction_payload(dialogue=None, extractions=None):
+    return dict(semantic_extractions=extractions if extractions is not None else [
+        evidence("symptom", "頭暈", "不是頭暈", "absent"), evidence("symptom", "頭痛", "頭痛")],
+        pending_answer=None, ttas_evidence=[], dialogue_act=dialogue or act("我剛剛說錯", "correction"))
+
+
+def test_second_c1_collecting_correction_replaces_scalar_and_invalidates_before_reasoning(runtime):
+    client, interpreter, planner, department = runtime
+    case = clinical_case()
+    case.semantic_extractions = [SemanticExtraction(**evidence("symptom", "頭暈", "頭暈"), extractor="ai")]
+    case.department_result = DepartmentResult(dept_id=1333, parentDept="耳鼻喉部", childDept="耳科")
+    case.conversation_state.department_status = "resolved"
+    case.availability.preferred_sessions = ["下午"]
+    save_case(case)
+
+    async def recompute(current):
+        assert current.patient_input.symptom == "頭痛"
+        assert current.department_result is None
+        state = current.conversation_state
+        assert state.department_status == "unresolved"
+        assert state.pending_clarification_intent is None
+        assert state.pending_clarification_question is None
+        assert state.next_information_needed == []
+        assert state.candidate_departments == []
+        assert not state.revision_mode
+        state.department_status = "ambiguous"
+        state.department_next_question_intent = "headache_quality"
+
+    department.side_effect = recompute
+    interpreter.return_value = json.dumps(correction_payload())
+    planner.return_value = json.dumps({**plan("這次頭痛的感覺是怎樣的？", "headache_quality"),
+                                      "information_needs": ["頭痛的感受"]})
+    with patch("app.services.rule_engine._looks_like_symptom_revision", side_effect=AssertionError("no raw correction parser")):
+        result = client.post("/chat", json=dict(case_id=case.case_id, message=CORRECTION_TEXT)).json()
+    department.assert_awaited_once()
+    assert result["triage_case"]["patient_input"]["symptom"] == "頭痛"
+    assert result["triage_case"]["availability"]["preferred_sessions"] == ["下午"]
+    from app.services.department_reasoning_service import accepted_semantic_evidence
+    current = accepted_semantic_evidence(route.get_case(case.case_id))
+    assert next(item for item in current if item["normalized_value"] == "頭暈")["assertion"] == "absent"
+    assert next(item for item in current if item["normalized_value"] == "頭痛")["assertion"] == "present"
+
+
+@pytest.mark.parametrize("kind,confidence,source", [("correction", 0.1, "我剛剛說錯"),
+    ("correction", 0.99, "不在本輪"), ("new_information", 0.99, "我剛剛說錯")])
+def test_second_c3_c4_no_valid_correction_no_scalar_replacement(kind, confidence, source):
+    case = clinical_case()
+    payload = correction_payload(dialogue=dict(act=kind, confidence=confidence, source_text=source),
+        extractions=[evidence("symptom", "頭痛", "頭痛")])
+    provider = AsyncMock(return_value=json.dumps(payload))
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=[CORRECTION_TEXT]))
+    assert case.patient_input.symptom == "頭暈"
+    assert case.semantic_extractions == []
+    assert case.conversation_state.pending_clarification_intent == INTENT
+
+
+@pytest.mark.parametrize("extractions", [[], [evidence("symptom", "頭痛", "原文沒有")],
+    [{**evidence("symptom", "頭痛", "頭痛"), "confidence": 0.1}]])
+def test_second_c2_correction_without_accepted_replacement_has_no_state_authority(extractions):
+    case = clinical_case()
+    case.department_result = DepartmentResult(dept_id=1333)
+    provider = AsyncMock(return_value=json.dumps(correction_payload(extractions=extractions)))
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=[CORRECTION_TEXT]))
+    assert case.patient_input.symptom == "頭暈"
+    assert case.department_result.dept_id == 1333
+    assert case.conversation_state.pending_clarification_intent == INTENT
+    assert not case.conversation_state.revision_mode
+
+
+def test_second_c_companion_correction_removes_only_grounded_absent_concept():
+    case = clinical_case()
+    case.patient_input.accompanying_symptoms = ["耳鳴", "噁心"]
+    payload = correction_payload(extractions=[evidence("accompanying_symptoms", ["耳鳴"], "沒有耳鳴", "absent"),
+        evidence("accompanying_symptoms", ["頭痛"], "頭痛")])
+    payload["dialogue_act"] = act("我說錯了", "correction")
+    provider = AsyncMock(return_value=json.dumps(payload))
+    case.history_records.append(Message(role="user", content="我說錯了，沒有耳鳴，還有頭痛"))
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=["我說錯了，沒有耳鳴，還有頭痛"]))
+    assert case.patient_input.accompanying_symptoms == ["噁心", "頭痛"]
+
+
+@pytest.mark.parametrize("required,expected", [(INTENT, "unresolved_information_remaining"),
+    (None, "department_still_ambiguous")])
+def test_second_d1_d2_sufficient_with_unresolved_rejected_then_repaired(required, expected):
+    case = clinical_case()
+    if required is None:
+        case.conversation_state.pending_clarification_intent = None
+        case.conversation_state.department_next_question_intent = None
+        case.conversation_state.asked_clarification_intents = []
+    provider = AsyncMock(side_effect=[json.dumps(dict(status="sufficient", reason="enough")), json.dumps(plan())])
+    with patch.object(cs, "complete_runtime_json", provider):
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+    assert suggestion.rejection_reason == expected
+    assert suggestion.reply_source == "AI_REPAIR"
+    assert suggestion.question == FOCUSED
+    assert provider.await_count == 2
+
+
+def test_second_d3_truly_sufficient_does_not_need_information_needs():
+    case = clinical_case()
+    state = case.conversation_state
+    state.pending_clarification_intent = None
+    state.department_next_question_intent = None
+    state.department_status = "resolved"
+    case.department_result = DepartmentResult(dept_id=1333)
+    case.semantic_extractions = [SemanticExtraction(**evidence("duration", "3天", "3天", None), extractor="ai")]
+    case.history_records.insert(1, Message(role="user", content="頭暈3天"))
+    provider = AsyncMock(return_value=json.dumps(dict(status="sufficient", reason="enough")))
+    with patch.object(cs, "complete_runtime_json", provider):
+        suggestion = asyncio.run(cs.request_clarification(case, ["沒有補充"], classify_answer_fields=False))
+    cs.advance_conversation(case, suggestion, user_sources=["沒有補充"], current_extractions=[])
+    provider.assert_awaited_once()
+    assert state.is_complete
+    assert state.clarification_status == "sufficient"
+
+
+@pytest.mark.parametrize("field,old,new,span", [("body_part", "右耳", "左耳", "左耳"),
+    ("duration", "3天", "2週", "兩週"), ("severity", "mild", "severe", "嚴重"),
+    ("onset", "逐漸開始", "突然開始", "突然開始")])
+def test_second_c_scalar_replacement_is_field_scoped(field, old, new, span):
+    case = clinical_case()
+    setattr(case.patient_input, field, old)
+    text = "我說錯了，" + span
+    case.history_records.append(Message(role="user", content=text))
+    payload = correction_payload(dialogue=act("我說錯了", "correction"),
+        extractions=[evidence(field, new, span, None)])
+    provider = AsyncMock(return_value=json.dumps(payload))
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
+    assert getattr(case.patient_input, field) == new
+    assert case.patient_input.symptom == "頭暈"
+    assert not case.conversation_state.revision_mode
+    assert case.conversation_state.department_status == "unresolved"
+
+
+def test_second_c_safety_correction_preserves_attempts_validation_and_ownership(runtime):
+    client, interpreter, planner, department = runtime
+    case = clinical_case()
+    case.patient_input.red_flags_checked = False
+    cs._enter_safety_check(case)
+    case.conversation_state.safety_answer_attempts = 1
+    save_case(case)
+    interpreter.return_value = json.dumps({**correction_payload(),
+        "pending_answer": pending(CORRECTION_TEXT, "partial", "uncertain")})
+    planner.return_value = json.dumps({**plan("這次頭痛是否突然開始？", "safety_screen"),
+        "information_needs": ["頭痛是否突然開始"]})
+    result = client.post("/chat", json=dict(case_id=case.case_id, message=CORRECTION_TEXT)).json()
+    assert result["triage_case"]["patient_input"]["symptom"] == "頭痛"
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    assert result["conversation_state"]["clarification_status"] == "safety_check"
+    assert result["conversation_state"]["safety_answer_attempts"] == 2
+    assert result["conversation_state"]["safety_answer_validation"] == "partial_uncertain"
+    department.assert_not_awaited()
+
+
+@pytest.mark.parametrize("confidence", [True, "0.99", -0.1, 1.1, float("nan"), float("inf")])
+def test_second_b_prior_reference_confidence_is_strict_finite_bounded(confidence):
+    case = prior_case()
+    interpretation = adapter._dialogue_act_from_ai(act("我說過了", "claims_already_answered"), ["我說過了"])
+    assert cs.validate_prior_answer_reference(prior_reference(confidence=confidence), interpretation, INTENT,
+        tuple(case.semantic_extractions), [item.content for item in case.history_records if item.role == "user"]) is None
+
+
+def test_second_b_valid_prior_reference_does_not_trigger_extra_interpretation_or_capture_meta_answer(runtime):
+    client, interpreter, planner, _ = runtime
+    case = prior_case()
+    save_case(case)
+    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+        pending_answer=dict(answered_intent=INTENT, answer_status="answered",
+                            answer_source_text="我說過了", answer_confidence=0.99),
+        dialogue_act=act("我說過了", "claims_already_answered"), prior_answer_reference=prior_reference()))
+    planner.return_value = json.dumps(plan("這次聽到的聲音有變化嗎？", "hearing_changes"))
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
+    interpreter.assert_awaited_once()
+    assert result["conversation_state"]["clarification_evidence"][INTENT] == "房子一直在轉"

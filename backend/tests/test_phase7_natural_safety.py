@@ -32,7 +32,7 @@ def runtime():
     interpreter = AsyncMock()
     planner = AsyncMock(return_value=json.dumps(dict(
         status="clarification_needed", question="這次的不舒服是在什麼情況開始的？",
-        intent="clarify_onset", reason="需要了解情況")))
+        intent="clarify_onset", reason="需要了解情況", information_needs=["發作的情境"])))
     department = AsyncMock()
     with ExitStack() as stack:
         stack.enter_context(patch.object(route, "get_settings", return_value=SimpleNamespace(batch_triage_enabled=True)))
@@ -98,7 +98,7 @@ def test_live_loop_is_focused_and_bounded_without_invented_negative(runtime):
     department.reset_mock()
     question = "這次頭痛是突然開始的嗎？"
     planner.return_value = json.dumps(dict(status="clarification_needed", question=question,
-        intent="safety_screen", reason="安全面向尚未確認"))
+        intent="safety_screen", reason="安全面向尚未確認", information_needs=["頭痛是否突然開始"]))
     texts = ["我覺得有點暈但是其他症狀都沒有", "你為什麼要跟我跳針", "神經"]
     for index, text in enumerate(texts):
         respond(interpreter, [evidence("accompanying_symptoms", ["頭暈"], "有點暈")] if index == 0 else [],

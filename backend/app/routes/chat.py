@@ -23,6 +23,7 @@ from app.services.conversation_service import (
     SAFETY_ANSWER_CAP,
     advance_conversation,
     capture_pending_answer,
+    capture_prior_answer_reference,
     capture_safety_screen_answer,
     clear_answered_pending,
     request_clarification,
@@ -76,6 +77,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         clarification_before = case.conversation_state.clarification_status
         pending_before = case.conversation_state.pending_clarification_intent
         department_before = case.conversation_state.department_status
+        prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
+        prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
         batch_enabled = bool(settings.batch_triage_enabled)
@@ -345,6 +348,11 @@ async def chat(req: ChatRequest) -> TriageResult:
                 )
                 if not safety_check_turn:
                     capture_pending_answer(case, pending_interpretation, user_text_parts)
+                    capture_prior_answer_reference(
+                        case, getattr(ai_suggestion, "prior_answer_reference", None),
+                        getattr(ai_suggestion, "dialogue_act", None),
+                        prior_extractions=prior_extractions, prior_user_sources=prior_user_sources,
+                    )
                     clear_answered_pending(case)
                 department_reasoning_allowed = bool(
                     has_user_input

@@ -117,7 +117,7 @@ class Phase2ConversationTest(unittest.TestCase):
             "我最近一直頭暈",
             [extraction("symptom", "頭暈", "頭暈")],
             {"status": "clarification_needed", "question": question,
-             "intent": "clarify_dizziness_type", "reason": "頭暈型態仍不清楚"},
+             "intent": "clarify_dizziness_type", "reason": "頭暈型態仍不清楚", "information_needs": ["頭暈的感受"]},
         )
         semantic.assert_awaited_once()
         clarification.assert_awaited_once()
@@ -251,7 +251,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "最近一直頭暈", [extraction("symptom", "頭暈", "頭暈")],
             {"status": "clarification_needed", "question": "比較像房子在轉，還是快昏倒？",
-             "intent": "clarify_dizziness_type", "reason": "型態未明"},
+             "intent": "clarify_dizziness_type", "reason": "型態未明", "information_needs": ["頭暈的感受"]},
         )
         second, _, clarification, department = self.post(
             "像房子在轉", [extraction("accompanying_symptoms", ["像房子在轉"], "像房子在轉")],
@@ -328,7 +328,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "我頭暈", [extraction("symptom", "頭暈", "頭暈")],
             {"status": "clarification_needed", "question": "是旋轉感還是快昏倒？",
-             "intent": "clarify_dizziness_type", "reason": "型態未明"},
+             "intent": "clarify_dizziness_type", "reason": "型態未明", "information_needs": ["頭暈的感受"]},
         )
         second, _, _, department = self.post(
             "大概是吧", [extraction("severity", "mild", "大概是吧", confidence=0.2)],
@@ -347,7 +347,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         answer = "還能走路，但是踩地會痛"
         second, semantic, _, department = self.post(
@@ -371,7 +371,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         second, _, _, department = self.post(
             "還能走路，但是踩地會痛", [],
@@ -389,13 +389,14 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         follow_up = "走路時能把重量放在右腳上，還是只能用左腳支撐？"
         second, _, _, department = self.post(
             "還能走路", [],
             {"status": "clarification_needed", "question": follow_up,
              "intent": "fracture_assessment", "reason": "承重程度仍不清楚",
+             "information_needs": ["右腳承重的程度"],
              "answered_intent": "fracture_assessment", "answer_source_text": "還能走路",
              "answer_status": "partial", "answer_confidence": 0.91},
             triage_case=first["triage_case"],
@@ -410,11 +411,12 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         answer = {
             "status": "clarification_needed", "intent": "fracture_assessment",
             "reason": "承重情況仍不清楚", "answered_intent": "fracture_assessment",
+            "information_needs": ["右腳承重的情況"],
             "answer_source_text": "不太確定", "answer_status": "unclear",
             "answer_confidence": 0.8,
         }
@@ -440,7 +442,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         for confidence in (0.54, float("nan"), float("inf"), 1.1, True):
             with self.subTest(confidence=confidence):
@@ -460,7 +462,7 @@ class Phase2ConversationTest(unittest.TestCase):
         first, _, _, _ = self.post(
             "腳背腫痛", [extraction("symptom", "腳背腫痛", "腳背腫痛")],
             {"status": "clarification_needed", "question": "現在還能承重走路嗎？",
-             "intent": "fracture_assessment", "reason": "承重情況未明"},
+             "intent": "fracture_assessment", "reason": "承重情況未明", "information_needs": ["右腳承重的情況"]},
         )
         second, _, _, department = self.post(
             "還能走路，但是踩地會痛", [],

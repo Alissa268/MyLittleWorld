@@ -104,6 +104,14 @@ class PendingAnswerInterpretation(BaseModel):
     answer_assertion: Optional[EvidenceAssertion] = None
 
 
+class PriorAnswerReference(BaseModel):
+    model_config = {"extra": "forbid"}
+
+    answered_intent: str = Field(strict=True, min_length=1)
+    answer_source_text: str = Field(strict=True, min_length=1)
+    answer_confidence: float = Field(strict=True, ge=0, le=1, allow_inf_nan=False)
+
+
 class TTASEvidence(BaseModel):
     field: str
     value: Any = None
