@@ -293,3 +293,35 @@ def test_invalid_preference_preserves_other_valid_evidence(kind):
     else:
         assert result.time_preferences
     assert case.patient_input.requested_department_id is None
+
+
+@pytest.mark.parametrize("extra_key", ["stage", "confirmed", "is_complete", "unexpected"])
+@pytest.mark.parametrize("repair_success", [True, False])
+def test_extra_top_level_field_repairs_once_then_requires_exact_contract(extra_key, repair_success):
+    good = turn_payload()
+    bad = dict(good, **{extra_key: "confirmed"})
+    case = TriageCase(case_id="extra-top-level")
+
+    async def repair(prompt):
+        # No evidence or workflow may be applied before the entire turn passes.
+        assert not case.patient_input.symptom
+        assert case.semantic_extractions == []
+        assert not case.confirmed
+        assert "rejection_reason=invalid_turn_interpretation_fields" in prompt
+        return json.dumps(good if repair_success else bad)
+
+    ai = AsyncMock()
+    async def respond(prompt):
+        if ai.await_count == 1:
+            return json.dumps(bad)
+        return await repair(prompt)
+    ai.side_effect = respond
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", ai,
+    ), patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=["頭痛"]))
+    assert ai.await_count == 2
+    assert result.interpretation_complete is repair_success
+    assert bool(case.patient_input.symptom) is repair_success
+    assert bool(case.semantic_extractions) is repair_success
+    assert not case.confirmed

@@ -95,7 +95,9 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
             semantic_status="available", confidence=0.98) for field, value, source in (
                 ("symptom", "膝痛", "左膝痛"), ("duration", "2週", "2週"),
                 ("preferred_days", ["週一"], "週一"), ("preferred_sessions", ["上午"], "上午"),
-            )], pending_answer=None, ttas_evidence=[])
+            )], pending_answer=None, ttas_evidence=[], time_preferences=[],
+            prior_answer_reference=None, department_preference=None,
+            dialogue_act=dict(act="new_information", source_text="左膝痛", confidence=0.99))
         with patch.object(self.chat_route, "runtime_ai_available", return_value=True), patch.object(
             rag_triage_adapter, "_ai_available", return_value=True,
         ), patch.object(rag_triage_adapter, "complete_prompt", AsyncMock(return_value=json.dumps(proposal))), patch.object(

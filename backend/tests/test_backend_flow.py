@@ -26,7 +26,9 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             {"field": "duration", "normalized_value": "2週", "source_text": "2週", "semantic_status": "available", "confidence": 0.98},
             {"field": "preferred_days", "normalized_value": ["週一"], "source_text": "週一", "semantic_status": "available", "confidence": 0.98},
             {"field": "preferred_sessions", "normalized_value": ["上午"], "source_text": "上午", "semantic_status": "available", "confidence": 0.98},
-        ], "pending_answer": None, "ttas_evidence": []}
+        ], "pending_answer": None, "ttas_evidence": [], "time_preferences": [],
+            "prior_answer_reference": None, "department_preference": None,
+            "dialogue_act": {"act": "new_information", "source_text": "左膝痛", "confidence": 0.99}}
 
         async def converge(case):
             case.department_result = DepartmentResult(dept_id=7, parentDept="外科系", childDept="一般骨科")
@@ -133,26 +135,12 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
                   "source_text": "膝蓋"
                 }
               ],
-              "patient_input": {
-                "symptom": "左膝痛",
-                "body_part": "膝",
-                "duration": "2週",
-                "severity": "中等",
-                "onset": "漸進",
-                "accompanying_symptoms": ["爬樓梯吃力"],
-                "red_flags": []
-              },
-              "triage": {
-                "urgency_score": 50,
-                "urgency_level": "medium",
-                "warning_required": false,
-                "warning_message": null,
-                "need_more_info": true,
-                "next_question": "是否有紅腫熱痛或發燒？",
-                "reasons": ["資料仍需確認伴隨症狀"],
-                "is_final": false
-              },
-              "reply": "是否有紅腫熱痛或發燒？"
+              "pending_answer": null,
+              "ttas_evidence": [],
+              "time_preferences": [],
+              "prior_answer_reference": null,
+              "department_preference": null,
+              "dialogue_act": {"act": "new_information", "source_text": "膝蓋", "confidence": 0.99}
             }
             """
 

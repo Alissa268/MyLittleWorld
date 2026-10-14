@@ -298,8 +298,8 @@ def _turn_interpretation_rejection_reason(
         "semantic_extractions", "pending_answer", "ttas_evidence", "time_preferences",
         "dialogue_act", "prior_answer_reference", "department_preference",
     }
-    if not required.issubset(data):
-        return "missing_turn_interpretation_fields"
+    if set(data) != required:
+        return "invalid_turn_interpretation_fields"
     if any(not isinstance(data[key], list) for key in (
         "semantic_extractions", "ttas_evidence", "time_preferences",
     )) or any(data[key] is not None and not isinstance(data[key], dict) for key in (

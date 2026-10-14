@@ -238,8 +238,8 @@ class Phase1AiFirstTest(unittest.TestCase):
         self.assertEqual(patient["body_part"], "膝")
         self.assertEqual(patient["duration"], "3天")
 
-    def test_ai_workflow_fields_and_red_flags_cannot_take_effect(self):
-        result, _ = self.post_text(
+    def test_ai_workflow_top_level_fields_reject_entire_turn_after_one_repair(self):
+        result, provider = self.post_text(
             "我頭暈",
             {
                 "semantic_extractions": [
@@ -254,7 +254,9 @@ class Phase1AiFirstTest(unittest.TestCase):
             },
         )
         case = result["triage_case"]
-        self.assertEqual(case["patient_input"]["symptom"], "頭暈")
+        self.assertEqual(provider.await_count, 2)
+        self.assertEqual(case["patient_input"]["symptom"], "")
+        self.assertEqual(case["semantic_extractions"], [])
         self.assertFalse(case["patient_input"]["red_flags_checked"])
         self.assertFalse(case["recommendation_generated"])
         self.assertFalse(case["script_generated"])
