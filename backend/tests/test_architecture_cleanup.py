@@ -104,7 +104,8 @@ def test_department_preference_requires_grounded_ai_and_current_exact_active_ide
     ) as ai, patch.object(preference, "fetch_active_departments", return_value=rows):
         result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
     assert result is not None
-    ai.assert_awaited_once()
+    assert ai.await_count == (1 if variant in {"valid", "null"} else 2)
+    assert result.interpretation_complete == (variant in {"valid", "null"})
     assert case.patient_input.requested_department_id == (1333 if variant == "valid" else None)
     assert case.patient_input.requested_department_name == ("耳科" if variant == "valid" else None)
     assert not case.patient_input.red_flags_checked
@@ -177,11 +178,11 @@ def test_changed_active_identity_is_rechecked_after_interpretation():
     data = dict(semantic_extractions=[], pending_answer=None, ttas_evidence=[], time_preferences=[],
         dialogue_act=dict(act="new_information", source_text=text, confidence=0.99), prior_answer_reference=None,
         department_preference=dict(dept_id=1333, department_name="耳科", source_text=text, confidence=0.99))
-    with patch.object(preference, "fetch_active_departments", side_effect=[ACTIVE, []]) as db, patch.object(
+    with patch.object(preference, "fetch_active_departments", side_effect=[ACTIVE, [], []]) as db, patch.object(
         adapter, "_ai_available", return_value=True,
     ), patch.object(adapter, "complete_prompt", AsyncMock(return_value=json.dumps(data))):
         asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
-    assert db.call_count == 2
+    assert db.call_count == 3
     assert case.patient_input.requested_department_id is None
 
 
@@ -193,3 +194,102 @@ def test_inactive_row_and_database_failure_cannot_accept_preference():
                           return_value=rows if isinstance(rows, list) else None):
             assert preference.accept_department_preference(case, value, ["耳科"]) is None
         assert case.patient_input.requested_department_id is None
+
+
+def turn_payload(text="頭痛"):
+    return dict(semantic_extractions=[evidence("symptom", "頭痛", "頭痛")],
+        pending_answer=None, ttas_evidence=[], time_preferences=[],
+        dialogue_act=dict(act="new_information", source_text=text, confidence=0.99),
+        prior_answer_reference=None, department_preference=None)
+
+
+@pytest.mark.parametrize("key", list(turn_payload()))
+@pytest.mark.parametrize("repair_success", [True, False])
+def test_every_required_field_uses_one_repair(key, repair_success):
+    good = turn_payload()
+    bad = dict(good)
+    del bad[key]
+    case = TriageCase(case_id="missing-contract")
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", AsyncMock(side_effect=[json.dumps(bad), json.dumps(good if repair_success else bad)]),
+    ) as ai, patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=["頭痛"]))
+    assert ai.await_count == 2
+    assert result.interpretation_complete is repair_success
+    assert bool(case.patient_input.symptom) is repair_success
+
+
+@pytest.mark.parametrize("key,value", [
+    ("semantic_extractions", None), ("ttas_evidence", {}), ("time_preferences", "bad"),
+    ("pending_answer", []), ("prior_answer_reference", []), ("department_preference", []),
+    ("dialogue_act", None), ("dialogue_act", {}),
+    ("dialogue_act", dict(act="fake", source_text="頭痛", confidence=0.99)),
+])
+def test_invalid_shape_or_act_cannot_hide_behind_semantic_evidence(key, value):
+    bad = turn_payload()
+    bad[key] = value
+    case = TriageCase(case_id="invalid-contract")
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", AsyncMock(return_value=json.dumps(bad)),
+    ) as ai, patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=["頭痛"]))
+    assert ai.await_count == 2
+    assert not result.interpretation_complete
+    assert not case.patient_input.symptom
+
+
+@pytest.mark.parametrize("raw", ["[]", "null", "42", '"text"', "not json"])
+def test_non_object_top_level_repairs_once(raw):
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", AsyncMock(side_effect=[raw, json.dumps(turn_payload())]),
+    ) as ai, patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(TriageCase(case_id="shape"), user_sources=["頭痛"]))
+    assert ai.await_count == 2
+    assert result.interpretation_complete
+
+
+def test_prevalidated_department_never_mutates_rejected_turn():
+    text = "頭痛想看耳科"
+    bad = turn_payload(text)
+    bad["department_preference"] = dict(dept_id=1333, department_name="耳科", source_text="耳科", confidence=0.99)
+    del bad["prior_answer_reference"]
+    case = TriageCase(case_id="atomic-turn")
+    async def respond_without_mutation(prompt):
+        assert case.patient_input.requested_department_id is None
+        assert case.patient_input.requested_department_name is None
+        assert not case.patient_input.symptom
+        return json.dumps(bad)
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", AsyncMock(side_effect=respond_without_mutation),
+    ) as ai, patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
+    assert ai.await_count == 2
+    assert not result.interpretation_complete
+    assert case.patient_input.requested_department_id is None
+
+
+@pytest.mark.parametrize("kind", ["semantic", "ttas", "time"])
+def test_invalid_preference_preserves_other_valid_evidence(kind):
+    data = turn_payload()
+    data["department_preference"] = dict(dept_id=9999, department_name="耳科", source_text="頭痛", confidence=0.99)
+    if kind != "semantic":
+        data["semantic_extractions"] = []
+    if kind == "ttas":
+        data["ttas_evidence"] = [dict(field="respiratory_distress", value="severe", semantic_status="available", source_text="頭痛", confidence=0.99)]
+    if kind == "time":
+        data["time_preferences"] = [dict(kind="session", relation="prefer", session="afternoon",
+            priority=1, source_text="頭痛", confidence=0.99)]
+    case = TriageCase(case_id="other-evidence")
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
+        adapter, "complete_prompt", AsyncMock(return_value=json.dumps(data)),
+    ) as ai, patch.object(preference, "fetch_active_departments", return_value=ACTIVE):
+        result = asyncio.run(adapter.refine_case_with_ai(case, user_sources=["頭痛"]))
+    ai.assert_awaited_once()
+    assert result.interpretation_complete
+    if kind == "semantic":
+        assert case.patient_input.symptom == "頭痛"
+    elif kind == "ttas":
+        assert result.ttas_evidence
+    else:
+        assert result.time_preferences
+    assert case.patient_input.requested_department_id is None

@@ -27,7 +27,7 @@ from app.services.conversation_service import (
 )
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.field_acceptance import ai_normalized_value_valid
-from app.services.department_preference_service import accept_department_preference, active_department_candidates
+from app.services.department_preference_service import validate_department_preference, active_department_candidates
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
 from app.services.ttas_rule_loader import TTASRuleLoadError, load_ttas_rules
 from app.services.schedule_filter import TAIPEI_ZONE
@@ -77,7 +77,11 @@ async def refine_case_with_ai(
     try:
         raw = await complete_prompt(prompt)
         logger.debug("rag_triage_adapter response received case_id=%s chars=%s", case.case_id, len(raw))
-        data = _parse_json_object(raw)
+        try:
+            data = _parse_json_object(raw)
+        except (ValueError, json.JSONDecodeError):
+            # Malformed top-level output must use the same one-repair gate.
+            data = {}
     except Exception as exc:
         logger.warning(
             "rag_triage_adapter refine failed case_id=%s error_type=%s",
@@ -103,6 +107,7 @@ async def refine_case_with_ai(
         user_sources=user_sources,
         reference_date=time_preference_reference_date,
     )
+    department_preference = validate_department_preference(data.get("department_preference"), user_sources)
     repair_reason = _turn_interpretation_rejection_reason(
         data,
         pending_intent=pending_intent,
@@ -112,6 +117,7 @@ async def refine_case_with_ai(
         pending_answer=pending_answer,
         ttas_evidence=ttas_evidence,
         time_preferences=time_preferences,
+        department_preference=department_preference,
     )
     if repair_reason is None and _answered_without_clinical_evidence(
         pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
@@ -156,6 +162,7 @@ async def refine_case_with_ai(
                 semantic_extractions=[], pending_answer=None, ttas_evidence=[], interpretation_complete=False,
             )
 
+        department_preference = validate_department_preference(data.get("department_preference"), user_sources)
         remaining_rejection = _turn_interpretation_rejection_reason(
             repair_data,
             pending_intent=pending_intent,
@@ -165,6 +172,7 @@ async def refine_case_with_ai(
             pending_answer=pending_answer,
             ttas_evidence=ttas_evidence,
             time_preferences=time_preferences,
+            department_preference=department_preference,
         )
         if remaining_rejection is None and _answered_without_clinical_evidence(
             pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
@@ -217,7 +225,9 @@ async def refine_case_with_ai(
     if time_preferences:
         apply_time_preferences(case.availability, time_preferences)
 
-    department_preference = accept_department_preference(case, data.get("department_preference"), user_sources)
+    if department_preference is not None:
+        case.patient_input.requested_department_id = department_preference.dept_id
+        case.patient_input.requested_department_name = department_preference.department_name
     reply = data.get("reply")
     return RagTriageSuggestion(
         triage=None,
@@ -281,10 +291,23 @@ def _turn_interpretation_rejection_reason(
     pending_answer: PendingAnswerInterpretation | None,
     ttas_evidence: list[TTASEvidence],
     time_preferences: list[TimePreference],
+    department_preference: DepartmentPreferenceInterpretation | None,
 ) -> str | None:
     """Reject structurally incomplete AI turns; never infer user semantics here."""
+    required = {
+        "semantic_extractions", "pending_answer", "ttas_evidence", "time_preferences",
+        "dialogue_act", "prior_answer_reference", "department_preference",
+    }
+    if not required.issubset(data):
+        return "missing_turn_interpretation_fields"
+    if any(not isinstance(data[key], list) for key in (
+        "semantic_extractions", "ttas_evidence", "time_preferences",
+    )) or any(data[key] is not None and not isinstance(data[key], dict) for key in (
+        "pending_answer", "prior_answer_reference", "department_preference",
+    )):
+        return "invalid_turn_interpretation_shape"
     dialogue_reason = _dialogue_act_rejection_reason(data.get("dialogue_act"), user_sources)
-    if dialogue_reason is not None and (pending_intent is not None or not semantic_extractions):
+    if dialogue_reason is not None:
         return dialogue_reason
     if dialogue_act.act == "correction" and not any(
         _is_accepted_clinical_evidence(item) for item in semantic_extractions
@@ -292,7 +315,7 @@ def _turn_interpretation_rejection_reason(
         return "correction_without_grounded_evidence"
     if dialogue_act.act == "new_information" and not (
         any(accepted(item.confidence, item.semantic_status) for item in semantic_extractions)
-        or ttas_evidence or time_preferences or data.get("department_preference") is not None
+        or ttas_evidence or time_preferences or department_preference is not None
     ):
         return "new_information_without_grounded_evidence"
     if pending_intent is not None and dialogue_act.act == "answer" and pending_answer is None:

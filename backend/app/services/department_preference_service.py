@@ -26,6 +26,18 @@ def accept_department_preference(
     case: TriageCase, value: Any, user_sources: list[str],
 ) -> DepartmentPreferenceInterpretation | None:
     """Accept only grounded AI preference backed by one current active DB row."""
+    preference = validate_department_preference(value, user_sources)
+    if preference is None:
+        return None
+    case.patient_input.requested_department_id = preference.dept_id
+    case.patient_input.requested_department_name = preference.department_name
+    return preference
+
+
+def validate_department_preference(
+    value: Any, user_sources: list[str],
+) -> DepartmentPreferenceInterpretation | None:
+    """Validate against current SQL identities without mutating patient state."""
     if value is None:
         return None
     try:
@@ -43,13 +55,7 @@ def accept_department_preference(
         and len(matches) == 1
         and matches[0]["child_dept"] == preference.department_name
     )
-    logger.info("department preference case_id=%s accepted=%s reason=%s",
-                case.case_id, bool(valid), "validated_identity" if valid else "invalid_preference")
-    if not valid:
-        return None
-    case.patient_input.requested_department_id = preference.dept_id
-    case.patient_input.requested_department_name = preference.department_name
-    return preference
+    return preference if valid else None
 
 
 def resolve_requested_department(

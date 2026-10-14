@@ -203,7 +203,7 @@ def test_unavailable_safety_turn_is_bounded_without_legacy_parser(runtime):
 def test_time_only_turn_uses_same_interpreter_and_preserves_relative_facts(runtime):
     client, interpreter, _, _ = runtime
     interpreter.return_value = json.dumps(dict(semantic_extractions=[], pending_answer=None,
-        ttas_evidence=[], dialogue_act=dict(act="new_information", source_text="只能下週二下午看診", confidence=0.99), time_preferences=[
+        ttas_evidence=[], prior_answer_reference=None, department_preference=None, dialogue_act=dict(act="new_information", source_text="只能下週二下午看診", confidence=0.99), time_preferences=[
             dict(kind="relative_weekday", relation="prefer", priority=1, week_offset=1,
                  weekday="tuesday", source_text="下週二", confidence=0.99),
             dict(kind="session", relation="exclude", session="morning", priority=None,

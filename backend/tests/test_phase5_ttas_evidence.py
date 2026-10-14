@@ -225,6 +225,8 @@ def test_chemical_eye_evidence_uses_the_same_turn_interpreter_call() -> None:
             },
         ],
         "pending_answer": None,
+        "time_preferences": [], "prior_answer_reference": None, "department_preference": None,
+        "dialogue_act": {"act": "new_information", "source_text": user_text, "confidence": 0.99},
         "ttas_evidence": [_item(
             "chemical_eye_injury",
             True,
@@ -273,6 +275,8 @@ def test_eye_pain_without_exposure_is_not_filled_by_backend() -> None:
             },
         ],
         "pending_answer": None,
+        "time_preferences": [], "prior_answer_reference": None, "department_preference": None,
+        "dialogue_act": {"act": "new_information", "source_text": user_text, "confidence": 0.99},
         "ttas_evidence": [],
     }, ensure_ascii=False))
     case = TriageCase(case_id="eye-pain-no-exposure", history_records=[Message(role="user", content=user_text)])

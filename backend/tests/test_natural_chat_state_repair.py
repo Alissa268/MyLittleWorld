@@ -106,7 +106,7 @@ def test_grounded_dialogue_act_reaches_focused_planner_without_fabrication(runti
     client, interpreter, planner, department = runtime
     case = clinical_case()
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[],
         pending_answer=None, dialogue_act=act(text, kind)), ensure_ascii=False)
     planner.return_value = json.dumps(plan(), ensure_ascii=False)
     result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
@@ -129,7 +129,7 @@ def test_claims_already_answered_uses_accepted_answer_before_recomputation(runti
         current.conversation_state.department_next_question_intent = "hearing_changes"
 
     department.side_effect = recompute
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[],
         pending_answer=None, dialogue_act=act("我說過了", "claims_already_answered")))
     planner.return_value = json.dumps(plan("頭暈時聽到的聲音有變化嗎？", "hearing_changes"))
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
@@ -208,7 +208,7 @@ def test_multiple_independent_requests_still_rejected(question):
     {**act("不懂", "answer"), "stage": "done"},
 ])
 def test_invalid_dialogue_act_becomes_unknown(proposal):
-    provider = AsyncMock(return_value=json.dumps(dict(semantic_extractions=[], dialogue_act=proposal)))
+    provider = AsyncMock(return_value=json.dumps(dict(pending_answer=None, ttas_evidence=[], time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], dialogue_act=proposal)))
     with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
         result = asyncio.run(adapter.refine_case_with_ai(clinical_case(), user_sources=["不懂"]))
     assert adapter._dialogue_act_from_ai(proposal, ["不懂"]).act == "unknown"
@@ -221,7 +221,7 @@ def test_explanation_act_and_new_medical_evidence_coexist(runtime):
     case = clinical_case()
     save_case(case)
     text = "我聽不懂，不過我還有一點耳鳴"
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[evidence(
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[evidence(
         "accompanying_symptoms", ["耳鳴"], "還有一點耳鳴")], ttas_evidence=[],
         pending_answer=None, dialogue_act=act("我聽不懂", "request_explanation")))
     planner.return_value = json.dumps(plan())
@@ -235,7 +235,7 @@ def test_turn_log_has_ownership_and_reply_origin_but_no_patient_text(runtime, ca
     case = clinical_case()
     save_case(case)
     text = "SENTINEL_PRIVATE_我聽不懂"
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], dialogue_act=act(text, "request_explanation")))
+    interpreter.return_value = json.dumps(dict(pending_answer=None, ttas_evidence=[], time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], dialogue_act=act(text, "request_explanation")))
     planner.return_value = json.dumps(plan())
     with caplog.at_level(logging.INFO):
         client.post("/chat", json=dict(case_id=case.case_id, message=text))
@@ -265,7 +265,7 @@ def test_live_four_turn_sequence_never_rebinds_safety_need(runtime):
         ("我說過了……", dict(pending_answer=None, dialogue_act=act("我說過了", "claims_already_answered")),
          "我還需要確認暈的感覺，是景物轉動還是眼前發黑？"),
     ]:
-        interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], **interpretation))
+        interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], time_preferences=[], prior_answer_reference=None, department_preference=None, **interpretation))
         planner.return_value = json.dumps(plan(question))
         result = client.post("/chat", json=dict(case_id=case_id, message=text)).json()
         assert result["reply"] == question
@@ -282,7 +282,7 @@ def test_partial_same_intent_uses_concrete_ai_question_without_clearing_answer(r
     case = clinical_case()
     save_case(case)
     text = "好像有點轉但不確定"
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[],
         dialogue_act=act(text, "answer"), pending_answer=dict(answered_intent=INTENT,
             answer_status="partial", answer_source_text=text, answer_confidence=0.98)))
     planner.return_value = json.dumps(plan())
@@ -439,7 +439,7 @@ def test_second_b1_prior_accepted_reference_captured_before_department_recompute
         current.conversation_state.department_next_question_intent = "hearing_changes"
 
     department.side_effect = recompute
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我說過了", "claims_already_answered"), prior_answer_reference=prior_reference()))
     planner.return_value = json.dumps(plan("這次聽到的聲音有改變嗎？", "hearing_changes"))
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我說過了")).json()
@@ -482,7 +482,7 @@ def test_second_b2_invalid_prior_reference_preserves_pending_and_evidence(runtim
         case.history_records = case.history_records[:1] + case.history_records[-1:]
         extractions = [evidence("accompanying_symptoms", ["眩暈"], "房子一直在轉")]
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=extractions, ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, semantic_extractions=extractions, ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我說過了", kind), prior_answer_reference=reference))
     planner.return_value = json.dumps(plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
@@ -498,7 +498,7 @@ def test_second_b3_prior_reference_never_completes_safety(runtime):
     case.patient_input.red_flags_checked = False
     cs._enter_safety_check(case)
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我說過了", "claims_already_answered"),
         prior_answer_reference=prior_reference(intent="safety_screen")))
     planner.return_value = json.dumps(plan("這次不適是否突然開始？", "safety_screen"))
@@ -513,7 +513,7 @@ CORRECTION_TEXT = "我剛剛說錯，不是頭暈，是頭痛"
 
 
 def correction_payload(dialogue=None, extractions=None):
-    return dict(semantic_extractions=extractions if extractions is not None else [
+    return dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=extractions if extractions is not None else [
         evidence("symptom", "頭暈", "不是頭暈", "absent"), evidence("symptom", "頭痛", "頭痛")],
         pending_answer=None, ttas_evidence=[], dialogue_act=dialogue or act("我剛剛說錯", "correction"))
 
@@ -683,7 +683,7 @@ def test_second_b_valid_prior_reference_does_not_trigger_extra_interpretation_or
     client, interpreter, planner, _ = runtime
     case = prior_case()
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, semantic_extractions=[], ttas_evidence=[],
         pending_answer=dict(answered_intent=INTENT, answer_status="answered",
                             answer_source_text="我說過了", answer_confidence=0.99),
         dialogue_act=act("我說過了", "claims_already_answered"), prior_answer_reference=prior_reference()))
@@ -709,7 +709,7 @@ def test_control_prior_reference_precedes_meta_pending_answer_with_new_evidence(
     case = prior_case()
     save_case(case)
     text = "我說過了，而且今天還有耳鳴"
-    interpreter.return_value = json.dumps(dict(
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, 
         semantic_extractions=[evidence("accompanying_symptoms", ["耳鳴"], "還有耳鳴")],
         ttas_evidence=[], dialogue_act=act("我說過了", "claims_already_answered"),
         prior_answer_reference=prior_reference(), pending_answer=dict(answered_intent=INTENT,
@@ -735,7 +735,7 @@ def test_control_invalid_prior_reference_falls_back_to_valid_direct_answer(runti
     case = prior_case()
     save_case(case)
     text = "我說過了，房子在旋轉，而且有耳鳴"
-    interpreter.return_value = json.dumps(dict(
+    interpreter.return_value = json.dumps(dict(time_preferences=[], department_preference=None, 
         semantic_extractions=[evidence("accompanying_symptoms", ["耳鳴"], "有耳鳴")],
         ttas_evidence=[], dialogue_act=act("我說過了", "claims_already_answered"),
         prior_answer_reference=reference, pending_answer=dict(answered_intent=INTENT,
@@ -770,7 +770,7 @@ def test_control_safety_explanation_does_not_consume_answer_attempt(runtime, cap
     case = active_safety_case()
     save_case(case)
     text = "我聽不懂，你在問什麼？"
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我聽不懂", "request_explanation")))
     planner.return_value = json.dumps(safety_explanation_plan())
     with caplog.at_level(logging.INFO):
@@ -796,7 +796,7 @@ def test_control_safety_medical_answer_still_consumes_attempt(runtime, status):
     case = active_safety_case()
     save_case(case)
     text = "不確定"
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[],
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[],
         pending_answer=pending(text, status, "uncertain"), dialogue_act=act(text, "answer")))
     planner.return_value = json.dumps(safety_explanation_plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
@@ -813,7 +813,7 @@ def test_control_invalid_explanation_act_does_not_get_attempt_exemption(runtime,
     client, interpreter, planner, department = runtime
     case = active_safety_case()
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=interpretation))
     planner.return_value = json.dumps(safety_explanation_plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，你在問什麼？")).json()
@@ -828,7 +828,7 @@ def test_control_safety_explanations_remain_bounded_by_existing_turn_cap(runtime
     case = active_safety_case()
     case.conversation_state.turn_count = cs.HARD_TURN_CAP - 1
     save_case(case)
-    interpreter.return_value = json.dumps(dict(semantic_extractions=[], ttas_evidence=[], pending_answer=None,
+    interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我聽不懂", "request_explanation")))
     planner.return_value = json.dumps(safety_explanation_plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂")).json()

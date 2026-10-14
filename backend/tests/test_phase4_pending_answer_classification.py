@@ -603,7 +603,12 @@ def test_turn_interpreter_failure_keeps_pending_and_adds_no_evidence(failure):
     ):
         result = asyncio.run(rag_triage_adapter.refine_case_with_ai(case, user_sources=[text]))
 
-    assert result is None
+    if isinstance(failure, Exception):
+        assert result is None
+        assert provider.await_count == 1
+    else:
+        assert not result.interpretation_complete
+        assert provider.await_count == 2
     assert case.semantic_extractions == []
     assert case.conversation_state.pending_clarification_intent == intent
     assert case.conversation_state.department_status == "unresolved"

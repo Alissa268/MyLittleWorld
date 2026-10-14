@@ -48,6 +48,11 @@ class Phase1AiFirstTest(unittest.TestCase):
 
     def post_text(self, message, provider_result, *, triage_case=None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        if isinstance(provider_result, dict):
+            provider_result = {**dict(pending_answer=None, ttas_evidence=[], time_preferences=[],
+                prior_answer_reference=None, department_preference=None,
+                dialogue_act=dict(act="unknown", source_text=message, confidence=0.99)),
+                **provider_result}
         provider = AsyncMock(
             side_effect=provider_result if isinstance(provider_result, Exception) else None,
             return_value=(
@@ -181,7 +186,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         for provider_result in (RuntimeError("quota"), TimeoutError(), "{bad json"):
             with self.subTest(provider_result=repr(provider_result)):
                 result, provider = self.post_text("我頭暈兩天", provider_result)
-                provider.assert_awaited_once()
+                self.assertEqual(provider.await_count, 2 if isinstance(provider_result, str) else 1)
                 patient = result["triage_case"]["patient_input"]
                 self.assertEqual(patient["symptom"], "")
                 self.assertIsNone(patient["duration"])
@@ -223,7 +228,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         save_case(case)
         result, _ = self.post_text(
             "我想把症狀改成頭暈",
-            {"semantic_extractions": [extraction("symptom", "頭暈", "頭暈")],
+            {'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, "semantic_extractions": [extraction("symptom", "頭暈", "頭暈")],
              "dialogue_act": {"act": "correction", "source_text": "我想把症狀改成頭暈", "confidence": 0.95}},
             triage_case=case.model_dump(mode="json"),
         )
@@ -284,7 +289,7 @@ class Phase1AiFirstTest(unittest.TestCase):
 
     def test_keyed_free_text_calls_ai_but_explicit_choice_remains_structured(self):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
-        provider = AsyncMock(return_value=json.dumps({
+        provider = AsyncMock(return_value=json.dumps({'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, 
             "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
             "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
         }, ensure_ascii=False))
@@ -321,7 +326,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
         case = TriageCase(case_id="phase1-keyed-existing")
         case.patient_input.duration = "2天"
-        provider = AsyncMock(return_value=json.dumps({
+        provider = AsyncMock(return_value=json.dumps({'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, 
             "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
             "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
         }, ensure_ascii=False))
@@ -339,7 +344,7 @@ class Phase1AiFirstTest(unittest.TestCase):
     def test_recommend_user_query_uses_same_ai_first_extraction(self):
         settings = SimpleNamespace(cerebras_api_key="test-key")
         case = TriageCase(case_id="phase1-recommend-query")
-        provider = AsyncMock(return_value=json.dumps({"semantic_extractions": [], "dialogue_act": {"act": "unknown", "source_text": "我頭暈兩天", "confidence": 0.99}}))
+        provider = AsyncMock(return_value=json.dumps({'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, "semantic_extractions": [], "dialogue_act": {"act": "unknown", "source_text": "我頭暈兩天", "confidence": 0.99}}))
         with patch.object(recommend_route, "get_settings", return_value=settings), patch.object(
             recommend_route, "create_case", return_value=case,
         ), patch.object(rag_triage_adapter, "get_settings", return_value=settings), patch.object(
