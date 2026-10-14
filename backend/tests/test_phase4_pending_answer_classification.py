@@ -363,10 +363,10 @@ def test_single_turn_interpretation_captures_tinnitus_evidence_and_pending_answe
     assert "opaque correlation key" in prompt
 
 
-def test_answered_pending_without_clinical_evidence_retries_once_and_fails_closed():
-    intent = "ask_hearing_loss_or_chest_pain"
-    question = "請問您是否有聽力下降的情形？"
-    text = "沒有聽力下降"
+def test_grounded_opaque_pending_answer_does_not_require_duplicate_clinical_evidence():
+    intent = "knee_swelling_presence"
+    question = "左膝是否有腫脹或積液"
+    text = "沒有明顯腫脹，也沒有感覺膝蓋裡有積液。"
     case = _turn_interpretation_case("phase4-incomplete-turn", intent, question, text)
     incomplete = {
         "semantic_extractions": [],
@@ -374,24 +374,47 @@ def test_answered_pending_without_clinical_evidence_retries_once_and_fails_close
             "answered_intent": intent,
             "answer_status": "answered",
             "answer_source_text": text,
-            "answer_confidence": 0.97,
+            "answer_confidence": 0.99,
         },
     }
 
-    result, provider = _run_turn_interpreter(case, text, [incomplete, incomplete])
+    result, provider = _run_turn_interpreter(case, text, incomplete)
 
     assert result is not None
-    assert result.interpretation_complete is False
-    assert result.pending_answer is None
+    assert result.interpretation_complete is True
+    assert result.pending_answer is not None
+    assert result.pending_answer.answer_source_text == text
     assert result.semantic_extractions == []
-    assert provider.await_count == 2
-    assert "修復要求" in provider.await_args_list[1].args[0]
+    provider.assert_awaited_once()
     assert case.semantic_extractions == []
-    assert case.conversation_state.pending_clarification_intent == intent
+    assert capture_pending_answer(case, result.pending_answer, [text]) is True
+    assert case.conversation_state.clarification_evidence[intent] == text
+    assert case.conversation_state.pending_clarification_intent is None
     assert case.conversation_state.department_status == "unresolved"
 
 
-def test_answered_pending_repair_applies_evidence_before_pending_can_clear():
+@pytest.mark.parametrize("change", [
+    {"answered_intent": "different_opaque_intent"},
+    {"answer_source_text": "不存在的患者原文"},
+    {"answer_confidence": 0.1},
+    {"answer_status": "partial"},
+    {"answer_status": "invalid"},
+])
+def test_opaque_pending_answer_still_requires_exact_grounded_confident_answer(change):
+    intent = "knee_swelling_presence"
+    text = "沒有明顯腫脹，也沒有感覺膝蓋裡有積液。"
+    case = _turn_interpretation_case("phase4-invalid-opaque-answer", intent, "左膝是否有腫脹或積液", text)
+    payload = dict(semantic_extractions=[], pending_answer=dict(
+        answered_intent=intent, answer_status="answered", answer_source_text=text, answer_confidence=0.99,
+    ))
+    payload["pending_answer"].update(change)
+    result, _ = _run_turn_interpreter(case, text, payload)
+    assert not capture_pending_answer(case, result.pending_answer, [text])
+    assert intent not in case.conversation_state.clarification_evidence
+    assert case.conversation_state.pending_clarification_intent == intent
+
+
+def test_wrong_pending_intent_repairs_once_and_applies_grounded_evidence():
     intent = "ask_hearing_loss_or_chest_pain"
     question = "請問您是否有聽力下降的情形？"
     text = "沒有聽力下降，但我右耳一直有耳鳴"
@@ -423,8 +446,9 @@ def test_answered_pending_repair_applies_evidence_before_pending_can_clear():
                 "confidence": 0.98, "source_text": "右耳一直有耳鳴",
             },
         ],
-        "pending_answer": incomplete["pending_answer"],
+        "pending_answer": dict(incomplete["pending_answer"]),
     }
+    incomplete["pending_answer"]["answered_intent"] = "different_opaque_intent"
 
     result, provider = _run_turn_interpreter(case, text, [incomplete, repaired])
 

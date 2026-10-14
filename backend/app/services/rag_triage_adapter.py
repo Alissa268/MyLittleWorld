@@ -355,6 +355,7 @@ def _answered_without_clinical_evidence(
 ) -> bool:
     return bool(
         pending_answer is not None
+        and pending_answer.answered_intent == SAFETY_PENDING_INTENT
         and pending_answer.answer_status == "answered"
         and pending_answer.answer_confidence >= ACCEPT_THRESHOLD
         and not (safety_context and pending_answer.answer_assertion in _EVIDENCE_ASSERTIONS)

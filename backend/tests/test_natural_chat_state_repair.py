@@ -42,6 +42,48 @@ def act(text, kind):
     return dict(act=kind, source_text=text, confidence=0.99)
 
 
+def test_opaque_pending_answer_without_clinical_extraction_reaches_planner(runtime, caplog):
+    client, interpreter, planner, department = runtime
+    intent = "knee_swelling_presence"
+    question = "左膝是否有腫脹或積液"
+    text = "沒有明顯腫脹，也沒有感覺膝蓋裡有積液。"
+    case = clinical_case()
+    case.patient_input.symptom = "左膝痛"
+    case.history_records = [Message(role="user", content="左膝痛"),
+                            Message(role="assistant", content=question)]
+    state = case.conversation_state
+    state.pending_clarification_intent = intent
+    state.pending_clarification_question = question
+    state.asked_clarification_intents = [intent]
+    state.department_next_question_intent = intent
+    state.next_information_needed = [question]
+    save_case(case)
+    answer = dict(answered_intent=intent, answer_status="answered",
+                  answer_source_text=text, answer_confidence=0.99)
+    respond(interpreter, answer=answer)
+
+    async def recompute(current):
+        assert current.conversation_state.clarification_evidence[intent] == text
+        assert current.conversation_state.pending_clarification_intent is None
+        current.conversation_state.department_next_question_intent = "knee_function_impact"
+
+    department.side_effect = recompute
+    next_question = "左膝的不舒服對走路或上下樓梯有什麼影響？"
+    planner.return_value = json.dumps(plan(next_question, "knee_function_impact"), ensure_ascii=False)
+    with caplog.at_level(logging.INFO):
+        result = client.post("/chat", json=dict(case_id=case.case_id, message=text)).json()
+    interpreter.assert_awaited_once()
+    department.assert_awaited_once()
+    planner.assert_awaited_once()
+    assert "answered_without_clinical_evidence" not in caplog.text
+    assert result["triage_case"]["semantic_extractions"] == []
+    assert result["conversation_state"]["clarification_evidence"][intent] == text
+    assert result["conversation_state"]["pending_clarification_intent"] != intent
+    assert result["conversation_state"]["reply_source"] == "AI_PLANNER"
+    assert result["reply"] == next_question
+    assert text in planner.await_args.args[0]
+
+
 def test_complete_negative_exits_safety_before_department_and_planner(runtime):
     client, interpreter, planner, department = runtime
     first_text = "我今天頭很暈而且心情不好一直想哭。"
