@@ -17,10 +17,3 @@ def needs_clarification(confidence: float, semantic_status: str) -> bool:
 
 def accepted(confidence: float, semantic_status: str) -> bool:
     return confidence >= ACCEPT_THRESHOLD and semantic_status not in {"unknown", "ambiguous"}
-
-
-def confidence_with_uncertainty(base: float, text: str) -> float:
-    lowered = text.lower()
-    uncertain_terms = ["吧", "可能", "應該", "大概", "不確定", "也許", "好像"]
-    penalty = 0.15 if any(term in lowered for term in uncertain_terms) else 0.0
-    return clamp_confidence(base - penalty)
