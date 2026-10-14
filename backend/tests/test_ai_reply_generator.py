@@ -130,7 +130,7 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(data["conversation_state"]["awaiting_confirmation"])
         self.assertFalse(data["conversation_state"]["confirmed"])
         self.assertIsNone(data["department_result"])
-        detector.assert_not_awaited()
+        detector.assert_awaited_once()
 
     def test_department_confirmation_reason_uses_only_collected_case_fields(self):
         case = TriageCase(case_id="grounded-confirmation")

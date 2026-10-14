@@ -1,0 +1,10 @@
+Targeted (cwd: backend):
+.\.venv\Scripts\python.exe -m pytest tests/test_ai_reply_generator.py -q --tb=short -p no:cacheprovider --basetemp=.pytest_tmp_ai_reply_targeted
+11 passed, 0 failed, 4 subtests passed, 7 warnings.
+
+Full suite (cwd: backend):
+.\.venv\Scripts\python.exe -m pytest tests -q --tb=short -p no:cacheprovider --basetemp=.pytest_tmp_ai_reply_full
+751 passed, 0 failed, 93 subtests passed, 7 warnings.
+
+Only one test assertion changed this turn; all confirmation gate assertions retained.
+No production changes this turn; no confidence_with_uncertainty changes; no 310.
