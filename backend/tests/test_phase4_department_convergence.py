@@ -24,7 +24,6 @@ from app.services import department_preference_service
 from app.services.appointment_service import DepartmentResolutionError
 from app.services.case_store import get_case, save_case
 from app.services.conversation_service import (
-    NEUTRAL_PENDING_RETRIES,
     SAFETY_PENDING_INTENT,
     ClarificationSuggestion,
     advance_conversation,
@@ -383,16 +382,13 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
 class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
     def no_ai_chat(self, message: str, *, triage_case: dict | None = None, confirmed: bool = False):
         settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
-        old_detector = AsyncMock()
-        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
-            chat_route, "detect_department_result", new=old_detector,
-        ), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
             response = TestClient(app).post("/chat", json={
                 "message": message, "confirmed": confirmed,
                 **({"triage_case": triage_case} if triage_case else {}),
             })
         self.assertEqual(response.status_code, 200)
-        old_detector.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         return response.json()
 
     def test_missing_ai_key_free_text_stays_unresolved(self):
@@ -409,13 +405,10 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
 
     def test_missing_ai_key_messages_user_text_is_also_free_text(self):
         settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
-        old_detector = AsyncMock()
-        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
-            chat_route, "detect_department_result", new=old_detector,
-        ), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
+        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
             response = TestClient(app).post("/chat", json={"messages": [{"role": "user", "content": "我膝蓋很痛"}], "confirmed": True})
         self.assertEqual(response.status_code, 200)
-        old_detector.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertTrue(response.json()["conversation_state"]["free_text_mode"])
         self.assertIsNone(response.json()["department_result"])
         self.assertEqual(response.json()["conversation_state"]["stage"], "collecting")
@@ -432,16 +425,14 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(second["conversation_state"]["stage"], "collecting")
         self.assertFalse(second["conversation_state"]["confirmed"])
 
-    def test_missing_ai_key_explicit_preference_uses_exact_live_db(self):
+    def test_missing_ai_key_raw_department_name_is_not_a_preference(self):
         row = {"dept_id": 1234, "parent_dept": "內科系", "child_dept": "感染科"}
         with patch.object(department_preference_service, "fetch_active_departments", return_value=[row]) as live_db:
             result = self.no_ai_chat("我想看感染科")
-        self.assertGreaterEqual(live_db.call_count, 1)
-        self.assertEqual(result["department_result"]["dept_id"], 1234)
-        self.assertEqual(result["department_result"]["childDept"], "感染科")
-        self.assertEqual(result["conversation_state"]["department_status"], "resolved")
-        self.assertIn("使用者明確指定", result["department_result"]["reason"][0])
-        self.assertNotIn("官方 KB", result["department_result"]["reason"][0])
+        live_db.assert_not_called()
+        self.assertIsNone(result["department_result"])
+        self.assertIsNone(result["triage_case"]["patient_input"]["requested_department_id"])
+        self.assertEqual(result["conversation_state"]["department_status"], "unresolved")
 
     def test_missing_ai_key_free_text_safety_fails_closed(self):
         result = self.no_ai_chat("我最近一直頭暈")
@@ -647,7 +638,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags_status"], "negative")
         self.assertEqual(second["next_question"], question)
-        self.assertNotIn(second["next_question"], NEUTRAL_PENDING_RETRIES)
+        self.assertNotIn(second["next_question"], ("可以再補充和剛才問題相關的症狀細節嗎？", "可以換個方式描述剛才問題所詢問的具體情況嗎？"))
         self.assertEqual(
             second["conversation_state"]["pending_clarification_intent"],
             "ask_hearing_related_symptoms",
@@ -812,7 +803,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tinnitus_support)
         self.assertEqual(tinnitus_support[0]["patient_source_text"], "右耳一直有耳鳴")
         self.assertEqual(a3["next_question"], nausea_question)
-        self.assertNotIn(a3["next_question"], NEUTRAL_PENDING_RETRIES)
+        self.assertNotIn(a3["next_question"], ("可以再補充和剛才問題相關的症狀細節嗎？",))
         self.assertEqual(a3["conversation_state"]["pending_clarification_intent"], next_key)
 
     async def test_safety_question_precedes_candidate_question(self):
@@ -981,17 +972,16 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         async def converge(case):
             case.conversation_state.department_status = "ambiguous"
         planner = ClarificationSuggestion("clarification_needed", "可以補充症狀如何變化嗎？", "differentiate_signal", "待釐清")
-        old_detector = AsyncMock()
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             chat_route, "refine_case_with_ai", new=semantic,
         ), patch.object(chat_route, "reason_about_departments", new=converge), patch.object(
             chat_route, "request_clarification", new=AsyncMock(return_value=planner),
-        ), patch.object(chat_route, "detect_department_result", new=old_detector), patch.object(
+        ), patch.object(
             chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
         ):
             response = TestClient(app).post("/chat", json={"message": "我有症狀甲"})
         self.assertEqual(response.status_code, 200)
-        old_detector.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(response.json()["conversation_state"]["department_status"], "ambiguous")
         self.assertEqual(response.json()["conversation_state"]["stage"], "collecting")
 
@@ -1004,11 +994,9 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         case.triage.need_more_info = False
         case.confirmed = True
         save_case(case)
-        detector = AsyncMock()
-        with patch.object(recommend_route, "detect_department_result", new=detector):
-            response = TestClient(app).post("/recommend", json={"triage_case": case.model_dump(mode="json"), "visit_type": "initial"})
+        self.assertFalse(hasattr(recommend_route, "detect_department_result"))
+        response = TestClient(app).post("/recommend", json={"triage_case": case.model_dump(mode="json"), "visit_type": "initial"})
         self.assertEqual(response.status_code, 422)
-        detector.assert_not_awaited()
 
     async def test_recommend_allows_only_live_validated_explicit_preference_exception(self):
         case = case_with_symptom()
@@ -1026,11 +1014,11 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         recommender = AsyncMock(side_effect=DepartmentResolutionError("test stop"))
         with patch.object(recommend_route, "resolve_requested_department", return_value=explicit) as validator, patch.object(
             recommend_route, "recommend_appointments", new=recommender,
-        ), patch.object(recommend_route, "detect_department_result", new=AsyncMock()) as detector:
+        ):
             response = TestClient(app).post("/recommend", json={"triage_case": case.model_dump(mode="json"), "visit_type": "initial"})
         validator.assert_called_once()
         recommender.assert_awaited_once()
-        detector.assert_not_awaited()
+        self.assertFalse(hasattr(recommend_route, "detect_department_result"))
         self.assertEqual(response.status_code, 422)
 
     async def test_resolved_case_safety_then_confirmation_keeps_validated_result(self):
@@ -1065,12 +1053,11 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             case.department_result = DepartmentResult(
                 dept_id=101, parentDept="測試系", childDept="測試甲科", confidence=0.9,
             )
-        old_detector = AsyncMock()
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             chat_route, "refine_case_with_ai", new=semantic,
         ) as semantic_mock, patch.object(chat_route, "reason_about_departments", new=converge), patch.object(
             chat_route, "request_clarification", new=AsyncMock(return_value=ClarificationSuggestion("sufficient", None, None, "足夠")),
-        ) as planner, patch.object(chat_route, "detect_department_result", new=old_detector), patch.object(
+        ) as planner, patch.object(
             chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
         ):
             client = TestClient(app)
@@ -1087,4 +1074,4 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(third["conversation_state"]["confirmed"])
         self.assertEqual(third["department_result"]["dept_id"], 101)
         self.assertEqual(planner.await_count, 2)
-        old_detector.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))

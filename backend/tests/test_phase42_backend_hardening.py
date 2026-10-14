@@ -215,18 +215,19 @@ def test_isolated_snapshot_discards_all_server_owned_state_and_assistant_history
     assert sanitized.history_records == [Message(role="user", content="保留這段使用者輸入")]
 
 
-def test_db_unavailable_is_globally_503_for_chat_preference(monkeypatch):
+def test_raw_department_words_do_not_query_db_without_ai_preference(monkeypatch):
     monkeypatch.setattr("app.routes.chat.runtime_ai_available", lambda _settings: False)
     monkeypatch.setattr(
-        "app.routes.chat.capture_department_preference",
+        "app.services.department_preference_service.fetch_active_departments",
         Mock(side_effect=db.DatabaseUnavailableError("secret connection detail")),
     )
     response = TestClient(app, raise_server_exceptions=False).post(
         "/chat",
         json={"case_id": "case_db_preference", "visit_type": "initial", "message": "我想看感染科"},
     )
-    assert response.status_code == 503
-    assert response.json() == {"detail": "正式資料目前無法查詢，請稍後重試。"}
+    assert response.status_code == 200
+    assert response.json()["department_result"] is None
+    assert response.json()["triage_case"]["patient_input"]["requested_department_id"] is None
     assert "secret" not in response.text
 
 
@@ -250,7 +251,7 @@ def test_db_unavailable_is_globally_503_for_structured_department_detection(monk
         lambda *_args, **_kwargs: UrgencyResult(need_more_info=False, is_final=True),
     )
     monkeypatch.setattr(
-        "app.routes.chat.detect_department_result",
+        "app.routes.chat.reason_about_departments",
         AsyncMock(side_effect=db.DatabaseUnavailableError("db down")),
     )
     response = TestClient(app, raise_server_exceptions=False).post(

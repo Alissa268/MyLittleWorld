@@ -66,6 +66,9 @@ class Phase2ConversationTest(unittest.TestCase):
                 "semantic_extractions": extractions,
                 "pending_answer": pending_answer,
                 "ttas_evidence": ttas_evidence or [],
+                "dialogue_act": {"act": "answer" if pending_answer else "new_information",
+                                 "source_text": message, "confidence": 0.99},
+                "prior_answer_reference": None, "department_preference": None, "time_preferences": [],
             },
             ensure_ascii=False,
         ))
@@ -73,12 +76,12 @@ class Phase2ConversationTest(unittest.TestCase):
             side_effect=plan if isinstance(plan, Exception) else None,
             return_value=json.dumps(plan, ensure_ascii=False) if isinstance(plan, dict) else plan,
         )
-        department = AsyncMock(return_value=None)
+        department = None  # Retired detector is absent; convergence is mocked independently.
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             rag_triage_adapter, "get_settings", return_value=settings,
         ), patch.object(rag_triage_adapter, "complete_prompt", new=semantic), patch.object(
             conversation_service, "complete_runtime_json", new=clarification,
-        ), patch.object(chat_route, "detect_department_result", new=department), patch.object(
+        ), patch.object(
             chat_route, "reason_about_departments", new=AsyncMock(),
         ), patch.object(
             chat_route, "generate_triage_reply",
@@ -121,7 +124,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_awaited_once()
         clarification.assert_awaited_once()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(result["next_question"], question)
         self.assertEqual(result["conversation_state"]["asked_clarification_intents"], ["clarify_dizziness_type"])
         self.assertEqual(result["conversation_state"]["turn_count"], 1)
@@ -130,7 +133,7 @@ class Phase2ConversationTest(unittest.TestCase):
     def test_rich_description_can_be_sufficient_without_preferences(self):
         result, _, clarification, department = self.rich_first_turn()
         clarification.assert_awaited_once()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertTrue(result["needMoreInfo"])
         self.assertFalse(result["conversation_state"]["is_complete"])
         self.assertEqual(result["conversation_state"]["stage"], "collecting")
@@ -157,7 +160,7 @@ class Phase2ConversationTest(unittest.TestCase):
             safety_assertion="absent",
         )
         semantic.assert_awaited_once()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertTrue(second["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(second["triage_case"]["patient_input"]["red_flags"], [])
         self.assertEqual(second["triage_case"]["patient_input"]["accompanying_symptoms"], ["走路越來越痛"])
@@ -179,7 +182,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_awaited_once()
         clarification.assert_awaited_once()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         state = eighth["conversation_state"]
         self.assertEqual(state["turn_count"], 8)
         self.assertEqual(state["clarification_status"], "safety_check")
@@ -193,7 +196,7 @@ class Phase2ConversationTest(unittest.TestCase):
             safety_assertion="absent",
         )
         semantic.assert_awaited_once()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(completed["conversation_state"]["turn_count"], 9)
         self.assertEqual(completed["conversation_state"]["clarification_status"], "unresolved")
         self.assertFalse(completed["conversation_state"]["is_complete"])
@@ -202,7 +205,7 @@ class Phase2ConversationTest(unittest.TestCase):
 
     def test_confirmation_cannot_skip_safety_question(self):
         result, _, _, department = self.rich_first_turn(confirmed=True)
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(result["conversation_state"]["stage"], "collecting")
         self.assertFalse(result["conversation_state"]["confirmed"])
         self.assertFalse(result["conversation_state"]["is_complete"])
@@ -215,7 +218,8 @@ class Phase2ConversationTest(unittest.TestCase):
         forged["conversation_state"]["confirmed"] = True
         forged["triage"]["need_more_info"] = False
         forged["confirmed"] = True
-        with patch.object(recommend_route, "detect_department_result", new=AsyncMock()) as detector, patch.object(
+        self.assertFalse(hasattr(recommend_route, "detect_department_result"))
+        with patch.object(
             recommend_route, "recommend_appointments", new=AsyncMock(),
         ) as recommender:
             response = TestClient(app).post("/recommend", json={
@@ -223,7 +227,7 @@ class Phase2ConversationTest(unittest.TestCase):
             })
         self.assertEqual(response.status_code, 400)
         self.assertIn("尚未完成", response.json()["detail"])
-        detector.assert_not_awaited()
+        self.assertFalse(hasattr(recommend_route, "detect_department_result"))
         recommender.assert_not_awaited()
 
     def test_positive_red_flag_keeps_urgent_path(self):
@@ -238,7 +242,7 @@ class Phase2ConversationTest(unittest.TestCase):
             }],
         )
         clarification.assert_not_awaited()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(result["triage_case"]["ttas_result"]["level_candidate"], 2)
         self.assertEqual(result["triage"]["urgency_score"], None)
         self.assertTrue(result["triage_case"]["patient_input"]["red_flags_checked"])
@@ -271,7 +275,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertTrue(second["needMoreInfo"])
         self.assertEqual(second["conversation_state"]["clarification_status"], "safety_check")
         self.assertIn("突發胸痛", second["next_question"])
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_filled_duration_is_not_reasked(self):
         result, _, _, _ = self.post(
@@ -293,7 +297,7 @@ class Phase2ConversationTest(unittest.TestCase):
                     "我頭暈", [extraction("symptom", "頭暈", "頭暈")], plan,
                 )
                 self.assertEqual(clarification.await_count, 1 if isinstance(plan, Exception) else 2)
-                department.assert_not_awaited()
+                self.assertFalse(hasattr(chat_route, "detect_department_result"))
                 self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "頭暈")
                 self.assertIsNone(result["triage_case"]["patient_input"]["duration"])
                 self.assertTrue(result["needMoreInfo"])
@@ -311,7 +315,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(state["stage"], "collecting")
         self.assertFalse(state["confirmed"])
         self.assertFalse(result["triage_case"]["recommendation_generated"])
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_vague_symptom_cannot_be_declared_sufficient(self):
         result, _, _, department = self.post(
@@ -322,7 +326,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertTrue(result["needMoreInfo"])
         self.assertEqual(result["conversation_state"]["clarification_status"], "clarifying")
         self.assertFalse(result["conversation_state"]["is_complete"])
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_low_confidence_and_pending_answer_block_sufficient(self):
         first, _, _, _ = self.post(
@@ -341,7 +345,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertTrue(second["needMoreInfo"])
         self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "clarify_dizziness_type")
         self.assertFalse(second["conversation_state"]["is_complete"])
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_answered_clinical_pending_without_structured_evidence_fails_closed(self):
         first, _, _, _ = self.post(
@@ -365,7 +369,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(second["triage_case"]["patient_input"]["symptom"], "腳背腫痛")
         self.assertEqual(len(second["triage_case"]["semantic_extractions"]), 1)
         self.assertEqual(semantic.await_count, 2)
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_ungrounded_free_form_answer_cannot_clear_pending(self):
         first, _, _, _ = self.post(
@@ -383,7 +387,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
         self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_partial_answer_keeps_pending_but_allows_targeted_follow_up(self):
         first, _, _, _ = self.post(
@@ -405,7 +409,7 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
         self.assertEqual(second["conversation_state"]["asked_clarification_intents"], ["fracture_assessment"])
         self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_unclear_answer_allows_safe_follow_up_but_rejects_duplicate_or_unsafe_question(self):
         first, _, _, _ = self.post(
@@ -456,7 +460,7 @@ class Phase2ConversationTest(unittest.TestCase):
                 )
                 self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
                 self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
-                department.assert_not_awaited()
+                self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_wrong_answered_intent_cannot_clear_pending(self):
         first, _, _, _ = self.post(
@@ -474,7 +478,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         self.assertEqual(second["conversation_state"]["pending_clarification_intent"], "fracture_assessment")
         self.assertEqual(second["conversation_state"]["clarification_evidence"], {})
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
 
     def test_hard_cap_is_unresolved_without_guessing(self):
         case = None
@@ -483,7 +487,7 @@ class Phase2ConversationTest(unittest.TestCase):
                 f"還不清楚{turn}", [], TimeoutError(), triage_case=case,
             )
             case = result["triage_case"]
-            department.assert_not_awaited()
+            self.assertFalse(hasattr(chat_route, "detect_department_result"))
         state = result["conversation_state"]
         self.assertEqual(state["turn_count"], 8)
         self.assertEqual(state["clarification_status"], "unresolved")
@@ -497,7 +501,7 @@ class Phase2ConversationTest(unittest.TestCase):
         )
         semantic.assert_not_awaited()
         clarification.assert_not_awaited()
-        department.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         self.assertEqual(repeated["conversation_state"]["turn_count"], 8)
 
 

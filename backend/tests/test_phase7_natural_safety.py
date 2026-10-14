@@ -41,14 +41,17 @@ def runtime():
         stack.enter_context(patch.object(rag_triage_adapter, "complete_prompt", interpreter))
         stack.enter_context(patch.object(conversation_service, "complete_runtime_json", planner))
         stack.enter_context(patch.object(route, "reason_about_departments", department))
-        stack.enter_context(patch.object(route, "capture_department_preference", return_value=None))
         yield TestClient(app), interpreter, planner, department
 
 
 def respond(interpreter, extractions=(), answer=None, ttas=()):
     interpreter.side_effect = None
     interpreter.return_value = json.dumps(dict(semantic_extractions=list(extractions),
-        pending_answer=answer, ttas_evidence=list(ttas)))
+        pending_answer=answer, ttas_evidence=list(ttas), time_preferences=[],
+        prior_answer_reference=None, department_preference=None,
+        dialogue_act=dict(act="answer" if answer else "new_information",
+            source_text=answer["answer_source_text"] if answer else extractions[0]["source_text"] if extractions else "",
+            confidence=0.98)))
 
 
 @pytest.mark.parametrize("text,value,span", [
@@ -186,9 +189,9 @@ def test_unavailable_safety_turn_is_bounded_without_legacy_parser(runtime):
     first = client.post("/chat", json=dict(message="頭痛3天")).json()
     interpreter.reset_mock()
     department.reset_mock()
-    with patch.object(route, "runtime_ai_available", return_value=False), patch(
-        "app.services.rule_engine.normalize_message", side_effect=AssertionError("no free-text rule parsing"),
-    ):
+    from app.services import rule_engine
+    assert not hasattr(rule_engine, "normalize_message")
+    with patch.object(route, "runtime_ai_available", return_value=False):
         for text in ("都沒有", "不知道", "你為什麼跳針"):
             result = client.post("/chat", json=dict(case_id=first["case_id"], message=text)).json()
     assert result["conversation_state"]["clarification_status"] == "unresolved"
@@ -200,7 +203,7 @@ def test_unavailable_safety_turn_is_bounded_without_legacy_parser(runtime):
 def test_time_only_turn_uses_same_interpreter_and_preserves_relative_facts(runtime):
     client, interpreter, _, _ = runtime
     interpreter.return_value = json.dumps(dict(semantic_extractions=[], pending_answer=None,
-        ttas_evidence=[], time_preferences=[
+        ttas_evidence=[], dialogue_act=dict(act="new_information", source_text="只能下週二下午看診", confidence=0.99), time_preferences=[
             dict(kind="relative_weekday", relation="prefer", priority=1, week_offset=1,
                  weekday="tuesday", source_text="下週二", confidence=0.99),
             dict(kind="session", relation="exclude", session="morning", priority=None,
@@ -235,7 +238,9 @@ def test_new_symptoms_and_revision_stay_grounded_across_turns(runtime):
 
 def test_relative_days_order_across_week_boundary():
     from datetime import date
-    from app.services import semantic_normalizer
-    with patch.object(semantic_normalizer, "_taipei_today", return_value=date(2026, 10, 9)):
-        result = semantic_normalizer.normalize_preferred_days("後天跟大後天都可以")
-    assert result.normalized_value == ["週日", "週一"]
+    from app.services.time_preference_service import validate_and_resolve_time_preferences
+    facts = [dict(kind="date", relation="acceptable", priority=1, date_value=day,
+                  source_text="後天跟大後天都可以", confidence=0.99)
+             for day in ("2026-10-11", "2026-10-12")]
+    result = validate_and_resolve_time_preferences(facts, user_sources=["後天跟大後天都可以"], reference_date=date(2026, 10, 9))
+    assert [date.fromisoformat(p.resolved_dates[0]).weekday() for p in result] == [6, 0]

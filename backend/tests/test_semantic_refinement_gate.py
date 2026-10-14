@@ -40,10 +40,6 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
                 cerebras_api_key="test-key" if ai_available else "",
                 batch_triage_enabled=False,
             ),
-        ), patch.object(
-            chat_route,
-            "detect_department_result",
-            new=AsyncMock(return_value=None),
         ):
             response = TestClient(app).post("/chat", json=payload)
         return response, semantic, contextual
@@ -261,12 +257,12 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.json()["reply"], response.json()["next_question"])
-        # One interpretation, invalid planner JSON, then at most one planner repair.
-        self.assertEqual(models.call_count, 3)
+        # Invalid interpretation receives one repair; no planner runs on an invalid turn.
+        self.assertEqual(models.call_count, 2)
         self.assertEqual(len(summaries), 1)
         self.assertTrue(summaries[0]["semantic_ai_called"])
         self.assertFalse(summaries[0]["ai_reply_ai_called"])
-        self.assertEqual(summaries[0]["ai_call_count"], 3)
+        self.assertEqual(summaries[0]["ai_call_count"], 2)
         self.assertEqual(summaries[0]["gemini_call_count"], 0)
 
     async def test_semantic_failure_keeps_deterministic_chat_flow(self):

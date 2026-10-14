@@ -5,7 +5,6 @@ from app.db import DatabaseUnavailableError
 from app.schemas import ConversationStage, RecommendRequest, RecommendationResult, VisitType
 from app.services.appointment_service import (
     DepartmentResolutionError,
-    detect_department_result,  # Legacy patch seam; /recommend does not invoke it.
     normalize_visit_type,
     recommend_appointments,
 )

@@ -1,51 +1,55 @@
 from __future__ import annotations
 
-import re
-from dataclasses import dataclass
+import logging
 from typing import Any
 
 from app.db import fetch_active_departments
-from app.schemas import DepartmentResult, TriageCase
-from app.services.field_acceptance import looks_like_department_request
+from pydantic import ValidationError
+
+from app.schemas import DepartmentPreferenceInterpretation, DepartmentResult, TriageCase
+from app.services.confidence_scoring import ACCEPT_THRESHOLD
 
 
-@dataclass(frozen=True)
-class DepartmentPreference:
-    name: str
-    dept_id: int | None
-    resolved: bool
+logger = logging.getLogger(__name__)
 
 
-_DEPARTMENT_ALIASES = {
-    "骨科": "一般骨科",
-    "腸胃科": "胃腸肝膽科",
-}
+def active_department_candidates() -> list[dict[str, Any]]:
+    """Read current official identities; provider failure yields no candidates."""
+    try:
+        return _canonical_departments(fetch_active_departments())
+    except Exception as exc:
+        logger.warning("department candidates unavailable error_type=%s", type(exc).__name__)
+        return []
 
 
-def capture_department_preference(case: TriageCase, text: str) -> DepartmentPreference | None:
-    """Store an explicit preference without turning it into a triage result."""
-    if not looks_like_department_request(text):
+def accept_department_preference(
+    case: TriageCase, value: Any, user_sources: list[str],
+) -> DepartmentPreferenceInterpretation | None:
+    """Accept only grounded AI preference backed by one current active DB row."""
+    if value is None:
         return None
-
-    departments = _canonical_departments(fetch_active_departments())
-    mentioned_names = sorted(
-        {item["child_dept"] for item in departments if item["child_dept"] in text},
-        key=len,
-        reverse=True,
+    try:
+        preference = DepartmentPreferenceInterpretation.model_validate(value)
+    except (ValidationError, TypeError, ValueError):
+        return None
+    matches = [
+        item for item in active_department_candidates()
+        if item["dept_id"] == preference.dept_id
+    ]
+    valid = (
+        preference.confidence >= ACCEPT_THRESHOLD
+        and preference.source_text.strip()
+        and any(preference.source_text in source for source in user_sources)
+        and len(matches) == 1
+        and matches[0]["child_dept"] == preference.department_name
     )
-    name = mentioned_names[0] if mentioned_names else _department_name_from_text(text)
-    if not name:
+    logger.info("department preference case_id=%s accepted=%s reason=%s",
+                case.case_id, bool(valid), "validated_identity" if valid else "invalid_preference")
+    if not valid:
         return None
-
-    alias_target = _DEPARTMENT_ALIASES.get(name)
-    if alias_target and any(item["child_dept"] == alias_target for item in departments):
-        name = alias_target
-
-    matches = [item for item in departments if item["child_dept"] == name]
-    dept_id = matches[0]["dept_id"] if len(matches) == 1 else None
-    case.patient_input.requested_department_name = name
-    case.patient_input.requested_department_id = dept_id
-    return DepartmentPreference(name=name, dept_id=dept_id, resolved=dept_id is not None)
+    case.patient_input.requested_department_id = preference.dept_id
+    case.patient_input.requested_department_name = preference.department_name
+    return preference
 
 
 def resolve_requested_department(
@@ -81,25 +85,11 @@ def resolve_requested_department(
     )
 
 
-def _department_name_from_text(text: str) -> str | None:
-    visit_match = re.search(
-        r"(?:我)?(?:想要|想|要|希望|直接|改成|改為|改)?\s*"
-        r"(?:看|掛號|掛診|掛)\s*([\u4e00-\u9fffA-Za-z0-9()（）/、-]{1,20}?科)",
-        text,
-    )
-    if visit_match:
-        return visit_match.group(1).strip()
-    change_match = re.search(
-        r"(?:我)?(?:想)?(?:改成|改為)\s*"
-        r"([\u4e00-\u9fffA-Za-z0-9()（）/、-]{1,20}?科)",
-        text,
-    )
-    return change_match.group(1).strip() if change_match else None
-
-
 def _canonical_departments(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     canonical: list[dict[str, Any]] = []
     for row in rows:
+        if row.get("is_active") is False or row.get("is_active") == 0:
+            continue
         try:
             dept_id = int(row.get("dept_id"))
         except (TypeError, ValueError):

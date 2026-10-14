@@ -11,10 +11,8 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.schemas import DepartmentResult, TriageCase
 from app.services.conversation_service import ClarificationSuggestion
-from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter, specialty_scoring
-from app.services.project_smart_department_adapter import detect_department_with_project_smart_adapter
+from app.services import appointment_service, department_preference_service, rag_triage_adapter, specialty_scoring
 from app.services.rule_engine import apply_user_message
-from app.services.semantic_normalizer import ALL_SESSIONS, ALL_WEEKDAYS, normalize_message
 from app.services.specialty_scoring import score_doctor_deterministically
 
 
@@ -23,8 +21,6 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         self.original_fetch_departments = appointment_service.fetch_active_departments
         self.original_preference_departments = department_preference_service.fetch_active_departments
         self.original_fetch_slots = appointment_service.fetch_available_slots
-        self.original_project_settings = project_smart_department_adapter.get_settings
-        self.original_project_complete = project_smart_department_adapter.complete_prompt
         self.original_rag_settings = rag_triage_adapter.get_settings
         self.original_rag_complete = rag_triage_adapter.complete_prompt
         self.original_specialty_settings = specialty_scoring.get_settings
@@ -32,7 +28,6 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         self.original_create_case = self.chat_route.create_case
         self.original_runtime_ai_available = self.chat_route.runtime_ai_available
 
-        project_smart_department_adapter.get_settings = lambda: _NoAiSettings()
         rag_triage_adapter.get_settings = lambda: _NoAiSettings()
         specialty_scoring.get_settings = lambda: _NoAiSettings()
 
@@ -54,42 +49,18 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         async def fail_complete(_: str) -> str:
             raise RuntimeError("AI disabled in selective merge tests")
 
-        project_smart_department_adapter.complete_prompt = fail_complete
         rag_triage_adapter.complete_prompt = fail_complete
 
     def tearDown(self):
         appointment_service.fetch_active_departments = self.original_fetch_departments
         department_preference_service.fetch_active_departments = self.original_preference_departments
         appointment_service.fetch_available_slots = self.original_fetch_slots
-        project_smart_department_adapter.get_settings = self.original_project_settings
-        project_smart_department_adapter.complete_prompt = self.original_project_complete
         rag_triage_adapter.get_settings = self.original_rag_settings
         rag_triage_adapter.complete_prompt = self.original_rag_complete
         specialty_scoring.get_settings = self.original_specialty_settings
         self.chat_route.create_case = self.original_create_case
         self.chat_route.runtime_ai_available = self.original_runtime_ai_available
         self.generate_script_route.revalidate_schedule = self.original_revalidate
-
-    async def test_under_18_abdominal_prefers_active_pediatric_department(self):
-        case = _case_from_message("12歲腹痛兩天，沒有胸痛呼吸困難，週一上午可以")
-
-        result = await detect_department_with_project_smart_adapter(case, _active_departments())
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.childDept, "兒童腸胃科")
-        self.assertEqual(result.parentDept, "婦幼醫學部")
-        self.assertTrue(any("active department list" in reason for reason in result.reason))
-
-    async def test_under_18_without_pediatric_department_does_not_invent_department(self):
-        case = _case_from_message("12歲腹痛兩天，沒有胸痛呼吸困難，週一上午可以")
-        departments = [
-            {"dept_id": 202, "parent_dept": "內科系", "child_dept": "胃腸肝膽科"},
-            {"dept_id": 204, "parent_dept": "其他科", "child_dept": "皮膚科"},
-        ]
-
-        result = await detect_department_with_project_smart_adapter(case, departments)
-
-        self.assertIsNone(result)
 
     def test_deterministic_specialty_fallback_is_neutral_without_keyword_inference(self):
         case = TriageCase(case_id="case_selective_reason")
@@ -109,21 +80,6 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("中性值 0.50", score.reason)
         self.assertNotIn("腹痛", score.reason)
         self.assertNotIn("腸胃", score.reason)
-
-    def test_same_day_multi_session_availability_is_parsed(self):
-        result = normalize_message("週三下午和晚上都可以")
-        extractions = {item.field: item for item in result.extractions}
-
-        self.assertEqual(extractions["preferred_days"].normalized_value, [ALL_WEEKDAYS[2]])
-        self.assertEqual(extractions["preferred_sessions"].normalized_value, [ALL_SESSIONS[1], ALL_SESSIONS[2]])
-
-    def test_tomorrow_multi_session_availability_is_parsed(self):
-        result = normalize_message("明天上午或下午都可以")
-        extractions = {item.field: item for item in result.extractions}
-        tomorrow = date.today() + timedelta(days=1)
-
-        self.assertEqual(extractions["preferred_days"].normalized_value, [ALL_WEEKDAYS[tomorrow.weekday()]])
-        self.assertEqual(extractions["preferred_sessions"].normalized_value, [ALL_SESSIONS[0], ALL_SESSIONS[1]])
 
     def test_main_chat_confirm_recommend_generate_script_flow_still_runs(self):
         client = TestClient(app)

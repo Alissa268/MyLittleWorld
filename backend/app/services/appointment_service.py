@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from datetime import date, datetime
 import logging
-import re
 
 from app.db import fetch_active_departments, fetch_available_slots
 from app.schemas import (
@@ -13,9 +12,7 @@ from app.schemas import (
     TriageCase,
     VisitType,
 )
-from app.services.project_smart_department_adapter import detect_department_with_project_smart_adapter
 from app.services.department_preference_service import resolve_requested_department
-from app.services.negation_utils import strip_negated_red_flags
 from app.services.schedule_filter import (
     TAIPEI_ZONE,
     normalize_session,
@@ -39,38 +36,6 @@ logger = logging.getLogger(__name__)
 
 class DepartmentResolutionError(ValueError):
     """The selected department cannot be tied to one canonical DB record."""
-
-
-async def detect_department_result(case: TriageCase) -> DepartmentResult:
-    departments = _canonical_departments(fetch_active_departments())
-    logger.info(
-        "[DEPARTMENT] detection_called=true candidate_count=%s selected_dept_id=null "
-        "selected_parent=null selected_child=null validation_result=pending failure_reason=null",
-        len(departments),
-    )
-    child_names = [item["child_dept"] for item in departments if item["child_dept"]]
-    if not child_names:
-        raise DepartmentResolutionError("目前無法取得正式科別主資料，未建立科別判斷。")
-
-    project_smart_result = await detect_department_with_project_smart_adapter(case, departments)
-    if project_smart_result:
-        resolved = resolve_department_result(project_smart_result, departments)
-        if resolved is not None:
-            _log_department_result(resolved, "valid", None)
-            return resolved
-
-    try:
-        result = _rule_based_department(case, departments)
-    except DepartmentResolutionError as exc:
-        logger.warning(
-            "[DEPARTMENT] detection_called=true candidate_count=%s selected_dept_id=null "
-            "selected_parent=null selected_child=null validation_result=unresolved failure_reason=%s",
-            len(departments),
-            type(exc).__name__,
-        )
-        raise
-    _log_department_result(result, "valid_rule_fallback", None)
-    return result
 
 
 def resolve_department_result(
@@ -308,67 +273,6 @@ def _schedule_visit_type_tokens(value: object) -> set[str]:
     }
 
 
-def _rule_based_department(case: TriageCase, departments: list[dict]) -> DepartmentResult:
-    text = strip_negated_red_flags(_case_text(case))
-    available = {item["child_dept"] for item in departments}
-    requested = ""
-    if not case.patient_input.red_flags:
-        requested = _stored_requested_department(case, departments) or _requested_department(text, available)
-    if requested:
-        return _result_for_child(
-            requested,
-            departments,
-            confidence=0.82,
-            reason=[f"使用者明確表示想看 {requested}，且未偵測到陽性急迫症狀，優先尊重科別偏好"],
-        )
-
-    patient = case.patient_input
-    if (
-        patient.body_part
-        and "頭" in patient.body_part
-        and re.search(r"(?:頭.{0,5}(?:痛|疼)|(?:痛|疼).{0,5}頭)", patient.symptom or text)
-        and "一般內科" in available
-    ):
-        return _result_for_child(
-            "一般內科",
-            departments,
-            confidence=0.78,
-            reason=["症狀為頭部疼痛，依既有一般內科規則先行評估"],
-        )
-
-    candidates = [
-        (["膝", "關節", "骨", "走路", "爬樓梯"], "一般骨科", ["症狀位置偏向骨科或關節問題"]),
-        (["胸痛", "心悸", "心臟"], "心臟內科", ["症狀和胸痛或心臟相關"]),
-        (["頭暈", "頭痛", "咳", "發燒", "喉嚨", "感冒"], "一般內科", ["症狀可先由一般內科評估"]),
-        (["眼", "視力"], "眼科", ["症狀和眼部相關"]),
-        (["皮膚", "疹", "癢"], "皮膚科", ["症狀和皮膚相關"]),
-    ]
-    for keywords, dept, reasons in candidates:
-        if any(keyword in text for keyword in keywords) and (not available or dept in available):
-            return _result_for_child(
-                dept,
-                departments,
-                confidence=0.75,
-                reason=reasons,
-            )
-
-    raise DepartmentResolutionError("目前問診資料無法唯一判定正式科別，未套用預設科別。")
-
-
-def _log_department_result(
-    result: DepartmentResult,
-    validation_result: str,
-    failure_reason: str | None,
-) -> None:
-    logger.info(
-        "[DEPARTMENT] detection_called=true candidate_count=validated selected_dept_id=%s "
-        "validation_result=%s failure_reason=%s",
-        result.dept_id,
-        validation_result,
-        failure_reason,
-    )
-
-
 def _canonical_departments(departments: list[dict]) -> list[dict]:
     canonical: list[dict] = []
     for item in departments:
@@ -382,26 +286,6 @@ def _canonical_departments(departments: list[dict]) -> list[dict]:
             continue
         canonical.append({"dept_id": dept_id, "parent_dept": parent, "child_dept": child})
     return canonical
-
-
-def _result_for_child(
-    child: str,
-    departments: list[dict],
-    *,
-    confidence: float,
-    reason: list[str],
-) -> DepartmentResult:
-    matches = [item for item in departments if item["child_dept"] == child]
-    if len(matches) != 1:
-        raise DepartmentResolutionError(f"科別名稱「{child}」無法唯一對應正式 department_id。")
-    item = matches[0]
-    return DepartmentResult(
-        dept_id=item["dept_id"],
-        parentDept=item["parent_dept"],
-        childDept=item["child_dept"],
-        confidence=confidence,
-        reason=reason,
-    )
 
 
 def _build_recommendations(
@@ -580,7 +464,7 @@ def _department_basis_reason(case: TriageCase, slot: dict) -> str:
     child_dept = str(slot.get("child_dept") or "").strip()
     if not child_dept and case.department_result:
         child_dept = case.department_result.childDept
-    symptom = _short_text(strip_negated_red_flags(case.patient_input.symptom or case.patient_input.body_part or _case_text(case) or "問診內容"))
+    symptom = _short_text(case.patient_input.symptom or case.patient_input.body_part or "問診內容")
     evidence = [f"使用者症狀「{symptom}」"]
     if case.patient_input.body_part:
         evidence.append(f"不適部位「{_short_text(case.patient_input.body_part)}」")
@@ -694,47 +578,6 @@ def _date_sort_key(value) -> str:
 
 def _weekday_label(value) -> str:
     return schedule_weekday_label(value)
-
-
-def _case_text(case: TriageCase) -> str:
-    patient = case.patient_input
-    parts = [
-        patient.symptom,
-        patient.body_part or "",
-        patient.duration or "",
-        patient.severity or "",
-        patient.onset or "",
-        patient.department_context or "",
-        patient.requested_department_name or "",
-        " ".join(patient.accompanying_symptoms),
-        " ".join(patient.red_flags),
-    ]
-    return strip_negated_red_flags("；".join(part for part in parts if part))
-
-
-def _requested_department(text: str, available: set[str]) -> str:
-    if not available:
-        return ""
-    for child in sorted(available, key=len, reverse=True):
-        if not child:
-            continue
-        if any(marker in text for marker in (f"想看{child}", f"想看 {child}", f"要看{child}", f"要看 {child}", f"看{child}", f"看 {child}")):
-            return child
-    return ""
-
-
-def _stored_requested_department(case: TriageCase, departments: list[dict]) -> str:
-    requested_id = case.patient_input.requested_department_id
-    requested_name = case.patient_input.requested_department_name
-    if requested_id is None:
-        return ""
-    matches = [
-        item
-        for item in departments
-        if item["dept_id"] == requested_id
-        and (not requested_name or item["child_dept"] == requested_name)
-    ]
-    return matches[0]["child_dept"] if len(matches) == 1 else ""
 
 
 def _optional_int(value: object) -> int | None:

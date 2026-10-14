@@ -104,6 +104,15 @@ class PendingAnswerInterpretation(BaseModel):
     answer_assertion: Optional[EvidenceAssertion] = None
 
 
+class DepartmentPreferenceInterpretation(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    dept_id: int = Field(gt=0)
+    department_name: str = Field(min_length=1, max_length=100)
+    source_text: str = Field(min_length=1)
+    confidence: float = Field(ge=0.0, le=1.0, allow_inf_nan=False)
+
+
 class PriorAnswerReference(BaseModel):
     model_config = {"extra": "forbid"}
 

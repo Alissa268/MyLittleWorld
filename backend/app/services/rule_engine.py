@@ -3,43 +3,15 @@ from __future__ import annotations
 import math
 import re
 import logging
-from datetime import datetime, timedelta
 from typing import Any, Optional
-from zoneinfo import ZoneInfo
 
 from app.schemas import Message, SemanticExtraction, TriageCase, UrgencyResult
 from app.services.clarification_engine import clarification_prompt
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS, accepted
-from app.services.field_acceptance import (
-    DURATION_ONSET_PATTERN,
-    ai_normalized_value_valid,
-    has_symptom_semantics,
-    looks_like_department_request,
-    normalize_body_part,
-    normalized_value_valid,
-)
-from app.services.negation_utils import is_negated_keyword, strip_negated_red_flags
+from app.services.field_acceptance import ai_normalized_value_valid, normalized_value_valid
 from app.services.question_specs import QUESTION_SPECS, question_spec_for_field, select_question_variant
-from app.services.semantic_normalizer import (
-    NormalizationResult,
-    normalize_message,
-)
 
 logger = logging.getLogger(__name__)
-
-
-CHINESE_DURATION_NUMBERS = {
-    "一": 1,
-    "二": 2,
-    "兩": 2,
-    "三": 3,
-    "四": 4,
-    "五": 5,
-    "六": 6,
-    "七": 7,
-    "八": 8,
-    "九": 9,
-}
 
 
 RED_FLAG_QUESTION_KEY = "red_flags"
@@ -52,18 +24,8 @@ _SEMANTIC_STATUSES = {"available", "unavailable", "unknown", "partial", "ambiguo
 PREFERRED_DAYS_KEY = "preferred_days"
 PREFERRED_DATES_KEY = "preferred_dates"
 PREFERRED_SESSIONS_KEY = "preferred_sessions"
-ALL_WEEKDAYS = ["週一", "週二", "週三", "週四", "週五", "週六", "週日"]
-WEEKDAY_DAYS = ["週一", "週二", "週三", "週四", "週五"]
-WEEKEND_DAYS = ["週六", "週日"]
-ALL_SESSIONS = ["上午", "下午", "夜間"]
-ANY_SESSION_TERMS = [
-    "都可以", "我都可以", "隨便", "隨便安排", "都行", "皆可", "任何時段都可以",
-    "上午下午晚上都可以", "上午下午夜間都可以", "時間沒差", "什麼時段都行",
-]
-ANY_DAY_TERMS = [
-    "哪天都可以", "每天都可以", "日期都可以", "日期沒差", "日期都沒差",
-    "任何一天都行", "任何一天都可以",
-]
+
+
 def apply_user_message(
     case: TriageCase,
     message: str,
@@ -72,78 +34,10 @@ def apply_user_message(
     record_history: bool = True,
     apply_legacy_safety: bool = False,
 ) -> TriageCase:
+    """Record input only; all free-text understanding belongs to the Interpreter."""
     text = message.strip()
-    if not text:
-        return case
-
-    revision_mode = case.conversation_state.revision_mode
-    if record_history:
+    if text and record_history:
         case.history_records.append(Message(role="user", content=text))
-    if semantic_first:
-        return case
-    patient = case.patient_input
-    symptom_value = text if has_symptom_semantics(text) else None
-    if revision_mode and _looks_like_symptom_revision(text):
-        _reset_symptom_dependent_fields(case)
-    semantic_result = normalize_message(text, case.conversation_state.last_question_key)
-    _apply_semantic_result(case, semantic_result)
-
-    if revision_mode and _looks_like_symptom_revision(text) and symptom_value:
-        patient.symptom = symptom_value
-        case.department_result = None
-    elif not patient.symptom and symptom_value:
-        patient.symptom = symptom_value
-
-    body_part = _extract_body_part(text)
-    if body_part and (
-        revision_mode
-        or not patient.body_part
-        or _is_more_specific_body_part(body_part, patient.body_part)
-    ):
-        patient.body_part = body_part
-        if revision_mode:
-            case.department_result = None
-
-    duration = _extract_duration(text)
-    if duration:
-        patient.duration = duration
-        _consume_field(case, "duration", "available", 0.9)
-
-    severity = _extract_severity(text)
-    if severity:
-        patient.severity = severity
-
-    onset = _extract_onset(text)
-    if onset:
-        patient.onset = onset
-
-    for symptom in _extract_accompanying_symptoms(text):
-        if symptom not in patient.accompanying_symptoms:
-            patient.accompanying_symptoms.append(symptom)
-
-    availability = case.availability
-
-    _refresh_collected_fields(case)
-    if revision_mode:
-        case.confirmed = False
-        case.recommendation_generated = False
-        case.script_generated = False
-        case.selected_recommendation_id = None
-        case.conversation_state.confirmed = False
-        case.conversation_state.awaiting_confirmation = False
-        case.conversation_state.revision_mode = False
-    logger.info(
-        "apply_user_message case_id=%s history_len=%s collected_fields=%s red_flag_count=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s",
-        case.case_id,
-        len(case.history_records),
-        patient.collected_fields,
-        len(patient.red_flags),
-        patient.red_flags_checked,
-        case.conversation_state.last_question_key,
-        case.conversation_state.consumed_fields,
-        case.conversation_state.question_attempts,
-        case.conversation_state.field_statuses,
-    )
     return case
 
 
@@ -275,22 +169,6 @@ def _question_text_for(case: TriageCase, field: str) -> str:
 
 def _question_attempts(case: TriageCase, field: str) -> int:
     return case.conversation_state.question_attempts.get(field, 0)
-
-
-def _apply_semantic_result(case: TriageCase, result: NormalizationResult) -> None:
-    patient = case.patient_input
-    if result.severity is not None:
-        patient.severity_normalized = result.severity
-        if result.severity.severity_level and accepted(result.severity.confidence, result.severity.semantic_status):
-            patient.severity = result.severity.severity_level
-
-    for extraction in result.extractions:
-        _record_semantic_extraction(case, extraction)
-        _apply_semantic_extraction(case, extraction)
-
-    if result.extractions:
-        case.semantic_extractions.extend(result.extractions)
-        case.semantic_extractions = case.semantic_extractions[-50:]
 
 
 def apply_semantic_extractions(
@@ -494,21 +372,11 @@ def _apply_semantic_extraction(case: TriageCase, extraction: SemanticExtraction,
         text = str(extraction.normalized_value or "").strip()
         if extraction.field == "symptom" and extraction.extractor.startswith("ai"):
             text = extraction.source_text.strip()
-        if extraction.field == "body_part" and any(
-            term in text for term in ("胃部", "腸胃", "胃")
-        ):
-            text = normalize_body_part(text) or text
         current = getattr(case.patient_input, extraction.field)
-        more_specific_batch_body_part = (
-            extraction.field == "body_part"
-            and extraction.extractor == "deterministic_batch"
-            and _is_more_specific_body_part(text, current)
-        )
         if text and (
             case.conversation_state.revision_mode
             or replace_existing
             or not current
-            or more_specific_batch_body_part
         ):
             setattr(case.patient_input, extraction.field, text)
             _consume_field(case, extraction.field, extraction.semantic_status, extraction.confidence)
@@ -565,48 +433,6 @@ def _merge_list(target: list[str], values: list[str]) -> None:
     for value in values:
         if value not in target:
             target.append(value)
-
-
-def _looks_like_symptom_revision(text: str) -> bool:
-    if _looks_like_time_preference_revision(text):
-        return False
-    if looks_like_department_request(text) and not has_symptom_semantics(text):
-        return False
-    if any(keyword in text for keyword in ["痛", "疼", "不舒服", "麻", "腫", "酸", "癢", "咳", "喘", "暈", "發燒"]):
-        return True
-    if any(keyword in text for keyword in ["膝", "腰", "背", "肩", "手", "腳", "頭", "胸", "腹", "胃", "喉", "皮膚"]):
-        return True
-    if any(keyword in text for keyword in ["症狀", "部位", "其實是", "不是"]):
-        return True
-    return False
-
-
-def _looks_like_time_preference_revision(text: str) -> bool:
-    return any(keyword in text for keyword in ["時段", "時間", "上午", "下午", "夜間", "晚上", "早上", "週", "星期", "禮拜"])
-
-
-def _reset_symptom_dependent_fields(case: TriageCase) -> None:
-    patient = case.patient_input
-    patient.duration = None
-    patient.severity = None
-    patient.onset = None
-    patient.accompanying_symptoms = []
-    patient.department_context = None
-    patient.red_flags = []
-    patient.red_flags_checked = False
-    patient.red_flags_status = "not_checked"
-    patient.severity_normalized = type(patient.severity_normalized)()
-    patient.urgency_normalized = type(patient.urgency_normalized)()
-    case.ttas_evidence = []
-    case.ttas_result = type(case.ttas_result)()
-    for field in [RED_FLAG_QUESTION_KEY, "duration", "severity"]:
-        if field in case.conversation_state.consumed_fields:
-            case.conversation_state.consumed_fields.remove(field)
-        if field in case.conversation_state.asked_fields:
-            case.conversation_state.asked_fields.remove(field)
-        case.conversation_state.question_attempts.pop(field, None)
-        case.conversation_state.field_statuses.pop(field, None)
-        case.conversation_state.field_confidence.pop(field, None)
 
 
 def _mark_question_asked(case: TriageCase, question_key: str) -> None:
@@ -669,218 +495,6 @@ def _sync_consumed_fields(case: TriageCase) -> None:
             availability.semantic_status.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_statuses.get(PREFERRED_SESSIONS_KEY),
             availability.confidence.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_confidence.get(PREFERRED_SESSIONS_KEY),
         )
-
-
-def _extract_body_part(text: str) -> Optional[str]:
-    text = strip_negated_red_flags(text)
-    if looks_like_department_request(text) and not has_symptom_semantics(text):
-        return None
-    return normalize_body_part(text)
-
-
-def _is_more_specific_body_part(candidate: str, current: str | None) -> bool:
-    """Allow a precise child location to refine, but never degrade, a broad one."""
-    refinement_parents = {
-        "大腿": {"腿"},
-        "小腿": {"腿"},
-        "左腿": {"腿"},
-        "右腿": {"腿"},
-        "左大腿": {"腿", "左腿", "大腿"},
-        "右大腿": {"腿", "右腿", "大腿"},
-        "左小腿": {"腿", "左腿", "小腿"},
-        "右小腿": {"腿", "右腿", "小腿"},
-        "腳踝": {"腳"},
-    }
-    normalized_candidate = str(candidate or "").strip()
-    normalized_current = str(current or "").strip()
-    return bool(
-        normalized_candidate
-        and normalized_current
-        and normalized_current in refinement_parents.get(normalized_candidate, set())
-    )
-
-
-def _extract_duration(text: str) -> Optional[str]:
-    if "一年半" in text:
-        return "18個月"
-    if "半年" in text:
-        return "6個月"
-    match = re.search(r"(\d+\s*(?:天|週|周|個月|年))", text)
-    if match:
-        return match.group(1).replace(" ", "")
-    match = re.search(r"(\d+)\s*(?:個)?(?:禮拜|星期)", text)
-    if match:
-        return f"{int(match.group(1))}週"
-    if "好幾天" in text:
-        return "好幾天"
-    if "幾天" in text:
-        return "幾天"
-    if "半天" in text:
-        return "半天"
-    if re.search(r"好幾(?:個)?(?:禮拜|星期)", text):
-        return "好幾週"
-    if re.search(r"幾(?:個)?(?:禮拜|星期)", text):
-        return "幾週"
-    match = re.search(r"([一二兩三四五六七八九十]+)\s*(?:個)?(?:禮拜|星期)", text)
-    if match:
-        amount = _parse_chinese_duration_number(match.group(1))
-        if amount is not None:
-            return f"{amount}週"
-    match = re.search(r"([一二兩三四五六七八九十]+)\s*(天|週|周|個月|年)", text)
-    if match:
-        amount = _parse_chinese_duration_number(match.group(1))
-        if amount is not None:
-            unit = match.group(2)
-            if unit == "周":
-                unit = "週"
-            return f"{amount}{unit}"
-    onset_match = DURATION_ONSET_PATTERN.search(text)
-    if onset_match:
-        matched = onset_match.group(0)
-        if "昨天" in matched:
-            return "1天"
-        if "今天" in matched:
-            return "1天內"
-        if "前天" in matched:
-            return "2天"
-        if "上週" in matched:
-            return "從上週開始"
-        if "上個月" in matched:
-            return "從上個月開始"
-        for daypart in ("早上", "上午", "中午", "下午", "晚上", "半夜"):
-            if daypart in matched:
-                return f"從{daypart}開始"
-    return None
-
-
-def _parse_chinese_duration_number(value: str) -> Optional[int]:
-    if value in CHINESE_DURATION_NUMBERS:
-        return CHINESE_DURATION_NUMBERS[value]
-    if value == "十":
-        return 10
-    if "十" in value:
-        tens_text, ones_text = value.split("十", 1)
-        tens = CHINESE_DURATION_NUMBERS.get(tens_text, 1 if tens_text == "" else None)
-        ones = CHINESE_DURATION_NUMBERS.get(ones_text, 0 if ones_text == "" else None)
-        if tens is not None and ones is not None:
-            return tens * 10 + ones
-    return None
-
-
-def _extract_severity(text: str) -> Optional[str]:
-    if any(
-        word in text
-        for word in [
-            "沒有影響",
-            "正常生活",
-            "正常作息",
-            "不影響作息",
-            "不影響日常生活",
-            "不影響睡眠",
-            "還能正常上班",
-            "還能正常走路",
-            "沒什麼影響",
-            "沒有很嚴重",
-        ]
-    ):
-        return "輕微"
-    if any(word in text for word in ["很痛", "劇痛", "嚴重", "影響睡覺", "影響睡眠", "睡不著", "痛醒", "無法工作", "無法走路"]):
-        return "很痛 / 影響明顯"
-    if any(word in text for word in ["明顯", "很不舒服", "走路困難", "爬樓梯很吃力"]):
-        return "明顯"
-    if any(word in text for word in ["中等", "中度", "還可以忍"]):
-        return "中度"
-    if any(word in text for word in ["輕微", "有點痛", "一點痛", "不太影響", "還好但"]):
-        return "輕微"
-    return None
-
-
-def _extract_onset(text: str) -> Optional[str]:
-    if any(word in text for word in ["突然", "突發", "一下子"]):
-        return "突發"
-    if any(word in text for word in ["慢慢", "漸進", "越來越"]):
-        return "漸進"
-    return None
-
-
-def _extract_accompanying_symptoms(text: str) -> list[str]:
-    symptoms = []
-    symptom_text = strip_negated_red_flags(text)
-    candidates = ["爬樓梯吃力", "走路困難", "發燒", "紅腫熱痛", "頭暈", "噁心", "麻", "無力"]
-    for candidate in candidates:
-        if candidate in symptom_text and not is_negated_keyword(symptom_text, candidate):
-            symptoms.append(candidate)
-    return symptoms
-
-
-def _normalize_weekday_text(text: str) -> str:
-    normalized = text
-    replacements = {
-        "星期一": "週一",
-        "星期二": "週二",
-        "星期三": "週三",
-        "星期四": "週四",
-        "星期五": "週五",
-        "星期六": "週六",
-        "星期日": "週日",
-        "星期天": "週日",
-        "禮拜一": "週一",
-        "禮拜二": "週二",
-        "禮拜三": "週三",
-        "禮拜四": "週四",
-        "禮拜五": "週五",
-        "禮拜六": "週六",
-        "禮拜日": "週日",
-        "禮拜天": "週日",
-        "周一": "週一",
-        "周二": "週二",
-        "周三": "週三",
-        "周四": "週四",
-        "周五": "週五",
-        "周六": "週六",
-        "周日": "週日",
-        "周天": "週日",
-    }
-    for source, target in replacements.items():
-        normalized = normalized.replace(source, target)
-    if "明天" in text:
-        tomorrow = _taipei_today() + timedelta(days=1)
-        normalized = f"{normalized} {ALL_WEEKDAYS[tomorrow.weekday()]}"
-    if "大後天" in text:
-        three_days_later = _taipei_today() + timedelta(days=3)
-        normalized = f"{normalized} {ALL_WEEKDAYS[three_days_later.weekday()]}"
-    if "後天" in text.replace("大後天", ""):
-        after_tomorrow = _taipei_today() + timedelta(days=2)
-        normalized = f"{normalized} {ALL_WEEKDAYS[after_tomorrow.weekday()]}"
-    return normalized
-
-
-def _is_any_days_answer(text: str, last_question_key: Optional[str]) -> bool:
-    if any(term in text for term in ["每天", "整週", "全週", *ANY_DAY_TERMS]):
-        return True
-    return (
-        last_question_key == PREFERRED_DAYS_KEY
-        and any(term in text for term in ["都可以", "都有空", "都行", "皆可"])
-        and not any(term in text for term in ["前半", "後半"])
-    )
-
-
-def _taipei_today():
-    return datetime.now(ZoneInfo("Asia/Taipei")).date()
-
-
-def _weekday_range(start: str, end: str) -> list[str]:
-    if start not in ALL_WEEKDAYS or end not in ALL_WEEKDAYS:
-        return []
-    start_index = ALL_WEEKDAYS.index(start)
-    end_index = ALL_WEEKDAYS.index(end)
-    if start_index <= end_index:
-        return ALL_WEEKDAYS[start_index : end_index + 1]
-    return [*ALL_WEEKDAYS[start_index:], *ALL_WEEKDAYS[: end_index + 1]]
-
-
-def _unique(items: list[str]) -> list[str]:
-    return list(dict.fromkeys(items))
 
 
 def _refresh_collected_fields(case: TriageCase) -> None:

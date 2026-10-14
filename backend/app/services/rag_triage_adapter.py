@@ -9,7 +9,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.schemas import (
-    DepartmentResult,
+    DepartmentPreferenceInterpretation,
     DialogueActInterpretation,
     PendingAnswerInterpretation,
     PriorAnswerReference,
@@ -27,7 +27,7 @@ from app.services.conversation_service import (
 )
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.field_acceptance import ai_normalized_value_valid
-from app.services.negation_utils import strip_negated_red_flags
+from app.services.department_preference_service import accept_department_preference, active_department_candidates
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
 from app.services.ttas_rule_loader import TTASRuleLoadError, load_ttas_rules
 from app.services.schedule_filter import TAIPEI_ZONE
@@ -57,6 +57,7 @@ class RagTriageSuggestion:
     interpretation_complete: bool = True
     dialogue_act: DialogueActInterpretation | None = None
     prior_answer_reference: PriorAnswerReference | None = None
+    department_preference: DepartmentPreferenceInterpretation | None = None
 
 
 async def refine_case_with_ai(
@@ -216,6 +217,7 @@ async def refine_case_with_ai(
     if time_preferences:
         apply_time_preferences(case.availability, time_preferences)
 
+    department_preference = accept_department_preference(case, data.get("department_preference"), user_sources)
     reply = data.get("reply")
     return RagTriageSuggestion(
         triage=None,
@@ -226,6 +228,7 @@ async def refine_case_with_ai(
         time_preferences=time_preferences,
         dialogue_act=dialogue_act,
         prior_answer_reference=prior_reference,
+        department_preference=department_preference,
     )
 
 
@@ -288,8 +291,8 @@ def _turn_interpretation_rejection_reason(
     ):
         return "correction_without_grounded_evidence"
     if dialogue_act.act == "new_information" and not (
-        any(_is_accepted_clinical_evidence(item) for item in semantic_extractions)
-        or ttas_evidence or time_preferences
+        any(accepted(item.confidence, item.semantic_status) for item in semantic_extractions)
+        or ttas_evidence or time_preferences or data.get("department_preference") is not None
     ):
         return "new_information_without_grounded_evidence"
     if pending_intent is not None and dialogue_act.act == "answer" and pending_answer is None:
@@ -353,75 +356,6 @@ def _is_accepted_clinical_evidence(extraction: SemanticExtraction) -> bool:
     return accepted(extraction.confidence, extraction.semantic_status)
 
 
-async def detect_department_with_ai(
-    case: TriageCase,
-    departments: list[dict[str, Any]],
-) -> DepartmentResult | None:
-    """Pick a department from the DB-backed department list.
-
-    This ports the useful rag_demo idea into backend service form: the AI sees
-    the active DB department names and must return one exact child department.
-    Invalid or invented departments are rejected so the caller can fall back to
-    deterministic rules.
-    """
-    if not departments or not _ai_available():
-        logger.info(
-            "rag_triage_adapter department skipped case_id=%s has_departments=%s ai_available=%s",
-            case.case_id,
-            bool(departments),
-            _ai_available(),
-        )
-        return None
-
-    candidates = [item for item in departments if item.get("dept_id") is not None and item.get("child_dept")]
-    if not candidates:
-        return None
-
-    prompt = _build_department_prompt(case, candidates)
-    try:
-        raw = await complete_prompt(prompt)
-        logger.debug(
-            "rag_triage_adapter department response received case_id=%s chars=%s",
-            case.case_id,
-            len(raw),
-        )
-        data = _parse_json_object(raw)
-    except Exception as exc:
-        logger.warning(
-            "rag_triage_adapter department parse failed case_id=%s error_type=%s",
-            case.case_id,
-            type(exc).__name__,
-        )
-        return None
-
-    dept_id = _optional_int(data.get("dept_id"))
-    matches = [
-        item for item in candidates
-        if _optional_int(item.get("dept_id")) == dept_id
-    ]
-    if len(matches) != 1:
-        logger.warning(
-            "rag_triage_adapter rejected department case_id=%s dept_id=%s reason=dept_id_not_in_candidates",
-            case.case_id,
-            dept_id,
-        )
-        return None
-
-    selected = matches[0]
-    reasons = [str(item) for item in data.get("reason", []) if str(item).strip()]
-    if not reasons:
-        reasons = ["AI 依據問診內容從資料庫科別清單中選出此科別"]
-    reasons.append("來源：rag_demo adapter，已限制於後端 DB 科別清單")
-
-    return DepartmentResult(
-        dept_id=int(selected["dept_id"]),
-        parentDept=str(selected["parent_dept"]),
-        childDept=str(selected["child_dept"]),
-        confidence=float(data.get("confidence", 0.0) or 0.0),
-        reason=reasons,
-    )
-
-
 def merge_ai_next_question(case: TriageCase, suggestion: RagTriageSuggestion | None) -> bool:
     if suggestion is None or suggestion.triage is None:
         return False
@@ -460,44 +394,6 @@ def merge_ai_next_question(case: TriageCase, suggestion: RagTriageSuggestion | N
 
 def _ai_available() -> bool:
     return runtime_ai_available(get_settings())
-
-
-def _build_department_prompt(case: TriageCase, departments: list[dict[str, Any]]) -> str:
-    dept_list = json.dumps(
-        [
-            {
-                "dept_id": item.get("dept_id"),
-                "parent_dept": item.get("parent_dept"),
-                "child_dept": item.get("child_dept"),
-            }
-            for item in departments
-        ],
-        ensure_ascii=False,
-        indent=2,
-    )
-    symptom_text = _case_text(case)
-    candidate_names = {str(item.get("child_dept") or "").strip() for item in departments}
-    orthopedic_guidance = ""
-    if {"一般骨科", "骨科"}.issubset(candidate_names):
-        orthopedic_guidance = """
-
-骨科候選規則：一般肌肉骨骼、膝蓋、關節、走路或運動傷害症狀，若沒有兒童或其他細分依據，
-優先選正式候選中的「一般骨科」；只有資料明確支持其他候選時才選其他骨科相關 dept_id。"""
-    return f"""你是台灣醫院掛號分診助理。你只能從下列資料庫科別清單中選一個科別，不可以自行創造科別。
-
-科別清單：
-{dept_list}
-{orthopedic_guidance}
-
-病患資料：
-{symptom_text}
-
-請只輸出 JSON，不要輸出其他文字：
-{{
-  "dept_id": 1234,
-  "confidence": 0.0,
-  "reason": ["理由1", "理由2"]
-}}"""
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
@@ -629,29 +525,6 @@ def _semantic_value_valid(field: str, value: Any, status: str, source_text: str)
     return ai_normalized_value_valid(field, value, status, source_text)
 
 
-def _optional_int(value: Any) -> int | None:
-    if value is None:
-        return None
-    try:
-        return int(value)
-    except (TypeError, ValueError):
-        return None
-
-
-def _case_text(case: TriageCase) -> str:
-    patient = case.patient_input
-    parts = [
-        patient.symptom,
-        patient.body_part or "",
-        patient.duration or "",
-        patient.severity or "",
-        patient.onset or "",
-        " ".join(patient.accompanying_symptoms),
-        " ".join(patient.red_flags),
-    ]
-    return strip_negated_red_flags("；".join(part for part in parts if part))
-
-
 def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_reason: str) -> str:
     return (
         original_prompt
@@ -659,7 +532,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_rea
         f" rejection_reason={rejection_reason}。"
         "請重新解析同一份 current_user_text；不要改寫患者事實，也不要控制 workflow。"
         "這次必須完整輸出 semantic_extractions、pending_answer、ttas_evidence、time_preferences、"
-        "dialogue_act、prior_answer_reference 六個頂層欄位；不適用時用 [] 或 null，不得省略。"
+        "dialogue_act、prior_answer_reference、department_preference 七個頂層欄位；不適用時用 [] 或 null，不得省略。"
         "若 dialogue_act=request_explanation，pending_answer 可以為 null，且不得捏造 medical evidence。"
         "若 dialogue_act=correction，必須輸出本輪逐字原文可支持的更正 evidence；"
         "correction act 本身不能取代 evidence。"
@@ -713,7 +586,7 @@ def _build_symptom_collection_prompt(
 4. 若信心不足，設定 needs_clarification=true 與 follow_up_reason。
 5. 只輸出使用者本輪實際表達的欄位；若本輪明確修正舊值，可輸出新值，不得猜測。
   6. 不得輸出 red_flags。急迫性只能抽成 ttas_evidence，由 Backend 依正式規則判斷。
-  7. 不要輸出 patient_input、triage、TTAS level、urgency_score、warning_required、red_flags_checked、next_question、stage、科別、確認狀態或掛號資訊。
+  7. 不要輸出 patient_input、triage、TTAS level、urgency_score、warning_required、red_flags_checked、next_question、stage、科別判斷、確認狀態或掛號資訊；明確指定科別只能使用 department_preference。
 8. duration 必須正規化為「數字+天／週／個月／年」，例如 3天、2週、6個月、1年；半年轉為 6個月，一年半轉為 18個月。
 9. source_text 必須是直接支持該 extraction 的最短連續逐字原文（患者原話），不可改寫；不得包含與該 extraction 無關的前後症狀或其他子句。若 assertion=absent，source_text 應保留直接表達否定的最短原文，不得移除否定詞。
 10. symptom 與 accompanying_symptoms 只要 normalized_value 含有 medical concept，就必須輸出 assertion：present 表示患者陳述存在、absent 表示患者否認、uncertain 表示患者不確定；其他欄位可省略 assertion 或輸出 null。
@@ -738,7 +611,11 @@ def _build_symptom_collection_prompt(
   27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、unknown、off_topic。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
   28. 新增 prior_answer_reference，預設為 null。只有 dialogue_act=claims_already_answered、有 active pending intent 且不是 safety_screen 時，才可引用 prior_accepted_semantic_evidence 中真正回答該 pending question 的既有證據；只輸出 answered_intent、answer_source_text、answer_confidence。answered_intent 必須完全等於 pending intent，source 必須逐字等於一筆 prior accepted extraction 的 source_text，confidence 為 0 到 1。不得只引用 raw history、不得引用本輪剛抽的新證據、不得把 uncertain 當已回答；找不到可靠答案就保持 null。此 reference 不代表科別已收斂，也絕不可完成 safety screen。
   29. dialogue_act=correction 時，仍須逐欄抽出本輪直接支持的更正 evidence；若修正 medical concept，分別輸出舊概念的 grounded absent 與新概念的 grounded present，不得刪掉無關症狀。correction act 本身不會改值；Backend 只接受 grounded、高信心且 schema 合法的本輪欄位。不得輸出 revision_mode 或其他 workflow 指令。
-  30. 每次回覆都必須包含六個頂層欄位：semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act、prior_answer_reference。沒有內容時分別使用 [] 或 null，不得省略。dialogue_act 一律必須輸出。
+  30. 每次回覆都必須包含七個頂層欄位：semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act、prior_answer_reference、department_preference。沒有內容時分別使用 [] 或 null，不得省略。dialogue_act 一律必須輸出。
+
+31. department_preference 預設為 null，只有本輪明確要求、指定或改指定科別才輸出；不得由症狀推論偏好，不可塞進 symptom。僅含 dept_id（整數）、department_name（同 ID 的正式名稱）、source_text（本輪連續逐字原文）、confidence（有限 0～1）。只能選下方 active SQL Department 中唯一存在的正式 ID/name pair；不得別名補救或發明 ID。這只是偏好，不能跳過安全檢查或決定科別結果、stage、confirmed。無候選或無明確要求時必須 null。
+目前 active SQL Department：
+{json.dumps(active_department_candidates(), ensure_ascii=False, indent=2)}
 
 對話行為正例 A（要求解釋，不是 medical answer）：
 current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀況？」
@@ -752,6 +629,7 @@ current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀�
     "source_text": "我有點搞不懂",
     "confidence": 0.98
   }},
+  "department_preference": null,
   "prior_answer_reference": null
 }}
 
@@ -808,6 +686,7 @@ current_user_text:「我剛剛講錯了，主要不是頭暈，是頭痛，右�
     "source_text": "我剛剛講錯了",
     "confidence": 0.99
   }},
+  "department_preference": null,
   "prior_answer_reference": null
 }}
 
@@ -885,6 +764,7 @@ time_preferences 應輸出：
     "source_text": "沒有聽力下降",
     "confidence": 0.98
   }},
+  "department_preference": null,
   "prior_answer_reference": null
 }}
 
@@ -929,6 +809,7 @@ current_user_text:「剛剛清潔劑濺到我的右眼，現在眼睛灼痛。�
     "source_text": "眼睛灼痛",
     "confidence": 0.99
   }},
+  "department_preference": null,
   "prior_answer_reference": null
 }}
 
@@ -965,5 +846,6 @@ current_user_text:「我的右眼很痛。」
     "source_text": "右眼很痛",
     "confidence": 0.99
   }},
+  "department_preference": null,
   "prior_answer_reference": null
 }}"""

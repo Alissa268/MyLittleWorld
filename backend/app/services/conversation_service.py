@@ -23,17 +23,6 @@ SAFETY_UNRESOLVED_REPLY = (
 )
 SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
 SAFETY_PENDING_INTENT = "safety_screen"
-# Retained only for import compatibility and tests asserting they never reach patients.
-FALLBACK_QUESTIONS = (
-    "可以再描述一下目前最困擾你的不舒服，以及它什麼情況下會變嚴重嗎？",
-    "剛才提到的不舒服，還有什麼變化或細節是你覺得重要的？",
-    "可以補充目前症狀發生時的感受，或回答上一個追問嗎？",
-)
-NEUTRAL_PENDING_RETRIES = (
-    "可以再補充和剛才問題相關的症狀細節嗎？",
-    "可以換個方式描述剛才問題所詢問的具體情況嗎？",
-    "請再說明一下和剛才問題相關的症狀變化或感受。",
-)
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
@@ -241,6 +230,7 @@ async def request_clarification(
     initial_rejection = None
     for attempt in range(2):
         proposal = None
+        raw = None
         try:
             raw = await complete_runtime_json(
                 prompt, purpose="conversation_clarification" if attempt == 0 else "conversation_clarification_repair",
@@ -248,19 +238,21 @@ async def request_clarification(
         except Exception as exc:
             rejection = "provider_timeout" if isinstance(exc, TimeoutError) else "provider_failure"
             logger.warning("clarification failed case_id=%s reason=%s error_type=%s", case.case_id, rejection, type(exc).__name__)
-            break
-        try:
-            proposal = json.loads(str(raw).strip())
-        except (TypeError, ValueError):
-            rejection = "invalid_json"
+            if not (safety_planning and state.safety_answer_validation == "request_explanation"):
+                break
         else:
-            if classify_answer_fields and isinstance(proposal, dict):
-                fields = tuple(proposal.get(key) for key in (
-                    "answered_intent", "answer_source_text", "answer_status", "answer_confidence",
-                ))
-                if _grounded_clarification_answer(*fields, state.pending_clarification_intent, user_sources):
-                    compatibility_answer = fields
-            rejection = _question_rejection(case, proposal, required_intent, safety_planning)
+            try:
+                proposal = json.loads(str(raw).strip())
+            except (TypeError, ValueError):
+                rejection = "invalid_json"
+            else:
+                if classify_answer_fields and isinstance(proposal, dict):
+                    fields = tuple(proposal.get(key) for key in (
+                        "answered_intent", "answer_source_text", "answer_status", "answer_confidence",
+                    ))
+                    if _grounded_clarification_answer(*fields, state.pending_clarification_intent, user_sources):
+                        compatibility_answer = fields
+                rejection = _question_rejection(case, proposal, required_intent, safety_planning)
         logger.info(
             "clarification proposal case_id=%s accepted=%s rejection_reason=%s repair_attempted=%s",
             case.case_id, rejection is None, rejection, bool(attempt),
@@ -335,7 +327,7 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
         return "invalid_information_need"
     if _GENERIC_CLARIFICATION_QUESTION.fullmatch(question.strip()):
         return "generic_question"
-    if question.strip() in (*FALLBACK_QUESTIONS, *NEUTRAL_PENDING_RETRIES):
+    if re.search(r"剛才問題|上一個追問", question):
         return "generic_retry"
     if any(item.role == "assistant" and item.content == question.strip() for item in case.history_records):
         return "duplicate_question"
@@ -542,8 +534,12 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
     if not question or any(m.role == "assistant" and m.content == question for m in case.history_records):
-        question = SAFETY_RETRY_REPLY
-        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+        if state.safety_answer_validation == "request_explanation":
+            question = TECHNICAL_CLARIFICATION_REPLY
+            state.reply_source = "TECHNICAL_FALLBACK"
+        else:
+            question = SAFETY_RETRY_REPLY
+            state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     else:
         state.reply_source = suggestion.reply_source
     state.clarification_status = "safety_check"

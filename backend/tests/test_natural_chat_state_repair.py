@@ -211,7 +211,8 @@ def test_invalid_dialogue_act_becomes_unknown(proposal):
     provider = AsyncMock(return_value=json.dumps(dict(semantic_extractions=[], dialogue_act=proposal)))
     with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
         result = asyncio.run(adapter.refine_case_with_ai(clinical_case(), user_sources=["不懂"]))
-    assert result.dialogue_act.act == "unknown"
+    assert adapter._dialogue_act_from_ai(proposal, ["不懂"]).act == "unknown"
+    assert result.interpretation_complete is False
     assert not clinical_case().conversation_state.confirmed
 
 
@@ -470,7 +471,7 @@ def test_second_b2_invalid_prior_reference_preserves_pending_and_evidence(runtim
     elif change == "wrong_intent":
         reference["answered_intent"] = "wrong_intent"
     elif change == "wrong_act":
-        kind = "new_information"
+        kind = "request_explanation"
     elif change == "ungrounded_history":
         case.history_records = case.history_records[:1] + case.history_records[-1:]
     elif change == "extra_authority":
@@ -543,8 +544,9 @@ def test_second_c1_collecting_correction_replaces_scalar_and_invalidates_before_
     interpreter.return_value = json.dumps(correction_payload())
     planner.return_value = json.dumps({**plan("這次頭痛的感覺是怎樣的？", "headache_quality"),
                                       "information_needs": ["頭痛的感受"]})
-    with patch("app.services.rule_engine._looks_like_symptom_revision", side_effect=AssertionError("no raw correction parser")):
-        result = client.post("/chat", json=dict(case_id=case.case_id, message=CORRECTION_TEXT)).json()
+    from app.services import rule_engine
+    assert not hasattr(rule_engine, "_looks_like_symptom_revision")
+    result = client.post("/chat", json=dict(case_id=case.case_id, message=CORRECTION_TEXT)).json()
     department.assert_awaited_once()
     assert result["triage_case"]["patient_input"]["symptom"] == "頭痛"
     assert result["triage_case"]["availability"]["preferred_sessions"] == ["下午"]
@@ -816,7 +818,7 @@ def test_control_invalid_explanation_act_does_not_get_attempt_exemption(runtime,
     planner.return_value = json.dumps(safety_explanation_plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，你在問什麼？")).json()
     assert result["conversation_state"]["safety_answer_attempts"] == 2
-    assert '"act": "unknown"' in planner.await_args.args[0]
+    planner.assert_not_awaited()  # Invalid interpretation stays fail-closed, including after repair.
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
     department.assert_not_awaited()
 

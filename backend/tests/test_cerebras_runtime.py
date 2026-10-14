@@ -6,9 +6,8 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from app.schemas import BatchAnswer, TriageCase, VisitType
-from app.services import ai_service, batch_extraction_service, project_smart_department_adapter
+from app.services import ai_service, batch_extraction_service
 from app.services.batch_extraction_service import extract_batch_answers
-from app.services.project_smart_department_adapter import detect_department_with_project_smart_adapter
 
 
 def _settings(*, key: str = "cerebras-test-key") -> SimpleNamespace:
@@ -68,228 +67,31 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(ai_service.RUNTIME_AI_MODEL, "gpt-oss-120b")
 
-    async def test_deterministic_semantic_answer_uses_zero_llm_calls(self):
-        case = TriageCase(case_id="deterministic", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(side_effect=AssertionError("deterministic answer called LLM"))
-        with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            outcome = await extract_batch_answers(
-                case,
-                [BatchAnswer(key="preferred_days", answer="星期五上午")],
-            )
-
-        provider.assert_not_awaited()
-        self.assertFalse(outcome.ai_attempted)
-        self.assertEqual(case.availability.preferred_days, ["週五"])
-        self.assertEqual(case.availability.preferred_sessions, ["上午"])
-
-    async def test_unresolved_semantic_answer_uses_exactly_one_cerebras_call(self):
+    async def test_keyed_free_text_uses_shared_cerebras_interpreter(self):
+        from app.services import rag_triage_adapter
         case = TriageCase(case_id="semantic", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "extractions": [
-                        {
-                            "field": "body_part",
-                            "normalized_value": "肩膀",
-                            "semantic_status": "available",
-                            "confidence": 0.91,
-                            "source_text": "不知道是不是肩膀附近",
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            )
-        )
+        provider = AsyncMock(return_value=json.dumps({
+            "semantic_extractions": [{"field": "duration", "normalized_value": "1週",
+                "source_text": "上禮拜", "semantic_status": "available", "confidence": 0.99}],
+            "pending_answer": None, "ttas_evidence": [], "time_preferences": [],
+            "prior_answer_reference": None, "department_preference": None,
+            "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
+        }))
         with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            outcome = await extract_batch_answers(
-                case,
-                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
-            )
-
+            rag_triage_adapter, "_ai_available", return_value=True,
+        ), patch.object(rag_triage_adapter, "complete_prompt", provider):
+            result = await extract_batch_answers(case, [BatchAnswer(key="duration", answer="上禮拜開始")])
         provider.assert_awaited_once()
-        self.assertTrue(outcome.ai_attempted)
-        self.assertEqual(case.patient_input.body_part, "肩膀")
+        self.assertEqual(case.patient_input.duration, "1週")
+        self.assertTrue(result.ai_attempted)
 
-    async def test_invalid_semantic_field_is_rejected(self):
-        case = TriageCase(case_id="invalid-field", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "extractions": [
-                        {
-                            "field": "stage",
-                            "normalized_value": "recommending",
-                            "semantic_status": "available",
-                            "confidence": 1.0,
-                            "source_text": "不知道是不是肩膀附近",
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            )
-        )
-        original_stage = case.conversation_state.stage
+    async def test_provider_timeout_is_fail_closed_without_semantic_fallback(self):
+        from app.services import rag_triage_adapter
+        case = TriageCase(case_id="timeout")
         with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            outcome = await extract_batch_answers(
-                case,
-                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
-            )
-
-        provider.assert_awaited_once()
-        self.assertEqual(outcome.ai_fields, [])
-        self.assertEqual(case.conversation_state.stage, original_stage)
+            rag_triage_adapter, "_ai_available", return_value=True,
+        ), patch.object(rag_triage_adapter, "complete_prompt", AsyncMock(side_effect=TimeoutError())):
+            result = await extract_batch_answers(case, [BatchAnswer(key="body_part", answer="右腳")])
         self.assertIsNone(case.patient_input.body_part)
-
-    async def test_red_flags_never_call_cerebras(self):
-        case = TriageCase(case_id="red-flags", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(side_effect=AssertionError("red flags called generative AI"))
-        with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            await extract_batch_answers(
-                case,
-                [BatchAnswer(key="red_flags", answer="有一點")],
-            )
-
-        provider.assert_not_awaited()
-        self.assertFalse(case.patient_input.red_flags_checked)
-
-    async def test_department_receives_candidates_and_accepts_exact_tuple(self):
-        departments = [
-            {"dept_id": 1333, "parent_dept": "五官科", "child_dept": "耳科"},
-            {"dept_id": 2001, "parent_dept": "內科系", "child_dept": "一般內科"},
-        ]
-        provider = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "dept_id": 1333,
-                    "confidence": 0.91,
-                    "reason": ["耳部症狀"],
-                },
-                ensure_ascii=False,
-            )
-        )
-        case = TriageCase(case_id="department")
-        case.patient_input.symptom = "耳朵疼痛"
-        with patch.object(
-            project_smart_department_adapter, "get_settings", return_value=_settings()
-        ), patch.object(project_smart_department_adapter, "complete_prompt", new=provider):
-            result = await detect_department_with_project_smart_adapter(case, departments)
-
-        provider.assert_awaited_once()
-        prompt = provider.await_args.args[0]
-        self.assertIn('"dept_id": 1333', prompt)
-        self.assertIn('"dept_id": 2001', prompt)
-        self.assertIn('"parent_dept": "五官科"', prompt)
-        response_contract = prompt.split("請只輸出以下 JSON", 1)[1]
-        self.assertNotIn("parent_dept", response_contract)
-        self.assertNotIn("child_dept", response_contract)
-        self.assertEqual(result.dept_id, 1333)
-        self.assertEqual(result.parentDept, "五官科")
-        self.assertEqual(result.childDept, "耳科")
-
-    async def test_department_rejects_invented_id_without_family_fallback(self):
-        departments = [
-            {"dept_id": 1333, "parent_dept": "五官科", "child_dept": "耳科"},
-        ]
-        provider = AsyncMock(
-            return_value='{"dept_id":9999,"confidence":1,"reason":"test"}'
-        )
-        case = TriageCase(case_id="invalid-department")
-        case.patient_input.symptom = "耳朵疼痛"
-        with patch.object(
-            project_smart_department_adapter, "get_settings", return_value=_settings()
-        ), patch.object(project_smart_department_adapter, "complete_prompt", new=provider):
-            result = await detect_department_with_project_smart_adapter(case, departments)
-
-        self.assertIsNone(result)
-
-    async def test_complete_simple_triage_uses_zero_semantic_and_at_most_one_department_call(self):
-        case = TriageCase(case_id="simple-triage", visit_type=VisitType.INITIAL)
-        semantic = AsyncMock(side_effect=AssertionError("simple triage called semantic LLM"))
-        department = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "dept_id": 2001,
-                    "confidence": 0.9,
-                    "reason": ["一般頭痛評估"],
-                },
-                ensure_ascii=False,
-            )
-        )
-        answers = [
-            BatchAnswer(key="symptom", answer="我頭痛"),
-            BatchAnswer(key="red_flags", answer="都沒有"),
-            BatchAnswer(key="body_part", answer="頭部"),
-            BatchAnswer(key="duration", answer="三天"),
-            BatchAnswer(key="severity", answer="中等"),
-            BatchAnswer(key="preferred_days", answer="星期五上午"),
-        ]
-        with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=semantic
-        ):
-            await extract_batch_answers(case, answers)
-        with patch.object(
-            project_smart_department_adapter, "get_settings", return_value=_settings()
-        ), patch.object(project_smart_department_adapter, "complete_prompt", new=department):
-            result = await detect_department_with_project_smart_adapter(
-                case,
-                [{"dept_id": 2001, "parent_dept": "內科系", "child_dept": "一般內科"}],
-            )
-
-        semantic.assert_not_awaited()
-        department.assert_awaited_once()
-        self.assertEqual(result.dept_id, 2001)
-
-    async def test_semantic_source_grounding_failure_is_rejected(self):
-        case = TriageCase(case_id="ungrounded", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(
-            return_value=json.dumps(
-                {
-                    "extractions": [
-                        {
-                            "field": "body_part",
-                            "normalized_value": "右肩",
-                            "semantic_status": "available",
-                            "confidence": 0.91,
-                            "source_text": "使用者沒有說過的文字",
-                        }
-                    ]
-                },
-                ensure_ascii=False,
-            )
-        )
-        with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            outcome = await extract_batch_answers(
-                case,
-                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
-            )
-
-        self.assertEqual(outcome.ai_fields, [])
-        self.assertIsNone(case.patient_input.body_part)
-
-    async def test_wrong_semantic_envelope_is_schema_error_not_silent_empty_success(self):
-        case = TriageCase(case_id="wrong-envelope", visit_type=VisitType.INITIAL)
-        provider = AsyncMock(return_value='{"semantic_extractions":[]}')
-        with patch.object(batch_extraction_service, "get_settings", return_value=_settings()), patch.object(
-            batch_extraction_service, "complete_prompt", new=provider
-        ):
-            outcome = await extract_batch_answers(
-                case,
-                [BatchAnswer(key="body_part", answer="不知道是不是肩膀附近")],
-            )
-
-        self.assertEqual(outcome.ai_fields, [])
-        self.assertEqual(outcome.fallback_reason, "ValueError")
-
-
-if __name__ == "__main__":
-    unittest.main()
+        self.assertEqual(result.accepted_fields, [])
+        self.assertEqual(result.fallback_reason, "turn_interpretation_unavailable_or_invalid")

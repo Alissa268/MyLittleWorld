@@ -11,8 +11,8 @@ from app import db
 from app.main import app
 from app.schemas import DepartmentResult, RecommendationItem, TriageCase, VisitType
 from app.routes import chat as chat_route
-from app.services import appointment_service, department_preference_service, project_smart_department_adapter, rag_triage_adapter
-from app.services.appointment_service import DepartmentResolutionError, detect_department_result, recommend_appointments
+from app.services import appointment_service, department_preference_service, rag_triage_adapter
+from app.services.appointment_service import DepartmentResolutionError, recommend_appointments
 from app.services.case_store import get_case
 from app.services.rule_engine import apply_user_message, evaluate_urgency, next_question_for
 from app.services.script_service import build_navigation_script
@@ -45,8 +45,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.original_preference_departments = department_preference_service.fetch_active_departments
         self.original_rag_complete = rag_triage_adapter.complete_prompt
         self.original_rag_settings = rag_triage_adapter.get_settings
-        self.original_project_complete = project_smart_department_adapter.complete_prompt
-        self.original_project_settings = project_smart_department_adapter.get_settings
         self.original_generate_triage_reply = chat_route.generate_triage_reply
         self.original_runtime_ai_available = chat_route.runtime_ai_available
         appointment_service.fetch_active_departments = lambda: [
@@ -61,10 +59,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             raise RuntimeError("llm disabled in tests")
 
         rag_triage_adapter.complete_prompt = fail_complete
-        project_smart_department_adapter.complete_prompt = fail_complete
-        project_smart_department_adapter.get_settings = lambda: type(
-            "NoAiSettings", (), {"cerebras_api_key": ""}
-        )()
 
         async def deterministic_reply(**kwargs) -> str:
             return kwargs["fallback_reply"]
@@ -87,61 +81,10 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         department_preference_service.fetch_active_departments = self.original_preference_departments
         rag_triage_adapter.complete_prompt = self.original_rag_complete
         rag_triage_adapter.get_settings = self.original_rag_settings
-        project_smart_department_adapter.complete_prompt = self.original_project_complete
-        project_smart_department_adapter.get_settings = self.original_project_settings
         chat_route.generate_triage_reply = self.original_generate_triage_reply
         chat_route.runtime_ai_available = self.original_runtime_ai_available
         chat_route.create_case = self.original_create_case
         self.generate_script_route.revalidate_schedule = self.original_revalidate
-
-    async def test_knee_pain_triage_case(self):
-        case = TriageCase(case_id="case_knee")
-        apply_user_message(case, "左膝痛2週，爬樓梯很吃力，沒有胸痛呼吸困難意識不清大量出血，週一上午可以看診")
-        case.patient_input.red_flags_checked = True
-        case.patient_input.red_flags_status = "negative"
-        case.triage = evaluate_urgency(case)
-
-        self.assertEqual(case.patient_input.body_part, "膝")
-        self.assertIsNone(case.triage.urgency_level)
-        self.assertIsNone(case.triage.urgency_score)
-        self.assertFalse(case.triage.need_more_info)
-        self.assertTrue(case.triage.reasons)
-        self.assertIn("body_part", case.patient_input.collected_fields)
-
-    async def test_chinese_duration_terms_are_collected(self):
-        samples = {
-            "頭暈一天": "1天",
-            "頭暈兩天": "2天",
-            "頭暈二天": "2天",
-            "頭暈三天": "3天",
-            "頭暈一週": "1週",
-            "頭暈一周": "1週",
-            "頭暈兩週": "2週",
-            "頭暈兩周": "2週",
-            "頭暈一個月": "1個月",
-            "頭暈兩個月": "2個月",
-            "頭暈半天": "半天",
-            "頭暈幾天": "幾天",
-            "頭暈好幾天": "好幾天",
-        }
-        for message, expected in samples.items():
-            with self.subTest(message=message):
-                case = TriageCase(case_id=f"case_duration_{expected}")
-                apply_user_message(case, message)
-
-                self.assertEqual(case.patient_input.duration, expected)
-
-    async def test_requested_chat_message_does_not_repeat_duration_question(self):
-        case = TriageCase(case_id="case_chinese_duration")
-        apply_user_message(
-            case,
-            "我頭暈一天，想看一般內科，沒有胸痛、呼吸困難、意識不清、大量出血，週一上午可以看診",
-        )
-        case.triage = evaluate_urgency(case)
-
-        self.assertEqual(case.patient_input.duration, "1天")
-        self.assertNotEqual(case.conversation_state.last_question_key, "duration")
-        self.assertNotIn("持續多久", case.triage.next_question or "")
 
     async def test_high_urgency_red_flag(self):
         case = TriageCase(case_id="case_high")
@@ -153,60 +96,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(case.triage.warning_required)
         self.assertEqual(case.ttas_result.status, "insufficient_information")
         self.assertTrue(case.triage.reasons)
-
-    async def test_negated_chest_and_dyspnea_do_not_recommend_cardiology(self):
-        appointment_service.fetch_active_departments = lambda: [
-            {"dept_id": 9, "parent_dept": "一般內科", "child_dept": "心臟內科"},
-            {"dept_id": 10, "parent_dept": "一般內科", "child_dept": "胸腔內科"},
-            {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
-        ]
-        case = TriageCase(case_id="case_negated_chest")
-        apply_user_message(
-            case,
-            "我頭暈一天，程度中等，沒有胸痛、呼吸困難、意識不清、大量出血，週一上午可以看診",
-        )
-        case.patient_input.red_flags_checked = True
-        case.patient_input.red_flags_status = "negative"
-        case.triage = evaluate_urgency(case)
-        result = await detect_department_result(case)
-
-        self.assertEqual(case.patient_input.red_flags, [])
-        self.assertTrue(case.patient_input.red_flags_checked)
-        self.assertNotEqual(result.childDept, "心臟內科")
-        self.assertIn(result.childDept, {"一般內科", "胸腔內科"})
-        self.assertFalse(any("胸痛" in reason or "呼吸困難" in reason for reason in result.reason))
-
-    async def test_user_requested_general_internal_medicine_is_respected_without_red_flags(self):
-        appointment_service.fetch_active_departments = lambda: [
-            {"dept_id": 9, "parent_dept": "一般內科", "child_dept": "心臟內科"},
-            {"dept_id": 10, "parent_dept": "一般內科", "child_dept": "胸腔內科"},
-            {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
-        ]
-        case = TriageCase(case_id="case_requested_internal")
-        apply_user_message(
-            case,
-            "我頭暈一天，程度中等，想看一般內科，沒有胸痛呼吸困難，週一上午可以看診",
-        )
-        case.triage = evaluate_urgency(case)
-        result = await detect_department_result(case)
-
-        self.assertEqual(result.childDept, "一般內科")
-        self.assertIn("想看 一般內科", " ".join(result.reason))
-
-    async def test_positive_chest_and_dyspnea_can_trigger_cardiology(self):
-        appointment_service.fetch_active_departments = lambda: [
-            {"dept_id": 9, "parent_dept": "一般內科", "child_dept": "心臟內科"},
-            {"dept_id": 10, "parent_dept": "一般內科", "child_dept": "胸腔內科"},
-            {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
-        ]
-        case = TriageCase(case_id="case_positive_chest")
-        apply_user_message(case, "突然胸痛、呼吸困難，程度很嚴重")
-        case.triage = evaluate_urgency(case)
-        result = await detect_department_result(case)
-
-        self.assertIsNone(case.triage.urgency_level)
-        self.assertFalse(case.triage.warning_required)
-        self.assertIn(result.childDept, {"心臟內科", "胸腔內科"})
 
     async def test_db_failure_returns_no_schedule_rows(self):
         original_create = db.create_db_connection
@@ -227,67 +116,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
             db._fetch_available_slots_from_db = original_fetch_db
 
         self.assertEqual(slots, [])
-
-    async def test_ai_department_failure_uses_rule_based_department(self):
-        case = TriageCase(case_id="case_ai_fail")
-        apply_user_message(case, "膝蓋痛2週，爬樓梯吃力，週一上午")
-        result = await detect_department_result(case)
-
-        self.assertEqual(result.childDept, "一般骨科")
-        self.assertGreaterEqual(result.confidence, 0.4)
-
-    async def test_rag_adapter_department_uses_db_constrained_ai_result(self):
-        class FakeSettings:
-            cerebras_api_key = "test-key"
-
-        async def fake_complete(_: str) -> str:
-            return """
-            {
-              "dept_id": 7,
-              "parentDept": "外科系",
-              "childDept": "一般骨科",
-              "confidence": 0.88,
-              "reason": ["膝蓋疼痛與爬樓梯困難符合骨科評估"]
-            }
-            """
-
-        rag_triage_adapter.get_settings = lambda: FakeSettings()
-        rag_triage_adapter.complete_prompt = fake_complete
-
-        case = TriageCase(case_id="case_rag_dept")
-        apply_user_message(case, "左膝痛2週，爬樓梯很吃力")
-        result = await rag_triage_adapter.detect_department_with_ai(
-            case,
-            [
-                {"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"},
-                {"dept_id": 8, "parent_dept": "一般內科", "child_dept": "一般內科"},
-            ],
-        )
-
-        self.assertIsNotNone(result)
-        self.assertEqual(result.childDept, "一般骨科")
-        self.assertEqual(result.parentDept, "外科系")
-        self.assertGreaterEqual(result.confidence, 0.8)
-        self.assertTrue(any("rag_demo adapter" in reason for reason in result.reason))
-
-    async def test_rag_adapter_rejects_department_not_in_db_list(self):
-        class FakeSettings:
-            cerebras_api_key = "test-key"
-
-        async def fake_complete(_: str) -> str:
-            return '{"childDept": "不存在科", "confidence": 0.99, "reason": ["AI invented a department"]}'
-
-        rag_triage_adapter.get_settings = lambda: FakeSettings()
-        rag_triage_adapter.complete_prompt = fake_complete
-
-        case = TriageCase(case_id="case_rag_reject")
-        apply_user_message(case, "左膝痛2週")
-        result = await rag_triage_adapter.detect_department_with_ai(
-            case,
-            [{"dept_id": 7, "parent_dept": "外科系", "child_dept": "一般骨科"}],
-        )
-
-        self.assertIsNone(result)
 
     async def test_rag_adapter_can_refine_patient_input_without_changing_schema(self):
         class FakeSettings:
@@ -407,7 +235,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         try:
             case = TriageCase(case_id="case_recommend", visit_type=VisitType.INITIAL)
             apply_user_message(case, "左膝痛2週，爬樓梯很吃力，週一上午")
-            case.department_result = await detect_department_result(case)
+            case.department_result = DepartmentResult(dept_id=7, parentDept="外科系", childDept="一般骨科")
             result = await recommend_appointments(case)
         finally:
             appointment_service.fetch_available_slots = original_fetch
@@ -766,27 +594,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(case.conversation_state.last_question_key, "body_part")
         self.assertNotIn("突發胸痛", question or "")
-
-    async def test_mild_pain_with_work_capacity_is_normalized(self):
-        case = TriageCase(case_id="case_mild_semantic")
-        apply_user_message(case, "有點痛但能工作")
-
-        normalized = case.patient_input.severity_normalized
-        self.assertEqual(normalized.severity_level, "mild")
-        self.assertFalse(normalized.functional_impact)
-        self.assertFalse(normalized.sleep_impact)
-        self.assertGreaterEqual(normalized.confidence, 0.7)
-
-    async def test_sleep_impact_raises_severity_confidence(self):
-        case = TriageCase(case_id="case_sleep_semantic")
-        apply_user_message(case, "痛到睡不著")
-        case.triage = evaluate_urgency(case)
-
-        normalized = case.patient_input.severity_normalized
-        self.assertEqual(normalized.severity_level, "severe")
-        self.assertTrue(normalized.sleep_impact)
-        self.assertGreaterEqual(normalized.confidence, 0.9)
-        self.assertIsNone(case.triage.urgency_score)
 
     async def test_unavailable_ai_does_not_guess_negated_red_flags_are_structured_and_do_not_loop(self):
         # Former checklist-route expectation; primary free text must now fail closed.

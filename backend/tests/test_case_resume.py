@@ -35,7 +35,7 @@ def test_resume_is_read_only_minimal_and_does_not_refresh_ttl(monkeypatch):
     before = case.model_dump(mode="json")
     touched = dict(case_store._LAST_TOUCHED)
     forbidden = Mock(side_effect=AssertionError("resume must not mutate or query providers"))
-    for name in ("create_case", "save_case", "apply_ttas_evaluation", "apply_user_message", "detect_department_result"):
+    for name in ("create_case", "save_case", "apply_ttas_evaluation", "apply_user_message"):
         monkeypatch.setattr(chat_route, name, forbidden)
     for name in ("refine_case_with_ai", "reason_about_departments", "request_clarification", "generate_triage_reply"):
         monkeypatch.setattr(chat_route, name, AsyncMock(side_effect=AssertionError(name)))

@@ -131,6 +131,8 @@ def test_time_preferences_share_the_existing_turn_interpreter_call():
         "pending_answer": None,
         "ttas_evidence": [],
         "time_preferences": _complex_proposals(),
+        "dialogue_act": {"act": "new_information", "source_text": COMPLEX_TEXT, "confidence": 0.99},
+        "prior_answer_reference": None, "department_preference": None,
     }, ensure_ascii=False))
     with patch.object(
         rag_triage_adapter,

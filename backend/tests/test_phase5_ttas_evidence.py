@@ -180,6 +180,8 @@ def test_ttas_evidence_uses_existing_turn_interpreter_call() -> None:
         "semantic_extractions": [],
         "pending_answer": None,
         "ttas_evidence": [_item("respiratory_distress", "severe")],
+        "dialogue_act": {"act": "new_information", "source_text": "我喘得很嚴重", "confidence": 0.99},
+        "time_preferences": [], "prior_answer_reference": None, "department_preference": None,
     }, ensure_ascii=False))
     case = TriageCase(
         case_id="single-call",

@@ -121,9 +121,7 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
         provider = AsyncMock(return_value='{"reply":"資料已整理完成，請確認是否正確。"}')
         with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
             ai_reply_generator, "complete_prompt", new=provider
-        ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)), patch.object(
-            chat_route, "detect_department_result", new=AsyncMock(return_value=department)
-        ) as detector:
+        ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)) as detector:
             response = TestClient(app).post("/chat", json={"message": complete_message})
 
         self.assertEqual(response.status_code, 200)

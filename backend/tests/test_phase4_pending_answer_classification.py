@@ -275,10 +275,15 @@ def _turn_interpretation_case(case_id: str, intent: str, question: str, current_
 
 
 def _run_turn_interpreter(case: TriageCase, current_text: str, payload: dict | list[dict]):
+    def complete_contract(item):
+        return {"ttas_evidence": [], "time_preferences": [], "prior_answer_reference": None,
+                "department_preference": None,
+                "dialogue_act": {"act": "answer", "source_text": current_text, "confidence": 0.99},
+                **item}
     if isinstance(payload, list):
-        provider = AsyncMock(side_effect=[json.dumps(item, ensure_ascii=False) for item in payload])
+        provider = AsyncMock(side_effect=[json.dumps(complete_contract(item), ensure_ascii=False) for item in payload])
     else:
-        provider = AsyncMock(return_value=json.dumps(payload, ensure_ascii=False))
+        provider = AsyncMock(return_value=json.dumps(complete_contract(payload), ensure_ascii=False))
     with patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
         rag_triage_adapter, "complete_prompt", new=provider,
     ):

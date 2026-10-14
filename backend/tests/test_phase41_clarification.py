@@ -61,7 +61,10 @@ def pending_case() -> TriageCase:
 class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
     def post(self, message: str, extractions: list[dict], plan: dict, *, triage_case: dict | None = None):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
-        semantic_payload = {"semantic_extractions": extractions, "pending_answer": None}
+        semantic_payload = {"semantic_extractions": extractions, "pending_answer": None,
+            "ttas_evidence": [], "time_preferences": [], "prior_answer_reference": None,
+            "department_preference": None, "dialogue_act": {"act": "answer" if plan.get("answered_intent") else "new_information",
+            "source_text": message, "confidence": 0.99}}
         if triage_case and plan.get("answered_intent"):
             semantic_payload["pending_answer"] = {
                 "answered_intent": plan.get("answered_intent"),
@@ -71,7 +74,6 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
             }
         semantic = AsyncMock(return_value=json.dumps(semantic_payload, ensure_ascii=False))
         planner = AsyncMock(return_value=json.dumps(plan, ensure_ascii=False))
-        detector = AsyncMock()
 
         async def keep_resolved(case):
             case.conversation_state.department_status = "resolved"
@@ -83,15 +85,13 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
             rag_triage_adapter, "get_settings", return_value=settings,
         ), patch.object(rag_triage_adapter, "complete_prompt", new=semantic), patch.object(
             conversation_service, "complete_runtime_json", new=planner,
-        ), patch.object(chat_route, "reason_about_departments", new=keep_resolved), patch.object(
-            chat_route, "detect_department_result", new=detector,
-        ), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
+        ), patch.object(chat_route, "reason_about_departments", new=keep_resolved), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
             response = TestClient(app).post("/chat", json={
                 "message": message,
                 **({"triage_case": triage_case} if triage_case else {}),
             })
         self.assertEqual(response.status_code, 200)
-        detector.assert_not_awaited()
+        self.assertFalse(hasattr(chat_route, "detect_department_result"))
         return response.json(), planner, semantic
 
     def test_real_hematuria_two_turn_grounded_answer_clears_pending(self):

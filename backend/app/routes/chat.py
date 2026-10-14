@@ -5,7 +5,7 @@ from fastapi import APIRouter, HTTPException, Response
 from app.config import get_settings
 from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, QuestionItem, TriageCase, TriageResult, VisitType
 from app.services.ai_reply_generator import build_department_confirmation_reply, generate_triage_reply
-from app.services.appointment_service import DepartmentResolutionError, detect_department_result
+from app.services.appointment_service import DepartmentResolutionError
 from app.services.batch_extraction_service import extract_batch_answers
 from app.services.batch_question_service import build_question_batch
 from app.services.case_store import create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case
@@ -30,7 +30,7 @@ from app.services.conversation_service import (
     safety_screen_resolved,
 )
 from app.services.department_reasoning_service import reason_about_departments
-from app.services.department_preference_service import capture_department_preference, resolve_requested_department
+from app.services.department_preference_service import resolve_requested_department
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import (
     QUESTION_TEXTS,
@@ -217,6 +217,15 @@ async def chat(req: ChatRequest) -> TriageResult:
             batch_outcome = await extract_batch_answers(
                 case, req.answers, semantic_first=semantic_first,
             )
+            ai_suggestion = batch_outcome.turn_interpretation
+            if batch_outcome.free_text_received:
+                # A keyed transport does not turn arbitrary patient language into an enum.
+                batch_mode = False
+                conversational_mode = True
+                free_text_flow = True
+                case.conversation_state.free_text_mode = True
+                safety_check_turn = case.conversation_state.clarification_status == "safety_check"
+                record_chat_route_trace(case_id=case.case_id, triage_branch="ai_first_free_text")
             if "requested_department" in batch_outcome.accepted_fields:
                 department_preference_name = case.patient_input.requested_department_name
             user_text_parts.extend(answer.answer for answer in req.answers if answer.answer.strip())
@@ -269,11 +278,8 @@ async def chat(req: ChatRequest) -> TriageResult:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
                 ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
             case.conversation_state.revision_mode = False
-        if not safety_check_turn:
-            for user_text in user_text_parts:
-                preference = capture_department_preference(case, user_text)
-                if preference and preference.resolved:
-                    department_preference_name = preference.name
+        if ai_suggestion is not None and getattr(ai_suggestion, "department_preference", None) is not None:
+            department_preference_name = ai_suggestion.department_preference.department_name
         if free_text_request and not ai_available and not safety_check_turn:
             has_explicit_preference = (
                 case.patient_input.requested_department_id is not None
@@ -452,7 +458,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             and department_status != "unresolved_final"
         ):
             try:
-                case.department_result = await detect_department_result(case)
+                await reason_about_departments(case)
+                if case.department_result is None:
+                    raise DepartmentResolutionError("目前沒有足夠的已驗證科別證據。")
             except DepartmentResolutionError as exc:
                 question_batch = _handle_department_resolution_failure(
                     case,

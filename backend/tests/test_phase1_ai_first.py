@@ -42,7 +42,7 @@ class Phase1AiFirstTest(unittest.TestCase):
 
         self.assertIn("最短連續逐字原文", prompt)
         self.assertIn("直接支持該 extraction", prompt)
-        self.assertIn("不得包含無關的前後症狀、否定句或其他子句", prompt)
+        self.assertIn("不得包含與該 extraction 無關的前後症狀或其他子句", prompt)
         self.assertIn("present 表示患者陳述存在", prompt)
         self.assertIn("若同一句包含不同 polarity，必須拆成多筆 extraction", prompt)
 
@@ -59,8 +59,6 @@ class Phase1AiFirstTest(unittest.TestCase):
             rag_triage_adapter, "get_settings", return_value=settings,
         ), patch.object(
             rag_triage_adapter, "complete_prompt", new=provider,
-        ), patch.object(
-            chat_route, "detect_department_result", new=AsyncMock(return_value=None),
         ), patch.object(
             chat_route, "generate_triage_reply",
             new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
@@ -287,13 +285,12 @@ class Phase1AiFirstTest(unittest.TestCase):
     def test_keyed_free_text_calls_ai_but_explicit_choice_remains_structured(self):
         settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
         provider = AsyncMock(return_value=json.dumps({
-            "extractions": [extraction("duration", "1週", "上禮拜")],
+            "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
+            "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
         }, ensure_ascii=False))
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(batch_extraction_service, "complete_prompt", new=provider), patch.object(
-            chat_route, "detect_department_result", new=AsyncMock(return_value=None),
-        ):
+        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
             response = TestClient(app).post("/chat", json={
                 "visit_type": "initial",
                 "answers": [
@@ -312,9 +309,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         provider = AsyncMock(side_effect=TimeoutError())
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(batch_extraction_service, "complete_prompt", new=provider), patch.object(
-            chat_route, "detect_department_result", new=AsyncMock(return_value=None),
-        ):
+        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
             response = TestClient(app).post("/chat", json={
                 "visit_type": "initial", "answers": [{"key": "duration", "answer": "上禮拜開始"}],
             })
@@ -327,13 +322,12 @@ class Phase1AiFirstTest(unittest.TestCase):
         case = TriageCase(case_id="phase1-keyed-existing")
         case.patient_input.duration = "2天"
         provider = AsyncMock(return_value=json.dumps({
-            "extractions": [extraction("duration", "1週", "上禮拜")],
+            "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
+            "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
         }, ensure_ascii=False))
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(batch_extraction_service, "complete_prompt", new=provider), patch.object(
-            chat_route, "detect_department_result", new=AsyncMock(return_value=None),
-        ):
+        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
             response = TestClient(app).post("/chat", json={
                 "visit_type": "initial", "triage_case": case.model_dump(mode="json"),
                 "answers": [{"key": "duration", "answer": "上禮拜開始"}],
@@ -345,7 +339,7 @@ class Phase1AiFirstTest(unittest.TestCase):
     def test_recommend_user_query_uses_same_ai_first_extraction(self):
         settings = SimpleNamespace(cerebras_api_key="test-key")
         case = TriageCase(case_id="phase1-recommend-query")
-        provider = AsyncMock(return_value='{"semantic_extractions":[]}')
+        provider = AsyncMock(return_value=json.dumps({"semantic_extractions": [], "dialogue_act": {"act": "unknown", "source_text": "我頭暈兩天", "confidence": 0.99}}))
         with patch.object(recommend_route, "get_settings", return_value=settings), patch.object(
             recommend_route, "create_case", return_value=case,
         ), patch.object(rag_triage_adapter, "get_settings", return_value=settings), patch.object(
