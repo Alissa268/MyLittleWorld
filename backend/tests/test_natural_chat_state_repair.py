@@ -75,7 +75,7 @@ def test_opaque_pending_answer_without_clinical_extraction_reaches_planner(runti
     interpreter.assert_awaited_once()
     department.assert_awaited_once()
     planner.assert_awaited_once()
-    assert "answered_without_clinical_evidence" not in caplog.text
+    assert "turn interpretation accepted=false" not in caplog.text
     assert result["triage_case"]["semantic_extractions"] == []
     assert result["conversation_state"]["clarification_evidence"][intent] == text
     assert result["conversation_state"]["pending_clarification_intent"] != intent

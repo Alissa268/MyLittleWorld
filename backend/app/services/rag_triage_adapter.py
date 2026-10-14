@@ -100,8 +100,6 @@ async def refine_case_with_ai(
     prior_reference = validate_prior_answer_reference(
         data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
     )
-    if prior_reference and _answered_without_clinical_evidence(pending_answer, semantic_extractions):
-        pending_answer = None
     time_preferences = validate_and_resolve_time_preferences(
         data.get("time_preferences"),
         user_sources=user_sources,
@@ -119,10 +117,6 @@ async def refine_case_with_ai(
         time_preferences=time_preferences,
         department_preference=department_preference,
     )
-    if repair_reason is None and _answered_without_clinical_evidence(
-        pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
-    ):
-        repair_reason = "answered_without_clinical_evidence"
 
     if repair_reason is not None:
         logger.info("turn interpretation accepted=false reason=%s repair_attempted=true", repair_reason)
@@ -145,8 +139,6 @@ async def refine_case_with_ai(
             prior_reference = validate_prior_answer_reference(
                 data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
             )
-            if prior_reference and _answered_without_clinical_evidence(pending_answer, semantic_extractions):
-                pending_answer = None
             time_preferences = validate_and_resolve_time_preferences(
                 repair_data.get("time_preferences"),
                 user_sources=user_sources,
@@ -174,10 +166,6 @@ async def refine_case_with_ai(
             time_preferences=time_preferences,
             department_preference=department_preference,
         )
-        if remaining_rejection is None and _answered_without_clinical_evidence(
-            pending_answer, semantic_extractions, safety_context=pending_intent == SAFETY_PENDING_INTENT,
-        ):
-            remaining_rejection = "answered_without_clinical_evidence"
         if remaining_rejection is not None:
             logger.warning(
                 "rag_triage_adapter repair incomplete case_id=%s reason=%s",
@@ -344,22 +332,6 @@ def _validated_turn_interpretation(
             user_sources=user_sources,
         ),
         validate_ttas_evidence_items(data.get("ttas_evidence"), user_sources=user_sources),
-    )
-
-
-def _answered_without_clinical_evidence(
-    pending_answer: PendingAnswerInterpretation | None,
-    extractions: list[SemanticExtraction],
-    *,
-    safety_context: bool = False,
-) -> bool:
-    return bool(
-        pending_answer is not None
-        and pending_answer.answered_intent == SAFETY_PENDING_INTENT
-        and pending_answer.answer_status == "answered"
-        and pending_answer.answer_confidence >= ACCEPT_THRESHOLD
-        and not (safety_context and pending_answer.answer_assertion in _EVIDENCE_ASSERTIONS)
-        and not any(_is_accepted_clinical_evidence(item) for item in extractions)
     )
 
 
