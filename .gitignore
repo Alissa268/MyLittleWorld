@@ -36,6 +36,7 @@ captures/
 Thumbs.db
 
 # Logs and generated local outputs
+.integration/
 *.log
 test_chinese_tts.wav
 test_taiwanese_tts.wav

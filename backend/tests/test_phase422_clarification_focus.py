@@ -203,9 +203,10 @@ def test_internal_workflow_reasons_never_enter_patient_information_need(internal
     assert internal_reason not in (case.triage.next_question or "")
 
 
-def test_hard_turn_cap_still_stops_without_selecting_candidate():
+def test_consecutive_no_progress_cap_still_stops_without_selecting_candidate():
     case = ambiguous_flank_case()
     case.conversation_state.turn_count = 7
+    case.conversation_state.consecutive_no_progress_turns = 7
 
     advance_conversation(case, None, user_sources=["還是不太確定"], current_extractions=[])
 

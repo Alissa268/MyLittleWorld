@@ -58,7 +58,6 @@ import androidx.compose.material.icons.filled.VolumeUp
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
-import androidx.compose.material3.Button
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
@@ -96,6 +95,7 @@ import com.example.medicalaiguidance.R
 import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryRecommendation
 import com.example.medicalaiguidance.model.MessageSender
+import com.example.medicalaiguidance.repository.VoiceLanguagePreference
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.navigation.Route
 import com.example.medicalaiguidance.util.AudioPlayer
@@ -137,13 +137,13 @@ fun ChatScreen(
     val urgentWarning by viewModel.urgentWarning.collectAsState()
     val isHistoryReadOnly by viewModel.isHistoryReadOnly.collectAsState()
     val openedHistory by viewModel.openedHistory.collectAsState()
-    val historyResumeMessage by viewModel.historyResumeMessage.collectAsState()
     val canRetryHistoryResume by viewModel.canRetryHistoryResume.collectAsState()
     val isConfirmingRecommendation by viewModel.isConfirmingRecommendation.collectAsState()
     val speakingMessageId by viewModel.speakingMessageId.collectAsState()
     val voiceStatusMessage by viewModel.voiceStatusMessage.collectAsState()
     val selectedVisitType by viewModel.selectedVisitType.collectAsState()
-    var selectedLanguage by remember { mutableStateOf("國語") }
+    val context = LocalContext.current
+    val selectedLanguage by VoiceLanguagePreference.observe(context).collectAsState()
     var showHistoryRecommendations by remember(openedHistory?.id) { mutableStateOf(false) }
     var isInputFocused by remember { mutableStateOf(false) }
     val canSendMessage = !isHistoryReadOnly && inputText.isNotBlank() &&
@@ -156,7 +156,6 @@ fun ChatScreen(
     }
 
     val listState = rememberLazyListState()
-    val context = LocalContext.current
     val audioPlayer = remember { AudioPlayer() }
     val systemTextSpeaker = remember { SystemTextSpeaker(context) }
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -496,16 +495,8 @@ fun ChatScreen(
                             primaryDark = primaryDark
                         )
                         if (isHistoryReadOnly) {
-                            Text(
-                                text = historyResumeMessage ?: "此紀錄僅供查看。",
-                                modifier = Modifier.padding(top = 12.dp),
-                                color = primaryDark
-                            )
                             if (canRetryHistoryResume) {
                                 OutlinedButton(onClick = viewModel::retryHistoryResume) { Text("重試續接") }
-                            }
-                            Button(onClick = viewModel::restartFromHistory) {
-                                Text("重新開始問診")
                             }
                         }
                     }
@@ -569,7 +560,7 @@ fun ChatScreen(
             } else {
                 LanguageToggle(
                     selectedLanguage = selectedLanguage,
-                    onLanguageSelected = { if (!isListening && !isVoiceTranscribing) selectedLanguage = it },
+                    onLanguageSelected = { if (!isListening && !isVoiceTranscribing) VoiceLanguagePreference.select(context, it) },
                     primaryDark = primaryDark,
                     selectedColor = micBgColor
                 )
@@ -713,7 +704,6 @@ private fun CompletedHistorySnapshot(
                 when (history.visitType) {
                     "initial" -> "初診"
                     "followup" -> "複診"
-                    "return_visit" -> "回診"
                     else -> "未記錄"
                 }
             )

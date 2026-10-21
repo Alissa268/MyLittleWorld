@@ -144,6 +144,104 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     return list(found.values())
 
 
+async def retrieve_semantic_official_evidence(
+    case: TriageCase, records: list[dict], resolutions: list[dict],
+) -> list[dict]:
+    """Bridge wording to the existing official catalog, never invent routing data."""
+    evidence = accepted_semantic_evidence(case)
+    present_sources = {
+        item["source_text"] for item in evidence
+        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] == "present"
+        and item["semantic_status"] in {"available", "partial"}
+    }
+    resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
+    catalog = sorted({record["concept"] for record in records if record["canonical_dept_id"] in resolved})
+    if not present_sources or not catalog:
+        return []
+    prompt = (
+        "你只做官方知識詞彙的語意檢索，不決定科別、診斷或流程。"
+        "依 accepted_semantic_evidence 中的症狀、部位、伴隨情況與否定證據，"
+        "找出 official_concepts 中語意相符的症狀概念。症狀與部位可能分開儲存，應一起理解。"
+        "只對應患者已明確表達的症狀，不可從症狀推測疾病或把未提及的症狀補上；"
+        "可使用部位的解剖學上位概念，但不得增加疼痛性質、腫脹機轉或病因。"
+        "例如疼痛不等於酸痛，腫脹不等於已確認水腫；不能僅因詞彙相近就加入這些新性質。"
+        "優先保留同一部位與同一症狀的概念，而非轉向其他器官或疾病。"
+        "不得將 absent、uncertain 或只有部位的資訊當成陽性症狀。"
+        "無可靠對應就回空 matches。最多 5 筆，不能自創 concept。"
+        "patient_source_text 必須逐字取自 present 症狀 evidence 的 source_text，"
+        "knowledge_concept 必須逐字取自 official_concepts，confidence 為 0 到 1。"
+        "只回 JSON：{\"matches\":[{\"patient_source_text\":\"...\","
+        "\"knowledge_concept\":\"...\",\"confidence\":0.9}]}\n"
+        + json.dumps(dict(accepted_semantic_evidence=evidence, official_concepts=catalog), ensure_ascii=False)
+    )
+    try:
+        proposal = json.loads((await complete_runtime_json(prompt, purpose="department_semantic_retrieval")).strip())
+    except Exception as exc:
+        logger.warning("semantic retrieval unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
+        return []
+    if not isinstance(proposal, dict) or set(proposal) != {"matches"} or not isinstance(proposal["matches"], list):
+        return []
+    if len(proposal["matches"]) > 5:
+        return []
+    found = {}
+    for match in proposal["matches"]:
+        if not isinstance(match, dict) or set(match) != {"patient_source_text", "knowledge_concept", "confidence"}:
+            continue
+        source, concept, confidence = (match.get(key) for key in ("patient_source_text", "knowledge_concept", "confidence"))
+        if (not isinstance(source, str) or source not in present_sources
+                or not isinstance(concept, str) or concept not in catalog
+                or type(confidence) not in {int, float} or not math.isfinite(confidence)
+                or not ACCEPT_THRESHOLD <= confidence <= 1):
+            continue
+        for record in lookup_concept(concept, records):
+            row = resolved.get(record["canonical_dept_id"])
+            if row is None:
+                continue
+            key = (row["db_dept_id"], source, record["source_id"], record["concept"])
+            found[key] = dict(
+                dept_id=row["db_dept_id"], parentDept=row["db_parent_dept"], childDept=row["db_child_dept"],
+                patient_source_text=source, knowledge_source_id=record["source_id"],
+                knowledge_concept=record["concept"], knowledge_evidence_text=record["evidence_text"],
+                source_priority=record["source_priority"],
+            )
+    if not found:
+        return []
+    # A second entailment pass can only remove proposed links, never introduce
+    # another symptom, source, concept or department.
+    links = [dict(patient_source_text=source, knowledge_concept=concept)
+             for source, concept in sorted({(item["patient_source_text"], item["knowledge_concept"])
+                                            for item in found.values()})]
+    audit_prompt = (
+        "審核語意檢索是否忠於患者已接受的 evidence。只保留與原文相同含義的 proposed_matches。"
+        "可以合併症狀與解剖部位，但不得加入原文沒有的性質、病因或診斷；"
+        "patient_source_text 是症狀的原文錨點，不要求這個片段單獨包含部位；"
+        "必須一起參考 evidence 的 body_part，不能因為錨點只有『疼痛』而忽略已提供的疼痛部位。"
+        "尤其『腫脹』不能自行當成已確認的『水腫』，『疼痛』不能自行加上『酸』或『麻』。"
+        "不得因為概念可能與症狀有醫學關聯就保留，必須是這段原話實際表達的症狀。"
+        "請逐筆判斷並解釋，不確定則 supported=false。不可新增或改寫連結。只回 JSON {\"judgments\":["
+        "{\"patient_source_text\":\"...\",\"knowledge_concept\":\"...\",\"supported\":true,\"reason\":\"依據\"}]}。\n"
+        + json.dumps(dict(accepted_semantic_evidence=evidence, proposed_matches=links), ensure_ascii=False)
+    )
+    try:
+        audit = json.loads((await complete_runtime_json(audit_prompt, purpose="department_retrieval_entailment")).strip())
+        if not isinstance(audit, dict) or set(audit) != {"judgments"} or not isinstance(audit["judgments"], list):
+            return []
+        original = {(item["patient_source_text"], item["knowledge_concept"]) for item in links}
+        retained = set()
+        for item in audit["judgments"]:
+            if not isinstance(item, dict):
+                continue
+            source, concept = item.get("patient_source_text"), item.get("knowledge_concept")
+            if (isinstance(source, str) and isinstance(concept, str) and (source, concept) in original
+                    and item.get("supported") is True and isinstance(item.get("reason"), str)
+                    and item["reason"].strip()):
+                retained.add((source, concept))
+        return [item for item in found.values() if (item["patient_source_text"], item["knowledge_concept"]) in retained]
+    except Exception as exc:
+        logger.warning("retrieval entailment unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
+        return []
+
+
 def validate_candidate_proposal(
     proposal: object, retrieved: list[dict], sources: list[dict], active_departments: list[dict],
     user_texts: list[str],
@@ -245,7 +343,10 @@ async def reason_about_departments(case: TriageCase) -> None:
             state.department_status = "resolved"
             return
         sources, records = load_department_knowledge()
-        retrieved = retrieve_official_evidence(case, records, resolve_department_names(records, active))
+        resolutions = resolve_department_names(records, active)
+        retrieved = retrieve_official_evidence(case, records, resolutions)
+        if not retrieved:
+            retrieved = await retrieve_semantic_official_evidence(case, records, resolutions)
         if not retrieved:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             return

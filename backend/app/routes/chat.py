@@ -1,3 +1,4 @@
+import json
 import logging
 
 from fastapi import APIRouter, HTTPException, Response
@@ -29,7 +30,7 @@ from app.services.conversation_service import (
     request_clarification,
     safety_screen_resolved,
 )
-from app.services.department_reasoning_service import reason_about_departments
+from app.services.department_reasoning_service import accepted_semantic_evidence, reason_about_departments
 from app.services.department_preference_service import resolve_requested_department
 from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
 from app.services.rule_engine import (
@@ -78,6 +79,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         pending_before = case.conversation_state.pending_clarification_intent
         department_before = case.conversation_state.department_status
         prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
+        prior_medical_facts = _clinical_progress_facts(case)
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
@@ -396,6 +398,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                     suggestion,
                     user_sources=user_text_parts,
                     current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
+                    made_progress=bool(_clinical_progress_facts(case) - prior_medical_facts),
                 )
                 if not has_user_input and not safety_check_turn and not case.history_records:
                     case.conversation_state.last_question_key = "symptom"
@@ -724,6 +727,19 @@ def _request_has_text_input(req: ChatRequest) -> bool:
     return any(message.role == "user" and message.content.strip() for message in req.messages)
 
 
+def _clinical_progress_facts(case: TriageCase) -> set[tuple[str, ...]]:
+    """Count accepted clinical facts, not model proposals or paraphrased sources."""
+    facts = {
+        ("medical", item["field"], json.dumps(item["normalized_value"], ensure_ascii=False, sort_keys=True),
+         str(item["assertion"]), item["semantic_status"])
+        for item in accepted_semantic_evidence(case)
+    }
+    facts.update(("answer", intent) for intent in case.conversation_state.clarification_evidence)
+    if safety_screen_resolved(case):
+        facts.add(("safety", "resolved"))
+    return facts
+
+
 def _begin_revision(case: TriageCase) -> None:
     case.confirmed = False
     case.recommendation_generated = False
@@ -736,6 +752,7 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.revision_mode = True
     case.conversation_state.last_question_key = "revision"
     case.conversation_state.turn_count = 0
+    case.conversation_state.consecutive_no_progress_turns = 0
     case.conversation_state.clarification_status = "collecting"
     case.conversation_state.uncertainty_reasons = []
     case.conversation_state.next_information_needed = []

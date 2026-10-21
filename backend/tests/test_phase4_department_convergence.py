@@ -886,6 +886,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         case = case_with_symptom()
         case.patient_input.red_flags_checked = True
         case.conversation_state.turn_count = 7
+        case.conversation_state.consecutive_no_progress_turns = 7
         case.conversation_state.department_status = "ambiguous"
         case.semantic_extractions = [SemanticExtraction(
             field="body_part", normalized_value="症狀甲", semantic_status="available",

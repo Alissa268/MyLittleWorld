@@ -314,6 +314,7 @@ class ConversationState(BaseModel):
     field_confidence: Dict[str, float] = Field(default_factory=dict)
     clarification_reasons: Dict[str, str] = Field(default_factory=dict)
     turn_count: int = 0
+    consecutive_no_progress_turns: int = Field(default=0, ge=0)
     safety_answer_attempts: int = 0
     safety_answer_validation: Optional[str] = None
     reply_source: Optional[str] = None

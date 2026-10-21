@@ -16,6 +16,9 @@ from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark
 
 logger = logging.getLogger(__name__)
 HARD_TURN_CAP = 8
+# Eight stalled replies remain bounded; accepted clinical progress may continue
+# within a separate absolute limit. Neither limit establishes completion.
+ABSOLUTE_TURN_CAP = 24
 SAFETY_ANSWER_CAP = 3
 SAFETY_UNRESOLVED_REPLY = (
     "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
@@ -25,6 +28,7 @@ SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明�
 SAFETY_PENDING_INTENT = "safety_screen"
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
+DEPARTMENT_EVIDENCE_REPLY = "已記錄目前症狀，但正式科別資料仍不足以確認建議科別。您可以補充新的症狀資訊，或返回就診類型選擇「快速查詢」自行選科。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
@@ -218,6 +222,9 @@ async def request_clarification(
         "既有對話和 grounded evidence 自然產生問題，不得把 snake_case intent 逐字翻譯成診斷。"
         "不得向患者顯示候選科別名稱。"
         "如果症狀資訊足夠，可建議 status=sufficient，但最終完成與否由 Backend 決定。"
+        "目標是掛號科別導引，不是完成疾病診斷；當 department_status=resolved、"
+        "grounded_patient_evidence.red_flags_checked=true、沒有 pending intent，且已有主要症狀與具體細節時，"
+        "應建議 sufficient，不要為了找病因或補齊固定欄位繼續追問。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
         "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, intent, reason, "
         "answered_intent, answer_source_text, answer_status, answer_confidence, information_needs。"
@@ -524,7 +531,7 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
     state.pending_clarification_intent = None
     state.pending_clarification_question = None
     state.next_information_needed = []
-    if state.safety_answer_attempts >= SAFETY_ANSWER_CAP or (
+    if state.turn_count >= ABSOLUTE_TURN_CAP or state.safety_answer_attempts >= SAFETY_ANSWER_CAP or (
         state.safety_answer_validation == "request_explanation" and state.turn_count >= HARD_TURN_CAP
     ):
         _unresolved(case)
@@ -556,6 +563,7 @@ def advance_conversation(
     *,
     user_sources: list[str],
     current_extractions: list[SemanticExtraction],
+    made_progress: bool = False,
 ) -> None:
     """Apply only validated clarification proposals and Backend-owned state gates."""
     state = case.conversation_state
@@ -580,8 +588,12 @@ def advance_conversation(
         state.pending_clarification_intent, user_sources,
     )
     if grounded_answer and suggestion.answer_status == "answered" and suggestion.answer_confidence >= ACCEPT_THRESHOLD:
-        capture_pending_answer(case, suggestion, user_sources)
+        made_progress = capture_pending_answer(case, suggestion, user_sources) or made_progress
     clear_answered_pending(case)
+    if user_sources:
+        state.consecutive_no_progress_turns = (
+            0 if made_progress else state.consecutive_no_progress_turns + len(user_sources)
+        )
 
     grounded_symptom = bool(case.patient_input.symptom) and any(
         case.patient_input.symptom in item.content
@@ -606,6 +618,9 @@ def advance_conversation(
     )
     safety_ready = grounded_symptom and grounded_detail and not low_confidence
     if safety_ready and not safety_screen_resolved(case):
+        if state.turn_count >= ABSOLUTE_TURN_CAP:
+            _unresolved(case)
+            return
         _enter_safety_check(case)
         return
 
@@ -628,8 +643,22 @@ def advance_conversation(
             state.reply_source = "CONFIRMATION"
             return
 
-    if state.turn_count >= HARD_TURN_CAP:
+    if (state.turn_count >= ABSOLUTE_TURN_CAP
+            or state.consecutive_no_progress_turns >= HARD_TURN_CAP):
         _unresolved(case)
+        return
+
+    if (suggestion is not None and suggestion.status == "sufficient"
+            and safety_ready and safety_screen_resolved(case)
+            and state.pending_clarification_intent is None and state.department_status != "resolved"):
+        state.clarification_status = "clarifying"
+        state.reply_source = "DEPARTMENT_EVIDENCE_UNRESOLVED"
+        state.uncertainty_reasons = [state.department_uncertainty_reason or "正式科別證據不足"]
+        state.next_information_needed = []
+        state.is_complete = False
+        case.triage.need_more_info = True
+        case.triage.next_question = DEPARTMENT_EVIDENCE_REPLY
+        case.triage.is_final = False
         return
 
     same_pending_intent = bool(
@@ -764,4 +793,4 @@ def _unresolved(case: TriageCase) -> None:
     case.triage.need_more_info = True
     case.triage.next_question = None
     case.triage.is_final = False
-    case.triage.reasons.append("已達自然澄清輪數上限；未自動補值或選科。")
+    case.triage.reasons.append("已達自然澄清保護上限；未自動補值或選科。")

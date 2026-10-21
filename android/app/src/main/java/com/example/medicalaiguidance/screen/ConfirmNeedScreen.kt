@@ -130,11 +130,11 @@ fun ConfirmNeedScreen(
     val targetClinic = currentApt.department.clinicName
     val targetDoctor = currentApt.doctor.name
     val targetTime = currentApt.timeSlot
-    val targetDisplayTime = listOfNotNull(formatConfirmVisitTime(
+    val targetDisplayTime = formatConfirmVisitTime(
         date = currentApt.date,
         dayOfWeek = currentApt.dayOfWeek,
         timeSlot = currentApt.timeSlot
-    ), currentApt.sessionTime?.takeIf { it.isNotBlank() }).joinToString(" ")
+    )
 
     // 提醒小視窗 (AlertDialog)
     if (showPermissionDialog) {
@@ -518,7 +518,7 @@ fun ConfirmNeedScreen(
     }
 }
 
-private fun formatConfirmVisitTime(
+internal fun formatConfirmVisitTime(
     date: String,
     dayOfWeek: String,
     timeSlot: String
@@ -542,8 +542,12 @@ private fun formatConfirmVisitTime(
         dateText.takeIf { it.isNotBlank() },
         weekdayText,
         normalizeConfirmSession(timeSlot).takeIf { it.isNotBlank() }
-    ).joinToString(" ")
+    ).joinToString(" ") { it.unbreakable() }
 }
+
+private const val WORD_JOINER = '\u2060'
+
+internal fun String.unbreakable(): String = toList().joinToString(WORD_JOINER.toString())
 
 private fun parseConfirmDate(raw: String): Calendar? {
     val match = Regex("""(\d{4})[-/年](\d{1,2})[-/月](\d{1,2})""").find(raw) ?: return null

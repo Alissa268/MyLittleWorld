@@ -1,5 +1,13 @@
 package com.example.medicalaiguidance.screen
 
+import com.example.medicalaiguidance.network.MedicalApiClient
+import com.example.medicalaiguidance.network.TtsRequest
+import com.example.medicalaiguidance.util.AudioPlayer
+import com.example.medicalaiguidance.network.VoiceTtsResponseDto
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Job
+import kotlinx.coroutines.launch
 import android.content.Context
 import android.graphics.BitmapFactory
 import androidx.compose.foundation.BorderStroke
@@ -38,10 +46,12 @@ import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.MedicalServices
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.Person
 import androidx.compose.material.icons.filled.Psychology
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Schedule
+import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.School
 import androidx.compose.material.icons.filled.Star
 import androidx.compose.material.icons.filled.StarOutline
@@ -56,6 +66,8 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
@@ -73,6 +85,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
@@ -81,6 +94,9 @@ import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.navigation.NavController
 import com.example.medicalaiguidance.model.Doctor
 import com.example.medicalaiguidance.model.DoctorProfile
@@ -116,6 +132,22 @@ fun DoctorSelectionScreen(
     val selectingRecommendationId by viewModel.selectingRecommendationId.collectAsState()
     val sheetState = rememberModalBottomSheetState()
     val context = LocalContext.current
+    val speechScope = rememberCoroutineScope()
+    val speech = remember(context, speechScope) { DoctorCardSpeech.create(context, speechScope) }
+    val speechLanguage by com.example.medicalaiguidance.repository.VoiceLanguagePreference
+        .observe(context).collectAsState()
+    LaunchedEffect(speechLanguage) { speech.stop() }
+    val lifecycleOwner = LocalLifecycleOwner.current
+    DisposableEffect(speech, lifecycleOwner) {
+        val observer = LifecycleEventObserver { _, event ->
+            if (event == Lifecycle.Event.ON_STOP) speech.stop()
+        }
+        lifecycleOwner.lifecycle.addObserver(observer)
+        onDispose {
+            lifecycleOwner.lifecycle.removeObserver(observer)
+            speech.close()
+        }
+    }
 
     val doctorProfiles by produceState<List<DoctorProfile>>(emptyList(), context) {
         value = withContext(Dispatchers.IO) {
@@ -156,12 +188,20 @@ fun DoctorSelectionScreen(
         onBack = { navController.popBackStack() },
         onRetry = { viewModel.fetchRecommendations(visitPlan.apiValue) },
         onCardClick = { recommendation ->
+            speech.stop()
             viewModel.selectRecommendationAndNavigate(recommendation) {
                 navController.navigate(Route.CONFIRM_NEED)
             }
         },
         onSpecialtyClick = { recommendation ->
+            speech.stop()
             viewModel.onRecommendationDetailClick(recommendation)
+        },
+        speechLanguage = speechLanguage,
+        speakingRecommendationId = speech.activeId,
+        speechError = speech.error,
+        onSpeak = { item ->
+            speech.toggle(item.recommendationId, item.spokenIntroduction(), speechLanguage)
         }
     )
 }
@@ -177,7 +217,11 @@ fun DoctorSelectionScreenContent(
     onBack: () -> Unit,
     onRetry: () -> Unit,
     onCardClick: (RecommendationItemDto) -> Unit,
-    onSpecialtyClick: (RecommendationItemDto) -> Unit
+    onSpecialtyClick: (RecommendationItemDto) -> Unit,
+    speechLanguage: String = "國語",
+    speakingRecommendationId: String? = null,
+    speechError: String? = null,
+    onSpeak: (RecommendationItemDto) -> Unit = {}
 ) {
     val primaryDark = Color(0xFF376F72)
     val lightBg = Color(0xFFF2FAF8)
@@ -187,7 +231,15 @@ fun DoctorSelectionScreenContent(
             .fillMaxSize()
             .background(lightBg)
     ) {
-        HeaderBar(textDarkColor = primaryDark, onBack = onBack)
+        HeaderBar(
+            textDarkColor = primaryDark,
+            onBack = onBack,
+            speechLanguage = speechLanguage
+        )
+        speechError?.let {
+            Text(it, color = Color(0xFFB00020), fontSize = 13.sp,
+                modifier = Modifier.padding(horizontal = 24.dp, vertical = 4.dp))
+        }
 
         when (val state = uiState) {
             DoctorUiState.Loading -> {
@@ -268,8 +320,7 @@ fun DoctorSelectionScreenContent(
 
                     // 3. 過濾出要顯示的卡片
                     val displayedRecommendations = remember(baseRecommendations, selectedFilterDate) {
-                        if (selectedFilterDate == null) baseRecommendations
-                        else baseRecommendations.filter { it.date == selectedFilterDate }
+                        displayedDoctorRecommendations(baseRecommendations, selectedFilterDate)
                     }
 
                     LazyColumn(
@@ -324,6 +375,8 @@ fun DoctorSelectionScreenContent(
                                         recommendation.specialtyTags.isNotEmpty() ||
                                         recommendation.hasRecommendationDetailInfo(),
                                 isSelecting = selectingRecommendationId == recommendation.recommendationId,
+                                isSpeaking = speakingRecommendationId == recommendation.recommendationId,
+                                onSpeak = { onSpeak(recommendation) },
                                 onCardClick = { onCardClick(recommendation) },
                                 onSpecialtyClick = { onSpecialtyClick(recommendation) }
                             )
@@ -345,7 +398,8 @@ private enum class DoctorRecommendationMode {
 @Composable
 private fun HeaderBar(
     textDarkColor: Color,
-    onBack: () -> Unit
+    onBack: () -> Unit,
+    speechLanguage: String
 ) {
     Box(
         modifier = Modifier
@@ -379,6 +433,9 @@ private fun HeaderBar(
             color = textDarkColor,
             modifier = Modifier.align(Alignment.Center)
         )
+        Box(modifier = Modifier.align(Alignment.CenterEnd)) {
+            Text("語音：$speechLanguage", fontSize = 12.sp, color = textDarkColor)
+        }
     }
 }
 
@@ -396,7 +453,7 @@ private fun FilterSummaryCard(
     } else if (mode == DoctorRecommendationMode.SPECIALTY_FIRST) {
         "優先比對症狀與醫師專長"
     } else {
-        "依後端時間偏好與可掛班表排序"
+        "優先符合可看診時間"
     }
 
     Card(
@@ -574,11 +631,12 @@ private fun RecommendationDoctorCard(
     primaryDark: Color,
     showSpecialtyButton: Boolean,
     isSelecting: Boolean,
+    isSpeaking: Boolean,
+    onSpeak: () -> Unit,
     onCardClick: () -> Unit,
     onSpecialtyClick: () -> Unit
 ) {
     val visitTime = formatVisitTime(recommendation)
-    val compactReason = recommendation.compactCardReason()
 
     Card(
         modifier = Modifier.fillMaxWidth().wrapContentHeight(),
@@ -618,8 +676,8 @@ private fun RecommendationDoctorCard(
                             overflow = TextOverflow.Ellipsis,
                             modifier = Modifier.weight(1f)
                         )
-                        if (recommendation.isBestMatch || recommendation.rank == 1) {
-                            Spacer(modifier = Modifier.width(8.dp))
+                        Spacer(modifier = Modifier.width(8.dp))
+                        if (recommendation.hasRecommendationBadge()) {
                             Surface(shape = RoundedCornerShape(50), color = Color(0xFFFDF6EC)) {
                                 Text(
                                     text = "推薦選擇",
@@ -630,17 +688,39 @@ private fun RecommendationDoctorCard(
                                 )
                             }
                         }
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Box(
+                            modifier = Modifier
+                                .size(32.dp)
+                                .clip(CircleShape)
+                                .background(Color(0xFFE8F4F1))
+                                .clickable(role = Role.Button, onClick = onSpeak),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = if (isSpeaking) Icons.Default.Stop else Icons.AutoMirrored.Filled.VolumeUp,
+                                contentDescription = if (isSpeaking) "停止播放${recommendation.doctor}醫師資訊" else "播放${recommendation.doctor}醫師資訊",
+                                tint = primaryDark,
+                                modifier = Modifier.size(16.dp)
+                            )
+                        }
                     }
 
                     Spacer(modifier = Modifier.height(4.dp))
-                    Text(
-                        text = recommendation.childDept.ifBlank { recommendation.parentDept }.ifBlank { "科別待確認" },
-                        fontSize = 14.sp,
-                        color = Color(0xFF607575),
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis
-                    )
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(8.dp)
+                    ) {
+                        Text(
+                            text = recommendation.childDept.ifBlank { recommendation.parentDept }.ifBlank { "科別待確認" },
+                            fontSize = 14.sp,
+                            color = Color(0xFF607575),
+                            maxLines = 1,
+                            overflow = TextOverflow.Ellipsis,
+                            modifier = Modifier.weight(1f)
+                        )
 
+                    }
                     if (visitTime.text.isNotBlank()) {
                         Spacer(modifier = Modifier.height(6.dp))
                         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -660,18 +740,6 @@ private fun RecommendationDoctorCard(
                                 overflow = TextOverflow.Ellipsis
                             )
                         }
-                    }
-
-                    compactReason?.let { reason ->
-                        Spacer(modifier = Modifier.height(6.dp))
-                        Text(
-                            text = reason,
-                            color = Color(0xFF465C5C),
-                            fontSize = 13.sp,
-                            lineHeight = 18.sp,
-                            maxLines = 2,
-                            overflow = TextOverflow.Ellipsis
-                        )
                     }
                 }
             }
@@ -712,6 +780,17 @@ private fun RecommendationDoctorCard(
         }
     }
 }
+
+/** Without a date filter, show each doctor once (their best-ranked slot); a date filter shows all of that day's slots. */
+internal fun displayedDoctorRecommendations(
+    recommendations: List<RecommendationItemDto>,
+    selectedDate: String?
+): List<RecommendationItemDto> =
+    if (selectedDate == null) {
+        recommendations.distinctBy { it.doctorId?.takeIf(String::isNotBlank) ?: it.doctor }
+    } else {
+        recommendations.filter { it.date == selectedDate }
+    }
 
 private const val COMPACT_REASON_MAX_LENGTH = 55
 private const val DETAIL_REASON_MAX_LENGTH = 68
@@ -1310,6 +1389,63 @@ private fun RecommendationItemDto.toDoctor(profile: DoctorProfile?): Doctor =
 
 private data class VisitTimeDisplay(val text: String)
 
+internal fun RecommendationItemDto.hasRecommendationBadge(): Boolean = isBestMatch || rank == 1
+
+/** Shared natural-language script for Mandarin and Taiwanese speech synthesis. */
+internal fun RecommendationItemDto.spokenIntroduction(): String {
+    val name = normalizeDoctorName(doctor).ifBlank { "此位" }
+    val introduction = if (hasRecommendationBadge()) "推薦您${name}醫師。" else "${name}醫師。"
+    val department = childDept.ifBlank { parentDept }.trim()
+    val dateText = parseVisitDate(date)?.let {
+        "${it.get(Calendar.MONTH) + 1}月${it.get(Calendar.DAY_OF_MONTH)}日星期${weekdayText(it)}"
+    }.orEmpty()
+    val range = sequenceOf(sessionTime, slot, session)
+        .mapNotNull { parseTimeRange(it) }
+        .firstOrNull()
+    val times = range?.split("-").orEmpty().mapNotNull { raw ->
+        val hour = raw.substringBefore(':').toIntOrNull()
+        val minute = raw.substringAfter(':').toIntOrNull()
+        if (hour != null && minute != null && hour in 0..23 && minute in 0..59) hour to minute else null
+    }
+    val timeText = if (times.isEmpty()) {
+        inferSessionLabel(session, slot, sessionTime, null)
+    } else {
+        times.mapIndexed { index, (hour, minute) ->
+            val period = spokenPeriod(hour)
+            val prefix = if (index == 0 || period != spokenPeriod(times[index - 1].first)) period else ""
+            val clockHour = (hour % 12).let { if (it == 0) 12 else it }
+            val minuteText = when (minute) {
+                0 -> ""
+                30 -> "半"
+                in 1..9 -> "零${spokenNumber(minute)}分"
+                else -> "${spokenNumber(minute)}分"
+            }
+            "$prefix${spokenNumber(clockHour)}點$minuteText"
+        }.joinToString("到")
+    }
+    return buildString {
+        append(introduction)
+        if (department.isNotBlank()) append("科別為${department}。")
+        if (dateText.isNotBlank() || timeText.isNotBlank()) append("時間為$dateText$timeText。")
+    }
+}
+
+private fun spokenPeriod(hour: Int): String = when (hour) {
+    in 0..5 -> "凌晨"
+    in 6..11 -> "上午"
+    in 12..17 -> "下午"
+    else -> "晚上"
+}
+
+private fun spokenNumber(number: Int): String {
+    val digits = listOf("零", "一", "二", "三", "四", "五", "六", "七", "八", "九")
+    return when {
+        number < 10 -> digits[number]
+        number < 20 -> "十" + if (number % 10 == 0) "" else digits[number % 10]
+        else -> digits[number / 10] + "十" + if (number % 10 == 0) "" else digits[number % 10]
+    }
+}
+
 private fun formatVisitTime(
     item: RecommendationItemDto,
     today: Calendar = Calendar.getInstance(Locale.TAIWAN)
@@ -1691,4 +1827,84 @@ fun DoctorSelectionRealDataPreview() {
         onCardClick = {},
         onSpecialtyClick = {}
     )
+}
+
+/** One playback owner for the entire doctor list, using live backend TTS. */
+internal class DoctorCardSpeech(
+    private val scope: CoroutineScope,
+    private val requestSpeech: suspend (TtsRequest) -> VoiceTtsResponseDto,
+    private val playSpeech: (VoiceTtsResponseDto, () -> Unit, () -> Unit) -> Unit,
+    private val stopSpeech: () -> Unit
+) {
+    var activeId by mutableStateOf<String?>(null)
+        private set
+    var error by mutableStateOf<String?>(null)
+        private set
+    private var generation = 0
+    private var job: Job? = null
+
+    fun stop() {
+        generation++
+        job?.cancel()
+        job = null
+        activeId = null
+        error = null
+        stopSpeech()
+    }
+
+    fun toggle(id: String, text: String, language: String) {
+        val wasActive = activeId == id
+        stop()
+        if (wasActive) return
+        val lang = when (language) {
+            "國語" -> "chinese"
+            "台語" -> "taiwanese"
+            else -> { error = "不支援此語音語言。"; return }
+        }
+        if (text.isBlank()) {
+            error = "目前沒有可播放的醫師資訊。"
+            return
+        }
+        activeId = id
+        val token = generation
+        val done: () -> Unit = { if (token == generation) activeId = null }
+        val failed: () -> Unit = {
+            if (token == generation) {
+                activeId = null
+                error = "語音播放失敗，請確認網路連線後再試。"
+            }
+        }
+        job = scope.launch {
+            try {
+                // The backend supports uncached requests without a session_id.
+                // Only the natural introduction is sent, never the full card or scores.
+                val result = requestSpeech(TtsRequest(text = text, lang = lang))
+                if (token != generation) return@launch
+                if (result.ttsFailed || result.audioBase64.isBlank()) failed()
+                else playSpeech(result, done, failed)
+            } catch (cancelled: CancellationException) {
+                throw cancelled
+            } catch (_: Exception) {
+                failed()
+            }
+        }
+    }
+
+    fun close() = stop()
+
+    companion object {
+        fun create(context: Context, scope: CoroutineScope): DoctorCardSpeech {
+            val player = AudioPlayer()
+            val api = MedicalApiClient()
+            return DoctorCardSpeech(
+                scope = scope,
+                requestSpeech = api::tts,
+                playSpeech = { result, done, failed ->
+                    player.playBase64(result.audioBase64, context.cacheDir, result.audioFormat,
+                        onDone = done, onError = failed)
+                },
+                stopSpeech = player::release
+            )
+        }
+    }
 }

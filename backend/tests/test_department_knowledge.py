@@ -49,6 +49,12 @@ def test_production_knowledge_has_exact_package_lineage(knowledge, mappings):
         f"reviewed Phase 3 migration package is missing: {PACKAGE_DIR}"
     )
     sources, records = knowledge
+    supplement = json.loads((BACKEND_ROOT / "knowledge" / "supplemental_guidance_20261021.json").read_text(encoding="utf-8"))
+    extra_source_ids = {item["source_id"] for item in supplement["sources"]}
+    assert [item for item in sources if item["source_id"] in extra_source_ids] == supplement["sources"]
+    assert [item for item in records if item["source_id"] in extra_source_ids] == supplement["records"]
+    sources = [item for item in sources if item["source_id"] not in extra_source_ids]
+    records = [item for item in records if item["source_id"] not in extra_source_ids]
     source_package = json.loads(
         (PACKAGE_DIR / "phase3_source_registry.json").read_text(encoding="utf-8")
     )
@@ -95,8 +101,8 @@ def test_production_knowledge_has_exact_package_lineage(knowledge, mappings):
 def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     sources, records = knowledge
 
-    assert len(sources) == 18
-    assert len(records) == 541
+    assert len(sources) == 19  # 18 original sources plus the dated official foot-pain supplement.
+    assert len(records) == 542
     assert len(mappings) == 35
     assert len({source["source_id"] for source in sources}) == len(sources)
     assert {record["evidence_type"] for record in records} == {
