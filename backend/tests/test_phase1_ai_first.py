@@ -10,7 +10,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import Message, TriageCase
-from app.services import batch_extraction_service, rag_triage_adapter
+from app.services import rag_triage_adapter
 from app.services.case_store import save_case
 
 
@@ -47,7 +47,7 @@ class Phase1AiFirstTest(unittest.TestCase):
         self.assertIn("若同一句包含不同 polarity，必須拆成多筆 extraction", prompt)
 
     def post_text(self, message, provider_result, *, triage_case=None):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         if isinstance(provider_result, dict):
             provider_result = {**dict(pending_answer=None, ttas_evidence=[], time_preferences=[],
                 prior_answer_reference=None, department_preference=None,
@@ -288,60 +288,6 @@ class Phase1AiFirstTest(unittest.TestCase):
         self.assertEqual(case["patient_input"]["symptom"], wording)
         self.assertEqual(case["semantic_extractions"][0]["source_text"], wording)
         self.assertEqual(case["semantic_extractions"][0]["normalized_value"], "心悸")
-
-    def test_keyed_free_text_calls_ai_but_explicit_choice_remains_structured(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
-        provider = AsyncMock(return_value=json.dumps({'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, 
-            "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
-            "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
-        }, ensure_ascii=False))
-        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
-            batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
-            response = TestClient(app).post("/chat", json={
-                "visit_type": "initial",
-                "answers": [
-                    {"key": "duration", "answer": "上禮拜開始"},
-                    {"key": "preferred_sessions", "answer": "上午"},
-                ],
-            })
-        self.assertEqual(response.status_code, 200)
-        provider.assert_awaited_once()
-        case = response.json()["triage_case"]
-        self.assertEqual(case["patient_input"]["duration"], "1週")
-        self.assertEqual(case["availability"]["preferred_sessions"], ["上午"])
-
-    def test_keyed_free_text_failure_does_not_fill_duration(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
-        provider = AsyncMock(side_effect=TimeoutError())
-        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
-            batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
-            response = TestClient(app).post("/chat", json={
-                "visit_type": "initial", "answers": [{"key": "duration", "answer": "上禮拜開始"}],
-            })
-        self.assertEqual(response.status_code, 200)
-        provider.assert_awaited_once()
-        self.assertIsNone(response.json()["triage_case"]["patient_input"]["duration"])
-
-    def test_keyed_free_text_with_existing_value_still_calls_ai_without_overwrite(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=True)
-        case = TriageCase(case_id="phase1-keyed-existing")
-        case.patient_input.duration = "2天"
-        provider = AsyncMock(return_value=json.dumps({'pending_answer': None, 'ttas_evidence': [], 'time_preferences': [], 'prior_answer_reference': None, 'department_preference': None, 
-            "semantic_extractions": [extraction("duration", "1週", "上禮拜")],
-            "dialogue_act": {"act": "new_information", "source_text": "上禮拜", "confidence": 0.99},
-        }, ensure_ascii=False))
-        with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
-            batch_extraction_service, "get_settings", return_value=settings,
-        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(rag_triage_adapter, "complete_prompt", new=provider):
-            response = TestClient(app).post("/chat", json={
-                "visit_type": "initial", "triage_case": case.model_dump(mode="json"),
-                "answers": [{"key": "duration", "answer": "上禮拜開始"}],
-            })
-        self.assertEqual(response.status_code, 200)
-        provider.assert_awaited_once()
-        self.assertEqual(response.json()["triage_case"]["patient_input"]["duration"], "2天")
 
     def test_recommend_user_query_uses_same_ai_first_extraction(self):
         settings = SimpleNamespace(cerebras_api_key="test-key")

@@ -349,7 +349,7 @@ def test_safety_turn_uses_same_interpreter_and_ttas_for_positive_result() -> Non
     with patch.object(
         chat_route,
         "get_settings",
-        return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+        return_value=SimpleNamespace(cerebras_api_key="test-key"),
     ), patch.object(
         chat_route, "refine_case_with_ai", new=interpreter,
     ), patch.object(
@@ -404,7 +404,7 @@ def test_ai_unavailable_free_text_has_no_legacy_urgency_guess() -> None:
     with patch.object(
         chat_route,
         "get_settings",
-        return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+        return_value=SimpleNamespace(cerebras_api_key=""),
     ), patch.object(
         chat_route,
         "generate_triage_reply",
@@ -436,7 +436,7 @@ def test_ai_unavailable_clinical_descriptions_do_not_create_custom_urgency_score
         with patch.object(
             chat_route,
             "get_settings",
-            return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+            return_value=SimpleNamespace(cerebras_api_key=""),
         ), patch.object(
             chat_route,
             "generate_triage_reply",
@@ -465,7 +465,7 @@ def test_ai_unavailable_safety_answer_fails_closed() -> None:
     with patch.object(
         chat_route,
         "get_settings",
-        return_value=SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False),
+        return_value=SimpleNamespace(cerebras_api_key=""),
     ), patch.object(
         chat_route,
         "generate_triage_reply",
@@ -505,7 +505,7 @@ def test_urgent_reply_uses_backend_fallback_without_ai_when_warning_is_empty() -
     with patch.object(
         chat_route,
         "get_settings",
-        return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+        return_value=SimpleNamespace(cerebras_api_key="test-key"),
     ), patch.object(
         chat_route,
         "apply_ttas_evaluation",

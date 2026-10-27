@@ -352,42 +352,6 @@ def _is_accepted_clinical_evidence(extraction: SemanticExtraction) -> bool:
     return accepted(extraction.confidence, extraction.semantic_status)
 
 
-def merge_ai_next_question(case: TriageCase, suggestion: RagTriageSuggestion | None) -> bool:
-    if suggestion is None or suggestion.triage is None:
-        return False
-
-    ai_question = suggestion.triage.next_question or suggestion.reply
-    if not ai_question:
-        return False
-
-    attempted_override = bool(case.triage.next_question)
-    if case.triage.next_question:
-        logger.info(
-            "rag_triage_adapter kept deterministic next_question case_id=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s",
-            case.case_id,
-            attempted_override,
-            case.conversation_state.last_question_key,
-            case.conversation_state.consumed_fields,
-            case.conversation_state.question_attempts,
-            case.conversation_state.field_statuses,
-            case.patient_input.red_flags_checked,
-        )
-    else:
-        logger.info(
-            "rag_triage_adapter ignored AI next_question case_id=%s ai_attempted_override=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s",
-            case.case_id,
-            attempted_override,
-            case.conversation_state.last_question_key,
-            case.conversation_state.consumed_fields,
-            case.conversation_state.question_attempts,
-            case.conversation_state.field_statuses,
-            case.patient_input.red_flags_checked,
-        )
-
-    case.triage.reasons.append("AI 追問建議已記錄，但 next_question 由後端 deterministic state machine 決定。")
-    return attempted_override
-
-
 def _ai_available() -> bool:
     return runtime_ai_available(get_settings())
 

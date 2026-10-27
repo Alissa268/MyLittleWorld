@@ -1,13 +1,13 @@
-"""Strict structured extraction validation shared by natural and legacy transports."""
+"""Strict structured extraction validation for the natural-language transport."""
 import asyncio
 import json
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.schemas import BatchAnswer, Message, SemanticExtraction, TriageCase
-from app.services import batch_extraction_service as batch, rag_triage_adapter as adapter
-from app.services.rule_engine import apply_semantic_extractions
+from app.schemas import Message, SemanticExtraction, TriageCase
+from app.services import rag_triage_adapter as adapter
+from app.services.rule_engine import apply_semantic_extractions, apply_user_message
 
 
 def extraction(field, value, source, **changes):
@@ -22,15 +22,13 @@ def payload(items, text):
         dialogue_act=dict(act="new_information", source_text=text, confidence=0.99))
 
 
-def run_extraction(key, text, items):
+def run_extraction(text, items):
     case = TriageCase(case_id="strict-ai")
     provider = AsyncMock(return_value=json.dumps(payload(items, text)))
-    with patch.object(batch, "runtime_ai_available", return_value=True), patch.object(
-        adapter, "_ai_available", return_value=True,
-    ), patch.object(adapter, "complete_prompt", provider):
-        transport_key = key if key not in {"onset", "accompanying_symptoms"} else "symptom"
-        result = asyncio.run(batch.extract_batch_answers(case, [BatchAnswer(key=transport_key, answer=text)]))
-    return case, result, provider
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
+        apply_user_message(case, text)
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
+    return case, provider
 
 
 @pytest.mark.parametrize("field,text,value,span", [
@@ -47,12 +45,11 @@ def run_extraction(key, text, items):
     ("preferred_sessions", "晚上不行，下午可以", ["下午"], "晚上不行，下午可以"),
 ])
 def test_grounded_ai_values_do_not_need_patient_keyword_dictionaries(field, text, value, span):
-    case, result, provider = run_extraction(field, text, [extraction(field, value, span)])
+    case, provider = run_extraction(text, [extraction(field, value, span)])
     provider.assert_awaited_once()
     container = case.availability if field.startswith("preferred_") else case.patient_input
     expected = span if field == "symptom" else value
     assert getattr(container, field) == expected
-    assert field in result.accepted_fields
 
 
 @pytest.mark.parametrize("field,value,source,change", [
@@ -77,29 +74,28 @@ def test_grounded_ai_values_do_not_need_patient_keyword_dictionaries(field, text
 def test_invalid_shape_confidence_assertion_or_grounding_fails_closed(field, value, source, change):
     item = extraction(field, value, source)
     item.update(change)
-    case, result, _ = run_extraction(field, "右手腕，鎖骨，頭暈，耳鳴，很痛，還好，下午週二", [item])
+    case, _ = run_extraction("右手腕，鎖骨，頭暈，耳鳴，很痛，還好，下午週二", [item])
     container = case.availability if field.startswith("preferred_") else case.patient_input
     assert not getattr(container, field)
-    assert field not in result.accepted_fields
 
 
 def test_one_batch_keeps_all_grounded_extra_fields_without_rule_slot_guessing():
     text = "右腳腳踝痛三天，只能下午"
     items = [extraction("symptom", "腳踝痛", "腳踝痛"), extraction("body_part", "右腳腳踝", "右腳腳踝"),
              extraction("duration", "3天", "三天"), extraction("preferred_sessions", ["下午"], "只能下午")]
-    case, result, provider = run_extraction("symptom", text, items)
+    case, provider = run_extraction(text, items)
     provider.assert_awaited_once()
     assert case.patient_input.body_part == "右腳腳踝"
     assert case.patient_input.duration == "3天"
     assert case.availability.preferred_sessions == ["下午"]
-    assert set(result.ai_fields) == {item["field"] for item in items}
+    assert {item.field for item in case.semantic_extractions} == {item["field"] for item in items}
 
 
 @pytest.mark.parametrize("polarity", ["absent", "uncertain"])
 def test_nonpositive_medical_assertions_are_retained_without_becoming_positive(polarity):
     item = extraction("symptom", "胸痛", "不確定胸痛")
     item["assertion"] = polarity
-    case, _, _ = run_extraction("symptom", "不確定胸痛", [item])
+    case, _ = run_extraction("不確定胸痛", [item])
     assert case.patient_input.symptom == ""
     assert case.semantic_extractions[0].assertion == polarity
 
@@ -115,10 +111,11 @@ def test_ordinary_ai_cannot_overwrite_existing_grounded_value():
 @pytest.mark.parametrize("failure", ["{}", "not json", '{"semantic_extractions":[{"field":"confirmed","normalized_value":true}]}'])
 def test_invalid_provider_response_cannot_fill_fields(failure):
     case = TriageCase(case_id="invalid-envelope")
-    with patch.object(batch, "runtime_ai_available", return_value=True), patch.object(adapter, "_ai_available", return_value=True), patch.object(
+    with patch.object(adapter, "_ai_available", return_value=True), patch.object(
         adapter, "complete_prompt", AsyncMock(return_value=failure),
     ):
-        outcome = asyncio.run(batch.extract_batch_answers(case, [BatchAnswer(key="symptom", answer="頭痛")]))
+        apply_user_message(case, "頭痛")
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=["頭痛"]))
     assert not case.patient_input.symptom
-    assert not outcome.accepted_fields
+    assert not case.semantic_extractions
     assert not case.confirmed

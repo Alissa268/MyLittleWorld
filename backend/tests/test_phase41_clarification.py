@@ -60,7 +60,7 @@ def pending_case() -> TriageCase:
 
 class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
     def post(self, message: str, extractions: list[dict], plan: dict, *, triage_case: dict | None = None):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         semantic_payload = {"semantic_extractions": extractions, "pending_answer": None,
             "ttas_evidence": [], "time_preferences": [], "prior_answer_reference": None,
             "department_preference": None, "dialogue_act": {"act": "answer" if plan.get("answered_intent") else "new_information",

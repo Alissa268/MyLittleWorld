@@ -4,11 +4,8 @@ import logging
 from fastapi import APIRouter, HTTPException, Response
 
 from app.config import get_settings
-from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, QuestionItem, TriageCase, TriageResult, VisitType
+from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, TriageCase, TriageResult, VisitType
 from app.services.ai_reply_generator import build_department_confirmation_reply, generate_triage_reply
-from app.services.appointment_service import DepartmentResolutionError
-from app.services.batch_extraction_service import extract_batch_answers
-from app.services.batch_question_service import build_question_batch
 from app.services.case_store import create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case
 from app.services.case_resume_service import build_case_resume
 from app.services.chat_perf import (
@@ -32,13 +29,11 @@ from app.services.conversation_service import (
 )
 from app.services.department_reasoning_service import accepted_semantic_evidence, reason_about_departments
 from app.services.department_preference_service import resolve_requested_department
-from app.services.rag_triage_adapter import merge_ai_next_question, refine_case_with_ai
+from app.services.rag_triage_adapter import refine_case_with_ai
 from app.services.rule_engine import (
     QUESTION_TEXTS,
     RED_FLAG_QUESTION_KEY,
     apply_user_message,
-    missing_checklist_fields,
-    next_question_for,
 )
 from app.services.ttas_evaluator import apply_ttas_evaluation, ttas_requires_immediate_action
 from app.services.ai_service import runtime_ai_available
@@ -47,14 +42,6 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 DEPARTMENT_CLARIFICATION_KEY = "department_clarification"
-DEPARTMENT_CLARIFICATION_TEXT = (
-    "目前提供的資訊還不足以確定最合適的科別，我再確認一點："
-    "除了目前描述的不舒服之外，還有其他明顯症狀嗎？"
-)
-DEPARTMENT_UNRESOLVED_REPLY = (
-    "目前仍無法安全地自動判定唯一科別，系統沒有替你套用預設科別。"
-    "請改用手動選科，或洽醫院掛號服務協助。"
-)
 URGENT_WARNING_FALLBACK = (
     "目前初步急迫性篩檢結果較急迫，請儘速由醫療人員評估；"
     "若症狀持續惡化，請立即尋求緊急醫療協助。"
@@ -83,23 +70,12 @@ async def chat(req: ChatRequest) -> TriageResult:
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
-        batch_enabled = bool(settings.batch_triage_enabled)
         urgent_terminal_at_request_start = _is_urgent_terminal(case)
         safety_check_turn = case.conversation_state.clarification_status == "safety_check"
-        free_text_request = not req.answers and _request_has_text_input(req)
-        free_text_flow = free_text_request or (case.conversation_state.free_text_mode and not req.answers)
-        batch_mode = (
-            batch_enabled
-            and not safety_check_turn
-            and case.visit_type in {VisitType.INITIAL, VisitType.FOLLOWUP}
-            and (bool(req.answers) or req.legacy_batch or (
-                bool(case.history_records) and not case.conversation_state.free_text_mode
-                and not _request_has_text_input(req)
-            ))
-        )
+        free_text_request = _request_has_text_input(req)
     record_chat_route_trace(
         case_id=case.case_id,
-        triage_branch="legacy_batch" if batch_mode else "ai_first_free_text",
+        triage_branch="ai_first_free_text",
     )
     logger.info(
         "chat request case_id=%s confirmed=%s has_message=%s has_triage_case=%s history_len=%s stage=%s",
@@ -111,7 +87,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.stage,
     )
 
-    if req.answers and not batch_enabled:
+    # Keyed batch answers are no longer accepted; keep the existing 400 response.
+    if req.answers:
         finish_chat_perf(perf, perf_token)
         raise HTTPException(status_code=400, detail="batch triage 尚未啟用。")
 
@@ -179,18 +156,15 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_preference_name = None
         has_user_input = False
         ai_available = runtime_ai_available(settings)
-        semantic_first = ai_available or not batch_mode
-        if not batch_mode:
-            case.conversation_state.free_text_mode = True
+        case.conversation_state.free_text_mode = True
         semantic_ai_allowed = (
             ai_available
             and case.conversation_state.clarification_status != "unresolved"
         )
         logger.info(
-            "chat interpretation available=%s allowed=%s safety_turn=%s legacy_batch=%s deterministic_fallback=%s",
-            ai_available, semantic_ai_allowed, safety_check_turn, batch_mode, not ai_available,
+            "chat interpretation available=%s allowed=%s safety_turn=%s deterministic_fallback=%s",
+            ai_available, semantic_ai_allowed, safety_check_turn, not ai_available,
         )
-        conversational_mode = not batch_mode
         user_text_parts: list[str] = []
         messages = req.messages or []
         should_auto_revision = _should_treat_user_input_as_revision(case, req)
@@ -202,50 +176,10 @@ async def chat(req: ChatRequest) -> TriageResult:
                 case.conversation_state.stage,
                 len(case.history_records),
             )
-        if req.answers and safety_check_turn:
-            for answer in req.answers:
-                if answer.answer.strip():
-                    apply_user_message(
-                        case,
-                        answer.answer,
-                        semantic_first=semantic_first,
-                        apply_legacy_safety=False,
-                    )
-                    user_text_parts.append(answer.answer)
-                    has_user_input = True
-        elif req.answers:
-            if batch_mode:
-                case.conversation_state.free_text_mode = False
-            batch_outcome = await extract_batch_answers(
-                case, req.answers, semantic_first=semantic_first,
-            )
-            ai_suggestion = batch_outcome.turn_interpretation
-            if batch_outcome.free_text_received:
-                # A keyed transport does not turn arbitrary patient language into an enum.
-                batch_mode = False
-                conversational_mode = True
-                free_text_flow = True
-                case.conversation_state.free_text_mode = True
-                safety_check_turn = case.conversation_state.clarification_status == "safety_check"
-                record_chat_route_trace(case_id=case.case_id, triage_branch="ai_first_free_text")
-            if "requested_department" in batch_outcome.accepted_fields:
-                department_preference_name = case.patient_input.requested_department_name
-            user_text_parts.extend(answer.answer for answer in req.answers if answer.answer.strip())
-            has_user_input = bool(user_text_parts)
-            logger.info(
-                "chat batch extraction case_id=%s deterministic_fields=%s ai_fields=%s unresolved_fields=%s ai_attempted=%s fallback_reason=%s",
-                case.case_id,
-                batch_outcome.deterministic_fields,
-                batch_outcome.ai_fields,
-                batch_outcome.unresolved_fields,
-                batch_outcome.ai_attempted,
-                batch_outcome.fallback_reason,
-            )
-        elif req.message and req.message.strip():
+        if req.message and req.message.strip():
             apply_user_message(
                 case,
                 req.message,
-                semantic_first=semantic_first or safety_check_turn,
                 apply_legacy_safety=False,
             )
             user_text_parts.append(req.message)
@@ -256,7 +190,6 @@ async def chat(req: ChatRequest) -> TriageResult:
                     apply_user_message(
                         case,
                         message.content,
-                        semantic_first=semantic_first or safety_check_turn,
                         apply_legacy_safety=False,
                     )
                     user_text_parts.append(message.content)
@@ -275,7 +208,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         preserve_urgent_terminal = bool(
             urgent_terminal_at_request_start and not has_user_input
         )
-    if has_user_input and (not req.answers or safety_check_turn):
+    if has_user_input:
         if semantic_ai_allowed:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
                 ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
@@ -297,16 +230,6 @@ async def chat(req: ChatRequest) -> TriageResult:
         confirmation_only = bool(not has_user_input and case.conversation_state.is_complete)
         if not confirmation_only and not preserve_urgent_terminal:
             case.triage = apply_ttas_evaluation(case)
-            if not conversational_mode and not case.triage.warning_required:
-                next_question = None if batch_mode else next_question_for(case)
-                has_missing_fields = bool(missing_checklist_fields(case))
-                case.triage = case.triage.model_copy(
-                    update={
-                        "need_more_info": has_missing_fields,
-                        "next_question": next_question,
-                        "is_final": not has_missing_fields,
-                    }
-                )
         safety_interpretation = (
             ai_suggestion.pending_answer
             if safety_check_turn and ai_suggestion is not None
@@ -322,14 +245,11 @@ async def chat(req: ChatRequest) -> TriageResult:
             and safety_screen_resolved(case)
             and not case.patient_input.red_flags
         )
-        ai_attempted_override = (
-            False if conversational_mode else merge_ai_next_question(case, ai_suggestion)
-        )
         if preserve_urgent_terminal:
             pass
         elif confirmation_only:
             pass
-        elif conversational_mode:
+        else:
             ttas_immediate = ttas_requires_immediate_action(case)
             if ttas_immediate:
                 case.patient_input.red_flags_checked = True
@@ -405,35 +325,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     case.triage.next_question = QUESTION_TEXTS["symptom"]
                 if case.triage.next_question:
                     case.history_records.append(Message(role="assistant", content=case.triage.next_question))
-        else:
-            case.conversation_state.is_complete = not case.triage.need_more_info
-        if free_text_flow and not semantic_first and case.department_result is None and not case.patient_input.red_flags:
-            if not case.triage.need_more_info and safety_screen_resolved(case):
-                case.triage.need_more_info = True
-                case.triage.next_question = DEPARTMENT_UNRESOLVED_REPLY
-                case.triage.is_final = False
-        question_batch = []
-        if batch_mode and case.triage.need_more_info:
-            question_batch = build_question_batch(
-                case,
-                increment_existing=bool(req.answers),
-            )
-            if (
-                department_preference_name
-                and question_batch
-                and question_batch[0].key == "symptom"
-            ):
-                question_batch[0] = question_batch[0].model_copy(
-                    update={
-                        "question": _department_preference_acknowledgement(
-                            department_preference_name,
-                            question_batch[0].question,
-                        )
-                    }
-                )
-            case.triage.next_question = question_batch[0].question if question_batch else None
     logger.info(
-        "chat triage evaluated case_id=%s need_more_info=%s has_next_question=%s red_flag_count=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s ai_attempted_override=%s",
+        "chat triage evaluated case_id=%s need_more_info=%s has_next_question=%s red_flag_count=%s red_flags_checked=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s",
         case.case_id,
         case.triage.need_more_info,
         bool(case.triage.next_question),
@@ -443,32 +336,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.consumed_fields,
         case.conversation_state.question_attempts,
         case.conversation_state.field_statuses,
-        ai_attempted_override,
     )
-
-    with perf.measure("department_detection"), ai_phase("department_detection"):
-        department_status = case.conversation_state.field_statuses.get("department")
-        if (
-            not _is_urgent_terminal(case)
-            and
-            not conversational_mode
-            and not free_text_flow
-            and case.conversation_state.turn_count == 0
-            and not case.triage.need_more_info
-            and safety_screen_resolved(case)
-            and case.department_result is None
-            and department_status != "unresolved_final"
-        ):
-            try:
-                await reason_about_departments(case)
-                if case.department_result is None:
-                    raise DepartmentResolutionError("目前沒有足夠的已驗證科別證據。")
-            except DepartmentResolutionError as exc:
-                question_batch = _handle_department_resolution_failure(
-                    case,
-                    str(exc),
-                    batch_mode=batch_mode,
-                )
 
     with perf.measure("rule_engine"):
         if _is_urgent_terminal(case):
@@ -480,18 +348,11 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.triage.need_more_info = False
             case.triage.next_question = None
             case.triage.is_final = True
-        elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
-            case.confirmed = False
-            case.conversation_state.stage = ConversationStage.COLLECTING
-            case.conversation_state.awaiting_confirmation = False
-            case.conversation_state.confirmed = False
-            case.conversation_state.is_complete = False
         elif (
             case.triage.need_more_info
             or not safety_screen_resolved(case)
-            or ((free_text_flow or conversational_mode or case.conversation_state.turn_count > 0) and (
-                case.conversation_state.department_status != "resolved" or case.department_result is None
-            ))
+            or case.conversation_state.department_status != "resolved"
+            or case.department_result is None
         ):
             case.confirmed = False
             case.conversation_state.stage = ConversationStage.COLLECTING
@@ -517,7 +378,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     with perf.measure("case_store"):
         save_case(case)
     logger.info(
-        "chat response case_id=%s stage=%s is_complete=%s awaiting_confirmation=%s confirmed=%s history_len=%s has_next_question=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s ai_attempted_override=%s",
+        "chat response case_id=%s stage=%s is_complete=%s awaiting_confirmation=%s confirmed=%s history_len=%s has_next_question=%s last_question_key=%s consumed_fields=%s question_attempts=%s field_statuses=%s red_flags_checked=%s",
         case.case_id,
         case.conversation_state.stage,
         case.conversation_state.is_complete,
@@ -530,19 +391,11 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.question_attempts,
         case.conversation_state.field_statuses,
         case.patient_input.red_flags_checked,
-        ai_attempted_override,
     )
 
-    reply = "請一次回答以下問題。" if question_batch else case.triage.next_question
+    reply = case.triage.next_question
     if (
         department_preference_name
-        and question_batch
-        and question_batch[0].key == "symptom"
-    ):
-        reply = question_batch[0].question
-    if (
-        department_preference_name
-        and not question_batch
         and case.conversation_state.last_question_key == "symptom"
         and case.triage.next_question
     ):
@@ -554,9 +407,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     if urgent_terminal:
         case.conversation_state.reply_source = "URGENT_BACKEND"
         reply = case.triage.warning_message or URGENT_WARNING_FALLBACK
-    elif case.conversation_state.field_statuses.get("department") == "unresolved_final":
-        reply = DEPARTMENT_UNRESOLVED_REPLY
-    elif conversational_mode and case.conversation_state.clarification_status == "unresolved":
+    elif case.conversation_state.clarification_status == "unresolved":
         reply = SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else UNRESOLVED_REPLY
     elif reply is None and case.conversation_state.awaiting_confirmation and case.department_result:
         case.conversation_state.reply_source = "CONFIRMATION"
@@ -565,7 +416,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.reply_source = "CONFIRMED_BACKEND"
         reply = "已確認分診結果，可呼叫 /recommend 取得推薦掛號方案。"
 
-    if not batch_mode and not urgent_terminal:
+    if not urgent_terminal:
         with perf.measure("ai_reply_total"), ai_phase("ai_reply"):
             reply = await generate_triage_reply(
                 case=case,
@@ -600,7 +451,7 @@ async def chat(req: ChatRequest) -> TriageResult:
             reply=reply,
             needMoreInfo=case.triage.need_more_info,
             triage_reasons=case.triage.reasons,
-            question_batch=question_batch,
+            question_batch=[],
         )
     record_chat_response_trace(
         deterministic_next_question=case.triage.next_question,
@@ -629,60 +480,6 @@ def _department_preference_acknowledgement(name: str, symptom_question: str) -> 
         f"收到，已記錄您希望看{name}。這是您指定的科別偏好；"
         f"為了協助確認是否適合，仍需要了解症狀。{symptom_question}"
     )
-
-
-def _handle_department_resolution_failure(
-    case: TriageCase,
-    reason: str,
-    *,
-    batch_mode: bool,
-) -> list[QuestionItem]:
-    state = case.conversation_state
-    attempts = state.question_attempts.get(DEPARTMENT_CLARIFICATION_KEY, 0)
-    state.clarification_reasons["department"] = reason
-    case.department_result = None
-    if attempts == 0:
-        state.question_attempts[DEPARTMENT_CLARIFICATION_KEY] = 1
-        state.field_statuses["department"] = "unresolved"
-        state.last_question_key = DEPARTMENT_CLARIFICATION_KEY
-        case.triage.need_more_info = True
-        case.triage.is_final = False
-        case.triage.next_question = DEPARTMENT_CLARIFICATION_TEXT
-        case.triage.reasons.append("科別無法唯一判定，進行一次受控補充詢問。")
-        state.is_complete = False
-        logger.warning(
-            "[DEPARTMENT] detection_called=true candidate_count=unknown selected_dept_id=null "
-            "selected_parent=null selected_child=null validation_result=clarification "
-            "failure_reason=%s",
-            reason,
-        )
-        if batch_mode:
-            return [
-                QuestionItem(
-                    key=DEPARTMENT_CLARIFICATION_KEY,
-                    question=DEPARTMENT_CLARIFICATION_TEXT,
-                    question_id=DEPARTMENT_CLARIFICATION_KEY,
-                    state_field="department_context",
-                    required=True,
-                    input_type="text",
-                )
-            ]
-        return []
-
-    state.field_statuses["department"] = "unresolved_final"
-    state.last_question_key = None
-    case.triage.need_more_info = False
-    case.triage.is_final = False
-    case.triage.next_question = None
-    case.triage.reasons.append("一次補充後仍無法唯一判定科別；停止自動重試且未套用預設科別。")
-    state.is_complete = False
-    logger.warning(
-        "[DEPARTMENT] detection_called=true candidate_count=unknown selected_dept_id=null "
-        "selected_parent=null selected_child=null validation_result=unresolved_final "
-        "failure_reason=%s",
-        reason,
-    )
-    return []
 
 
 def _apply_visit_type(case: TriageCase, requested: VisitType | None) -> None:

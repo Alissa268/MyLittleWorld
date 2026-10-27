@@ -16,7 +16,6 @@ from app.main import app
 from app.routes import chat as chat_route
 from app.routes import voice as voice_route
 from app.schemas import (
-    BatchAnswer,
     ConversationStage,
     DepartmentResult,
     Message,
@@ -28,33 +27,11 @@ from app.schemas import (
 from app.services import (
     ai_service,
     appointment_service,
-    batch_extraction_service,
     department_preference_service,
     rag_triage_adapter,
 )
 from app.services.conversation_service import ClarificationSuggestion
-from app.services.batch_extraction_service import extract_batch_answers
-from app.services.batch_question_service import build_question_batch
 from app.services.case_store import save_case
-from app.services.rule_engine import missing_checklist_fields
-
-
-def _settings(
-    *,
-    batch_enabled: bool = True,
-    provider: str = "cerebras",
-    cerebras_key: str = "test-cerebras-key",
-) -> SimpleNamespace:
-    return SimpleNamespace(
-        batch_triage_enabled=batch_enabled,
-        batch_extraction_provider=provider,
-        cerebras_api_key=cerebras_key,
-        cerebras_model="gpt-oss-120b",
-        google_api_key="test-gemini-key",
-        ai_provider="gemini",
-        ai_timeout_seconds=0.05,
-        llm_model="gemini-test",
-    )
 
 
 def _case_id(prefix: str) -> str:
@@ -63,81 +40,6 @@ def _case_id(prefix: str) -> str:
 
 def _department() -> DepartmentResult:
     return DepartmentResult(dept_id=7, parentDept="外科系", childDept="一般骨科", confidence=1.0)
-
-
-def _prescreen_new_route_cases(test_case: unittest.TestCase) -> None:
-    original = chat_route.create_case
-
-    def create_pre_screened_case(case_id=None):
-        case = original(case_id)
-        case.patient_input.red_flags_checked = True
-        case.patient_input.red_flags_status = "negative"
-        return case
-
-    chat_route.create_case = create_pre_screened_case
-    test_case.addCleanup(setattr, chat_route, "create_case", original)
-
-
-class BatchQuestionFlowTest(unittest.TestCase):
-    def test_legacy_start_preserves_single_question_shape(self):
-        with patch.object(chat_route, "get_settings", return_value=_settings()):
-            response = TestClient(app).post("/chat", json={"visit_type": "initial", "legacy_batch": True})
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(len(response.json()["question_batch"]), 1)
-        self.assertEqual(response.json()["question_batch"][0]["key"], "symptom")
-
-    def test_only_exact_canonical_choices_skip_interpretation(self):
-        case = TriageCase(case_id=_case_id("choices"))
-        with patch.object(batch_extraction_service, "refine_case_with_ai", new=AsyncMock()) as ai:
-            outcome = asyncio.run(extract_batch_answers(case, [
-                BatchAnswer(key="preferred_days", answer="週二"),
-                BatchAnswer(key="preferred_sessions", answer="下午"),
-                BatchAnswer(key="severity", answer="moderate"),
-            ]))
-        ai.assert_not_awaited()
-        self.assertEqual(case.availability.preferred_days, ["週二"])
-        self.assertEqual(case.availability.preferred_sessions, ["下午"])
-        self.assertEqual(case.patient_input.severity, "moderate")
-        self.assertFalse(outcome.ai_attempted)
-
-    def test_keyed_free_text_fails_closed_without_ai(self):
-        case = TriageCase(case_id=_case_id("offline"))
-        with patch.object(batch_extraction_service, "runtime_ai_available", return_value=False):
-            outcome = asyncio.run(extract_batch_answers(case, [
-                BatchAnswer(key="symptom", answer="膝蓋痛兩週很嚴重，星期二下午有空")]))
-        self.assertFalse(case.patient_input.symptom)
-        self.assertIsNone(case.patient_input.body_part)
-        self.assertIsNone(case.patient_input.duration)
-        self.assertEqual(case.availability.preferred_days, [])
-        self.assertIn("symptom", outcome.unresolved_fields)
-
-    def test_batch_free_text_reuses_same_interpreter_and_natural_flow(self):
-        from app.services.conversation_service import _enter_safety_check
-        case = TriageCase(case_id=_case_id("batch-safety"), visit_type=VisitType.INITIAL)
-        case.patient_input.symptom = "頭暈"
-        case.history_records = [Message(role="user", content="頭暈")]
-        _enter_safety_check(case)
-        save_case(case)
-        payload = dict(semantic_extractions=[], ttas_evidence=[], time_preferences=[], department_preference=None,
-            prior_answer_reference=None, dialogue_act=dict(act="answer", source_text="都沒有", confidence=0.99),
-            pending_answer=dict(answered_intent="safety_screen", answer_status="answered",
-                answer_source_text="都沒有", answer_confidence=0.99, answer_assertion="absent"))
-        planner = dict(status="clarification_needed", question="頭暈時是否覺得周圍在旋轉？",
-                       intent="dizziness_quality", reason="釐清感受", information_needs=["頭暈的感受"])
-        with patch.object(chat_route, "get_settings", return_value=_settings()), patch.object(
-            chat_route, "runtime_ai_available", return_value=True,
-        ), patch.object(rag_triage_adapter, "_ai_available", return_value=True), patch.object(
-            rag_triage_adapter, "complete_prompt", new=AsyncMock(return_value=json.dumps(payload)),
-        ) as ai, patch("app.services.conversation_service.complete_runtime_json", new=AsyncMock(return_value=json.dumps(planner))), patch.object(
-            chat_route, "reason_about_departments", new=AsyncMock(),
-        ) as reasoning:
-            response = TestClient(app).post("/chat", json={"case_id": case.case_id,
-                "answers": [{"key": "red_flags", "answer": "都沒有"}]})
-        self.assertEqual(response.status_code, 200)
-        self.assertTrue(response.json()["triage_case"]["patient_input"]["red_flags_checked"])
-        self.assertEqual(response.json()["question_batch"], [])
-        ai.assert_awaited_once()
-        reasoning.assert_awaited_once()
 
 
 class VisitTypeRecommendationTest(unittest.IsolatedAsyncioTestCase):

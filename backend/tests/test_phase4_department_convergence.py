@@ -381,7 +381,7 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
 
 class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
     def no_ai_chat(self, message: str, *, triage_case: dict | None = None, confirmed: bool = False):
-        settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="")
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
             response = TestClient(app).post("/chat", json={
                 "message": message, "confirmed": confirmed,
@@ -404,7 +404,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(confirmed["department_result"])
 
     def test_missing_ai_key_messages_user_text_is_also_free_text(self):
-        settings = SimpleNamespace(cerebras_api_key="", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="")
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"])):
             response = TestClient(app).post("/chat", json={"messages": [{"role": "user", "content": "我膝蓋很痛"}], "confirmed": True})
         self.assertEqual(response.status_code, 200)
@@ -475,7 +475,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(result["department_result"])
 
     def test_live_dizziness_department_question_is_preempted_by_safety(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         symptom = SemanticExtraction(
             field="symptom", normalized_value="頭暈", semantic_status="available",
             assertion="present", confidence=0.96, source_text="頭暈", extractor="ai",
@@ -532,7 +532,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertNotEqual(result["next_question"], "請問您近期有沒有感覺胸口悸動或胸痛？")
 
     def test_completed_safety_turn_recomputes_department_and_plans_next_question(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         symptom = SemanticExtraction(
             field="symptom", normalized_value="頭暈", semantic_status="available",
             assertion="present", confidence=0.96, source_text="頭暈", extractor="ai",
@@ -642,7 +642,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         )
 
     def test_live_a1_a2_a3_keeps_new_evidence_and_uses_contextual_follow_up(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         a1_text = "我這三天一直頭暈，會有眩暈、天旋地轉的感覺。"
         a3_text = "沒有聽力下降，但我右耳一直有耳鳴，眩暈的時候耳鳴會更明顯。"
         hearing_key = "ask_hearing_loss_or_chest_pain"
@@ -957,7 +957,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(suggestion.intent)
 
     async def test_free_text_never_calls_legacy_single_department_detector(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         async def semantic(case, **_):
             case.patient_input.symptom = "症狀甲"
             return SimpleNamespace(
@@ -1016,7 +1016,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(response.status_code, 422)
 
     async def test_resolved_case_safety_then_confirmation_keeps_validated_result(self):
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         interpretation_calls = 0
 
         async def semantic(case, **_):

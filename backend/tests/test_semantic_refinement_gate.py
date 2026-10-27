@@ -38,7 +38,6 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             "get_settings",
             return_value=SimpleNamespace(
                 cerebras_api_key="test-key" if ai_available else "",
-                batch_triage_enabled=False,
             ),
         ):
             response = TestClient(app).post("/chat", json=payload)
@@ -213,7 +212,6 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             ai_timeout_seconds=8,
             cerebras_api_key="test-key",
             cerebras_model="gpt-oss-120b",
-            batch_triage_enabled=False,
         )
         original_finish = chat_route.finish_chat_perf
 
@@ -274,7 +272,7 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
         ), patch.object(
             chat_route,
             "get_settings",
-            return_value=SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False),
+            return_value=SimpleNamespace(cerebras_api_key="test-key"),
         ), patch.object(
             rag_triage_adapter,
             "complete_prompt",

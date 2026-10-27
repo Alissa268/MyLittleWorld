@@ -3,13 +3,12 @@ from __future__ import annotations
 import math
 import re
 import logging
-from typing import Any, Optional
+from typing import Any
 
 from app.schemas import Message, SemanticExtraction, TriageCase
-from app.services.clarification_engine import clarification_prompt
-from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS, accepted
+from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
 from app.services.field_acceptance import ai_normalized_value_valid, normalized_value_valid
-from app.services.question_specs import QUESTION_SPECS, question_spec_for_field, select_question_variant
+from app.services.question_specs import QUESTION_SPECS
 
 logger = logging.getLogger(__name__)
 
@@ -41,104 +40,11 @@ def apply_user_message(
     return case
 
 
-def next_question_for(case: TriageCase) -> Optional[str]:
-    question_key = _next_question_key(case)
-    if question_key is None:
-        case.conversation_state.last_question_key = None
-        return None
-
-    question_text = _question_text_for(case, question_key)
-    _mark_question_asked(case, question_key)
-    return question_text
-
-
-def _next_question_key(case: TriageCase) -> Optional[str]:
-    missing = missing_checklist_fields(case)
-    return missing[0] if missing else None
-
-
-def missing_checklist_fields(
-    case: TriageCase,
-    *,
-    apply_attempt_fallback: bool = True,
-) -> list[str]:
-    """Return deterministic checklist gaps without letting AI control flow."""
-    _sync_consumed_fields(case)
-    state = case.conversation_state
-    missing: list[str] = []
-    for field in CHECKLIST_FIELD_ORDER:
-        if _field_satisfied(case, field):
-            continue
-        if field != RED_FLAG_QUESTION_KEY and _question_attempts(case, field) >= MAX_QUESTION_ATTEMPTS:
-            if (
-                state.clarification_reasons.get(field) == "AI extraction confidence below threshold"
-                and state.field_confidence.get(field, 1.0) < ACCEPT_THRESHOLD
-            ):
-                missing.append(field)
-                continue
-            if apply_attempt_fallback:
-                _fallback_field(case, field)
-                continue
-        missing.append(field)
-    return missing
-
-
-def question_text_for_field(case: TriageCase, field: str) -> str:
-    if field not in CHECKLIST_FIELD_ORDER:
-        raise ValueError(f"Unsupported checklist field: {field}")
-    return _question_text_for(case, field)
-
-
 def mark_questions_asked(case: TriageCase, fields: list[str]) -> None:
     for field in fields:
         if field not in CHECKLIST_FIELD_ORDER:
             raise ValueError(f"Unsupported checklist field: {field}")
         _mark_question_asked(case, field)
-
-
-def _field_satisfied(case: TriageCase, field: str) -> bool:
-    patient = case.patient_input
-    availability = case.availability
-    state = case.conversation_state
-    if field in state.consumed_fields:
-        return True
-
-    if field == "symptom":
-        return bool(patient.symptom)
-    if field == RED_FLAG_QUESTION_KEY:
-        return patient.red_flags_checked
-    if field == "body_part":
-        return bool(patient.body_part)
-    if field == "duration":
-        return bool(patient.duration)
-    if field == "severity":
-        return bool(patient.severity)
-    if field == PREFERRED_DAYS_KEY:
-        return bool(availability.preferred_days) or state.field_statuses.get(field) == "unavailable"
-    if field == PREFERRED_SESSIONS_KEY:
-        return bool(availability.preferred_sessions) or state.field_statuses.get(field) == "unavailable"
-    return True
-
-
-def _fallback_field(case: TriageCase, field: str) -> None:
-    state = case.conversation_state
-    state.field_statuses[field] = state.field_statuses.get(field, "unknown")
-    state.field_confidence[field] = state.field_confidence.get(field, 0.0)
-    state.clarification_reasons[field] = "max question attempts reached; explicitly skipped as unknown"
-    _consume_field(case, field, state.field_statuses[field], state.field_confidence[field])
-
-
-def _question_text_for(case: TriageCase, field: str) -> str:
-    confidence = case.conversation_state.field_confidence.get(field, 1.0)
-    status = case.conversation_state.field_statuses.get(field)
-    if _question_attempts(case, field) > 0 and (confidence < ACCEPT_THRESHOLD or status in {"unknown", "ambiguous", "unavailable"}):
-        return clarification_prompt(field, status)
-    spec = question_spec_for_field(field)
-    return select_question_variant(spec.question_id)
-
-
-def _question_attempts(case: TriageCase, field: str) -> int:
-    return case.conversation_state.question_attempts.get(field, 0)
 
 
 def apply_semantic_extractions(
@@ -426,45 +332,6 @@ def _consume_field(
         state.field_statuses[field] = status
     if confidence is not None:
         state.field_confidence[field] = confidence
-
-
-def _sync_consumed_fields(case: TriageCase) -> None:
-    patient = case.patient_input
-    availability = case.availability
-    if patient.symptom:
-        _consume_field(case, "symptom", case.conversation_state.field_statuses.get("symptom"))
-    if patient.body_part:
-        _consume_field(case, "body_part", case.conversation_state.field_statuses.get("body_part"))
-    if patient.duration:
-        _consume_field(case, "duration", case.conversation_state.field_statuses.get("duration"))
-    if patient.severity:
-        _consume_field(case, "severity", case.conversation_state.field_statuses.get("severity"))
-    if patient.red_flags_checked:
-        red_flag_status = {
-            "uncertain": "uncertain",
-            "positive_specific": "available",
-            "negative": "unavailable",
-        }.get(patient.red_flags_status, "available" if patient.red_flags else "unavailable")
-        _consume_field(
-            case,
-            RED_FLAG_QUESTION_KEY,
-            red_flag_status,
-            case.conversation_state.field_confidence.get(RED_FLAG_QUESTION_KEY),
-        )
-    if availability.preferred_days or case.conversation_state.field_statuses.get(PREFERRED_DAYS_KEY) == "unavailable":
-        _consume_field(
-            case,
-            PREFERRED_DAYS_KEY,
-            availability.semantic_status.get(PREFERRED_DAYS_KEY) or case.conversation_state.field_statuses.get(PREFERRED_DAYS_KEY),
-            availability.confidence.get(PREFERRED_DAYS_KEY) or case.conversation_state.field_confidence.get(PREFERRED_DAYS_KEY),
-        )
-    if availability.preferred_sessions or case.conversation_state.field_statuses.get(PREFERRED_SESSIONS_KEY) == "unavailable":
-        _consume_field(
-            case,
-            PREFERRED_SESSIONS_KEY,
-            availability.semantic_status.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_statuses.get(PREFERRED_SESSIONS_KEY),
-            availability.confidence.get(PREFERRED_SESSIONS_KEY) or case.conversation_state.field_confidence.get(PREFERRED_SESSIONS_KEY),
-        )
 
 
 def _refresh_collected_fields(case: TriageCase) -> None:

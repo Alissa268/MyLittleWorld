@@ -121,7 +121,7 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
             dept_id=1242, parentDept="內科部", childDept="腎臟科", confidence=0.94,
         )
 
-    settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+    settings = SimpleNamespace(cerebras_api_key="test-key")
     with patch("app.routes.chat.get_settings", return_value=settings), patch(
         "app.routes.chat.refine_case_with_ai", new=semantic,
     ), patch(
@@ -384,7 +384,7 @@ def test_route_repair_failure_keeps_pending_and_skips_department_resolution():
         intent,
         "本輪 interpretation 尚未留下可靠 evidence",
     ))
-    settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+    settings = SimpleNamespace(cerebras_api_key="test-key")
 
     with patch("app.routes.chat.get_settings", return_value=settings), patch.object(
         rag_triage_adapter, "_ai_available", return_value=True,

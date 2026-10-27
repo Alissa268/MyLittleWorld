@@ -6,8 +6,8 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.schemas import BatchAnswer, Message, TriageCase
-from app.services import batch_extraction_service as batch, conversation_service as cs
+from app.schemas import Message, TriageCase
+from app.services import conversation_service as cs
 from app.services import department_preference_service as preference, rag_triage_adapter as adapter
 from app.services.rule_engine import apply_user_message
 from app.services.case_store import save_case
@@ -122,17 +122,6 @@ def test_history_recording_does_not_interpret_any_patient_text(text):
     assert case.semantic_extractions == []
     assert case.availability.preferred_days == []
     assert case.history_records[-1].content == text
-
-
-@pytest.mark.parametrize("key,text", [("symptom", "我頭很暈"), ("body_part", "右腳腳背"),
-    ("duration", "已經三天"), ("severity", "痛到睡不著")])
-def test_batch_free_text_unavailable_fails_closed(key, text):
-    case = TriageCase(case_id="cleanup-batch")
-    with patch.object(batch, "runtime_ai_available", return_value=False):
-        result = asyncio.run(batch.extract_batch_answers(case, [BatchAnswer(key=key, answer=text)]))
-    assert not getattr(case.patient_input, key)
-    assert not result.accepted_fields
-    assert key in result.unresolved_fields
 
 
 def test_no_retired_patient_semantic_modules_or_production_callers():
@@ -323,3 +312,20 @@ def test_extra_top_level_field_repairs_once_then_requires_exact_contract(extra_k
     assert bool(case.patient_input.symptom) is repair_success
     assert bool(case.semantic_extractions) is repair_success
     assert not case.confirmed
+
+
+@pytest.mark.parametrize("extra", [{}, {"message": "我頭痛"}, {"legacy_batch": True}, {"visit_type": "return_visit"}])
+def test_keyed_answers_are_rejected_without_entering_any_triage_path(extra):
+    from fastapi.testclient import TestClient
+    from app.main import app
+    from app.routes import chat as route
+    interpreter, planner, department = AsyncMock(), AsyncMock(), AsyncMock()
+    with patch.object(route, "refine_case_with_ai", interpreter), patch.object(
+        route, "request_clarification", planner,
+    ), patch.object(route, "reason_about_departments", department):
+        response = TestClient(app).post("/chat", json={**extra, "answers": [{"key": "symptom", "answer": "頭痛"}]})
+    assert response.status_code == 400
+    assert response.json() == {"detail": "batch triage 尚未啟用。"}
+    interpreter.assert_not_awaited()
+    planner.assert_not_awaited()
+    department.assert_not_awaited()

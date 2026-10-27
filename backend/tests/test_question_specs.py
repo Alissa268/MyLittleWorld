@@ -6,7 +6,6 @@ from unittest.mock import AsyncMock, patch
 
 from app.schemas import TriageCase
 from app.services import ai_reply_generator, ai_service
-from app.services.batch_question_service import build_question_batch
 from app.services.question_specs import (
     QUESTION_SPECS,
     QUESTION_SPEC_BY_FIELD,
@@ -44,17 +43,6 @@ class QuestionSpecTest(unittest.IsolatedAsyncioTestCase):
         first = [select_question_variant("duration", first_rng) for _ in range(8)]
         second = [select_question_variant("duration", second_rng) for _ in range(8)]
         self.assertEqual(first, second)
-
-    def test_batch_keeps_state_key_and_exposes_separate_question_id(self):
-        case = TriageCase(case_id="question-contract")
-        case.patient_input.symptom = "頭暈"
-        questions = build_question_batch(case, mark_asked=False)
-        red = next(item for item in questions if item.key == "red_flags")
-
-        self.assertEqual(red.key, "red_flags")
-        self.assertEqual(red.state_field, "red_flags")
-        self.assertEqual(red.question_id, "emergency_symptoms")
-        self.assertIn(red.question, QUESTION_SPEC_BY_ID["emergency_symptoms"].variants)
 
     def test_every_red_flag_variant_preserves_six_safety_concepts(self):
         required = ("突發胸痛", "嚴重呼吸困難", "意識不清", "大量出血", "半邊無力", "劇烈頭痛")

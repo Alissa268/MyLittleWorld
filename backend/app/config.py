@@ -26,7 +26,6 @@ class Settings(BaseSettings):
     ai_provider: Literal["gemini", "cerebras"] = Field(default="cerebras", alias="AI_PROVIDER")
     cerebras_api_key: str = Field(default="", alias="CEREBRAS_API_KEY")
     cerebras_model: Literal["gpt-oss-120b"] = Field(default="gpt-oss-120b", alias="CEREBRAS_MODEL")
-    batch_triage_enabled: bool = Field(default=False, alias="BATCH_TRIAGE_ENABLED")
     batch_extraction_provider: Literal["gemini", "cerebras"] = Field(
         default="cerebras",
         alias="BATCH_EXTRACTION_PROVIDER",

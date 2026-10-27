@@ -232,37 +232,6 @@ def test_raw_department_words_do_not_query_db_without_ai_preference(monkeypatch)
     assert "secret" not in response.text
 
 
-def test_db_unavailable_is_globally_503_for_structured_department_detection(monkeypatch):
-    monkeypatch.setattr("app.routes.chat.get_settings", lambda: SimpleNamespace(
-        batch_triage_enabled=True, cerebras_api_key="",
-    ))
-    case = TriageCase(case_id="case_db_detection", visit_type=VisitType.INITIAL)
-    case.patient_input.symptom = "grounded symptom"
-    case.patient_input.body_part = "頭部"
-    case.patient_input.duration = "2天"
-    case.patient_input.severity = "中度"
-    case.patient_input.red_flags_checked = True
-    case.patient_input.red_flags_status = "negative"
-    case.availability.preferred_days = ["週一"]
-    case.availability.preferred_sessions = ["上午"]
-    save_case(case)
-    monkeypatch.setattr("app.routes.chat.runtime_ai_available", lambda _settings: False)
-    monkeypatch.setattr(
-        "app.routes.chat.apply_ttas_evaluation",
-        lambda *_args, **_kwargs: UrgencyResult(need_more_info=False, is_final=True),
-    )
-    monkeypatch.setattr(
-        "app.routes.chat.reason_about_departments",
-        AsyncMock(side_effect=db.DatabaseUnavailableError("db down")),
-    )
-    response = TestClient(app, raise_server_exceptions=False).post(
-        "/chat",
-        json={"case_id": case.case_id, "visit_type": "initial", "legacy_batch": True},
-    )
-    assert response.status_code == 503
-    assert response.json() == {"detail": "正式資料目前無法查詢，請稍後重試。"}
-
-
 def test_db_unavailable_is_globally_503_for_recommend_explicit_preference(monkeypatch):
     case = _complete_case("case_db_recommend_preference")
     case.department_result = None

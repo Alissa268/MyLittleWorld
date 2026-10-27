@@ -40,7 +40,7 @@ class Phase2ConversationTest(unittest.TestCase):
     ):
         if triage_case:
             save_case(TriageCase.model_validate(triage_case))
-        settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
+        settings = SimpleNamespace(cerebras_api_key="test-key")
         pending_answer = None
         if isinstance(plan, dict) and triage_case and plan.get("answered_intent"):
             pending_answer = {

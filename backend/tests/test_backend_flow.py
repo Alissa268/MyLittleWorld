@@ -14,7 +14,7 @@ from app.routes import chat as chat_route
 from app.services import appointment_service, department_preference_service, rag_triage_adapter
 from app.services.appointment_service import DepartmentResolutionError, recommend_appointments
 from app.services.case_store import get_case
-from app.services.rule_engine import apply_user_message, next_question_for
+from app.services.rule_engine import apply_user_message
 from app.services.script_service import build_navigation_script
 from app.services.ttas_evaluator import apply_ttas_evaluation
 from app.services.conversation_service import ClarificationSuggestion
@@ -573,16 +573,6 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(data["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(data["conversation_state"]["stage"], "collecting")
         self.assertFalse(data["conversation_state"]["confirmed"])
-
-    async def test_consumed_field_is_not_selected_by_next_question_for(self):
-        case = TriageCase(case_id="case_consumed_gate")
-        case.patient_input.symptom = "膝蓋痛"
-        case.conversation_state.consumed_fields.append("red_flags")
-
-        question = next_question_for(case)
-
-        self.assertEqual(case.conversation_state.last_question_key, "body_part")
-        self.assertNotIn("突發胸痛", question or "")
 
     async def test_unavailable_ai_does_not_guess_negated_red_flags_are_structured_and_do_not_loop(self):
         # Former checklist-route expectation; primary free text must now fail closed.

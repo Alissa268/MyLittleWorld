@@ -35,7 +35,7 @@ def runtime():
         intent="clarify_onset", reason="需要了解情況", information_needs=["發作的情境"])))
     department = AsyncMock()
     with ExitStack() as stack:
-        stack.enter_context(patch.object(route, "get_settings", return_value=SimpleNamespace(batch_triage_enabled=True)))
+        stack.enter_context(patch.object(route, "get_settings", return_value=SimpleNamespace()))
         stack.enter_context(patch.object(route, "runtime_ai_available", return_value=True))
         stack.enter_context(patch.object(rag_triage_adapter, "_ai_available", return_value=True))
         stack.enter_context(patch.object(rag_triage_adapter, "complete_prompt", interpreter))
@@ -85,7 +85,7 @@ def test_legacy_reply_flag_does_not_disable_natural_question_planner(runtime, re
     client, interpreter, planner, _ = runtime
     respond(interpreter, [evidence("symptom", "頭暈", "頭暈")])
     with patch.object(route, "get_settings", return_value=SimpleNamespace(
-        batch_triage_enabled=False, ai_reply_generation_enabled=reply_flag,
+        ai_reply_generation_enabled=reply_flag,
     )):
         result = client.post("/chat", json=dict(message="頭暈")).json()
     planner.assert_awaited_once()
