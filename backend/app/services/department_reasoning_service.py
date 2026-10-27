@@ -298,17 +298,31 @@ def _contradicted_concepts(evidence: list[dict]) -> set[str]:
     }
 
 
+def _clue_priority(state, retrieved: list[dict], candidates: set[int]) -> dict:
+    """Target priority from scores, then the validated convergence candidates' order."""
+    return clues.department_priority(
+        clues.department_scores(retrieved, candidates, state.clue_concepts_asked),
+        [item.dept_id for item in state.candidate_departments],
+        {get_settings().family_medicine_dept_id},
+    )
+
+
 def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict]) -> list[clues.ClueConcept]:
-    """Persist the Backend-ranked askable clues of all retrieved candidates; return every askable clue."""
+    """Persist the Backend-ranked askable clues of all retrieved candidates; return every askable clue.
+
+    Family medicine stays a candidate but is never a clue target; ranking reads the
+    validated convergence candidates, so call this after they are stored.
+    """
     state = case.conversation_state
     settings = get_settings()
     candidates = clues.candidate_dept_ids(retrieved)
     mentioned = clues.mentioned_concepts(retrieved, accepted_semantic_evidence(case))
-    askable = clues.clue_concepts(records, candidates, mentioned, state.clue_concepts_asked)
+    askable = clues.clue_concepts(records, candidates, mentioned, state.clue_concepts_asked,
+                                  {settings.family_medicine_dept_id})
     state.department_clue_candidates = sorted(candidates)
-    state.department_clue_offer = clues.clue_offer(
-        clues.rank_clue_concepts(askable, settings.clue_planner_concept_limit)
-    )
+    state.department_clue_offer = clues.clue_offer(clues.rank_clue_concepts(
+        askable, settings.clue_planner_concept_limit, _clue_priority(state, retrieved, candidates),
+    ))
     return askable
 
 
@@ -353,12 +367,15 @@ def apply_clue_decision(
         askable=askable, questions_asked=state.clue_questions_asked, tiebreak_used=state.clue_tiebreak_used,
         user_declined=False,
         clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates),
-        question_limit=settings.clue_question_limit,
+        question_limit=settings.clue_question_limit, non_target_dept_ids={settings.family_medicine_dept_id},
     )
     kind, dept_id, result = decision.kind, decision.dept_id, None
     if kind == "tiebreak":
         # Tiebreak clues come from every askable clue, never only the planner's top-ranked offer.
-        state.department_clue_offer = clues.clue_offer(clues.tiebreak_clues(askable, set(decision.tied_dept_ids)))
+        state.department_clue_offer = clues.clue_offer(clues.tiebreak_clues(
+            askable, set(decision.tied_dept_ids), {settings.family_medicine_dept_id},
+            _clue_priority(state, retrieved, candidates),
+        ))
     elif kind == "decide" and dept_id == ai_resolved:
         result = case.department_result
     elif kind == "decide":
@@ -531,7 +548,6 @@ async def reason_about_departments(case: TriageCase) -> None:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             apply_clue_decision(case, [], [], active)
             return
-        askable = store_clue_offer(case, records, retrieved)
         payload = {
             "accepted_semantic_evidence": accepted_semantic_evidence(case),
             "retrieved_official_evidence": retrieved,
@@ -559,6 +575,7 @@ async def reason_about_departments(case: TriageCase) -> None:
             proposal, retrieved, sources, active, _user_texts(case),
         )
         state.candidate_departments = candidates
+        askable = store_clue_offer(case, records, retrieved)
         state.department_uncertainty_reason = reason
         state.department_next_question_intent = intent if (
             state.pending_clarification_intent is None and (proposed_status != "resolved" or len(candidates) != 1)

@@ -71,6 +71,7 @@ def mentioned_concepts(retrieved: list[dict], accepted_evidence: list[dict]) -> 
 
 def clue_concepts(
     records: list[dict], candidates: set[int], mentioned: set[str], asked: list[ClueConceptRecord],
+    non_target_dept_ids: Iterable[int] = (),
 ) -> list[ClueConcept]:
     """Distinguishing official concepts of the candidates that the patient has not covered.
 
@@ -81,7 +82,10 @@ def clue_concepts(
     hospital's symptom-to-department guidance) are askable; their ``dept_ids`` still hold
     every candidate with the concept. Specialty-only concepts are never asked but keep
     their part in retrieval and scoring.
+    A concept held only by ``non_target_dept_ids`` (the family-medicine end point) is never
+    asked; other concepts keep those departments in ``dept_ids`` so scoring is unchanged.
     """
+    non_target = set(non_target_dept_ids)
     concluded = {normalize_concept(item.concept) for item in asked if item.answer in _CONCLUDED_ANSWERS}
     inconclusive = {normalize_concept(item.concept) for item in asked if item.answer not in _CONCLUDED_ANSWERS}
     grouped: dict[str, dict] = {}
@@ -98,7 +102,7 @@ def clue_concepts(
         entry["priority"] = priority if entry["priority"] is None else min(entry["priority"], priority)
     clues = []
     for key, entry in grouped.items():
-        if entry["depts"] == candidates or not entry["direct"]:
+        if entry["depts"] == candidates or not entry["direct"] or not entry["depts"] - non_target:
             continue
         clues.append(ClueConcept(
             concept=min(entry["names"]), dept_ids=frozenset(entry["depts"]),
@@ -108,10 +112,38 @@ def clue_concepts(
     return clues
 
 
-def rank_clue_concepts(clues: Iterable[ClueConcept], limit: int) -> list[ClueConcept]:
-    """Unique first, then direct routing, source priority, inconclusive last, then text."""
+DepartmentPriority = tuple[int, int]
+
+
+def department_priority(
+    scores: dict[int, int], ai_order: list[int], non_target_dept_ids: Iterable[int] = (),
+) -> dict[int, DepartmentPriority]:
+    """Target-department priority: higher score first, then the convergence AI's order.
+
+    Departments absent from ``ai_order`` come after listed ones; equal priorities fall
+    through to the clue's own rank keys. Non-target departments get no priority.
+    """
+    non_target = set(non_target_dept_ids)
+    position = {dept_id: index for index, dept_id in enumerate(dict.fromkeys(ai_order))}
+    return {
+        dept_id: (-score, position.get(dept_id, len(position)))
+        for dept_id, score in scores.items() if dept_id not in non_target
+    }
+
+
+def rank_clue_concepts(
+    clues: Iterable[ClueConcept], limit: int, priority: dict[int, DepartmentPriority] | None = None,
+) -> list[ClueConcept]:
+    """Best target-department priority, then unique, direct routing, source priority,
+    inconclusive last, then text. A concept takes its best-priority department."""
+    def target(clue: ClueConcept) -> DepartmentPriority:
+        if not priority:
+            return (0, 0)
+        # Scores are >= 0, so (1, 0) sorts a clue without any prioritized department last.
+        return min((priority[dept_id] for dept_id in clue.dept_ids if dept_id in priority), default=(1, 0))
+
     ranked = sorted(clues, key=lambda clue: (
-        not clue.unique, not clue.has_direct_routing, clue.best_source_priority,
+        target(clue), not clue.unique, not clue.has_direct_routing, clue.best_source_priority,
         clue.uncertain_before, clue.concept,
     ))
     return ranked[:max(limit, 0)]
@@ -240,16 +272,22 @@ def clue_confirmed_departments(asked: list[ClueConceptRecord], candidates: set[i
     return {dept_id for record in asked if record.answer == "present" for dept_id in record.dept_ids} & candidates
 
 
-def tiebreak_clues(clues: Iterable[ClueConcept], tied: set[int]) -> list[ClueConcept]:
-    """Clues held by exactly one of the tied departments, in normal rank order."""
-    eligible = [clue for clue in clues if len(clue.dept_ids & tied) == 1]
-    return rank_clue_concepts(eligible, len(eligible))
+def tiebreak_clues(
+    clues: Iterable[ClueConcept], tied: set[int], non_target_dept_ids: Iterable[int] = (),
+    priority: dict[int, DepartmentPriority] | None = None,
+) -> list[ClueConcept]:
+    """Clues held by exactly one tied department that is not a non-target, in rank order."""
+    non_target = set(non_target_dept_ids)
+    eligible = [clue for clue in clues
+                if len(clue.dept_ids & tied) == 1 and not clue.dept_ids & tied & non_target]
+    return rank_clue_concepts(eligible, len(eligible), priority)
 
 
 def decide(
     *, ai_resolved_dept_id: int | None, candidates: set[int], scores: dict[int, int],
     askable: list[ClueConcept], questions_asked: int, tiebreak_used: bool,
     user_declined: bool, clue_confirmed_dept_ids: set[int], question_limit: int,
+    non_target_dept_ids: Iterable[int] = (),
 ) -> ClueDecision:
     """Apply rules A/C and the decision triggers; every decision still needs user confirmation."""
     if not candidates:
@@ -270,6 +308,6 @@ def decide(
     tied = sorted(dept_id for dept_id in candidates if scores.get(dept_id, 0) == best)
     if len(tied) == 1:
         return ClueDecision("decide", dept_id=tied[0], reason=reason)
-    if not user_declined and not tiebreak_used and tiebreak_clues(askable, set(tied)):
+    if not user_declined and not tiebreak_used and tiebreak_clues(askable, set(tied), non_target_dept_ids):
         return ClueDecision("tiebreak", tied_dept_ids=tuple(tied), reason=reason)
     return ClueDecision("family_medicine", tied_dept_ids=tuple(tied), reason=reason)
