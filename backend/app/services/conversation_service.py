@@ -33,6 +33,7 @@ _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
 _MULTI_QUESTION = re.compile(r"[?？].*[?？]|[;；]", re.DOTALL)
+_EXPLANATION_PUNCTUATION = re.compile(r"[?？;；]")
 _MULTI_DIMENSION_QUESTION = re.compile(
     r"(?:另外|並且|還有|以及).{0,12}(?:是否|有沒有|多久|何時|哪裡|什麼|如何|多少|幾次|幾天)|"
     r"(?:如何|多少|多久|幾次|幾天)[^？?]{0,40}[，、](?:是否|有沒有|何時|哪裡)"
@@ -70,6 +71,7 @@ class ClarificationSuggestion:
     rejection_reason: str | None = None
     repair_attempted: bool = False
     reply_source: str = "AI_PLANNER"
+    explanation: str | None = None
 
 
 def validated_dialogue_act(
@@ -146,7 +148,10 @@ async def request_clarification(
         "例如詢問程度時，不要在同一句再問疼痛或其他伴隨不適。"
         f"{answer_contract}"
         "partial 或 unclear 時維持同一 intent，提出一個更精確、不重複、只問同一面向的追問。"
-        "dialogue_act=request_explanation 時，具體解釋目前要確認的單一資訊並提出可回答的聚焦問題；"
+        "dialogue_act.act=request_explanation 時，explanation 用 1～2 句白話說明使用者看不懂的內容"
+        "（例如上一題提到的症狀是什麼意思），以及為什麼需要確認這項資訊；explanation 不得診斷，"
+        "不得出現科、醫師、醫生、掛號等字，不得含問號或分號。question 仍只問同一 intent 的一個聚焦問題"
+        "（安全篩檢時 intent 仍為 safety_screen）。其他情況 explanation 一律輸出 null。"
         "claims_already_answered 時，先參照 accepted clarification_evidence，不得重問已回答 intent，"
         "也不得僅因使用者表示說過就新增證據。若仍缺資訊，明確指出那一個資訊。"
         "不要使用『剛才問題』『再補充細節』『換個方式』等沒有具體資訊的罐頭。"
@@ -163,14 +168,18 @@ async def request_clarification(
         "grounded_patient_evidence.red_flags_checked=true、沒有 pending intent，且已有主要症狀與具體細節時，"
         "應建議 sufficient，不要為了找病因或補齊固定欄位繼續追問。"
         "不得診斷、建議科別或醫師、修改患者事實或控制 workflow。"
-        "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, intent, reason, "
+        "只輸出 JSON，欄位為 status (clarification_needed 或 sufficient), question, explanation (字串或 null), "
+        "intent, reason, "
         "answered_intent, answer_source_text, answer_status, answer_confidence, information_needs。"
         "information_needs 是僅含一個患者能回答的具體資訊需求的字串陣列；不能寫安全狀態或工作流程。"
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
+    explanation_required = validated_dialogue_act(dialogue_act, user_sources) == "request_explanation"
     rejection = None
     initial_rejection = None
+    # A proposal whose question passed but whose explanation did not.
+    degraded: tuple[dict, int] | None = None
     for attempt in range(2):
         proposal = None
         raw = None
@@ -190,34 +199,76 @@ async def request_clarification(
                 rejection = "invalid_json"
             else:
                 rejection =_question_rejection(case, proposal, required_intent, safety_planning)
+                if (rejection is None and explanation_required
+                        and proposal["status"] == "clarification_needed"
+                        and not _valid_explanation(proposal.get("explanation"))):
+                    rejection = "missing_or_invalid_explanation"
+                    degraded = (proposal, attempt)
         logger.info(
             "clarification proposal case_id=%s accepted=%s rejection_reason=%s repair_attempted=%s",
             case.case_id, rejection is None, rejection, bool(attempt),
         )
         if rejection is None:
-            needs = (proposal.get("information_needs") or []) if proposal["status"] == "clarification_needed" else []
-            return ClarificationSuggestion(
-                proposal["status"],
-                proposal.get("question", "").strip() if proposal["status"] == "clarification_needed" else None,
-                proposal.get("intent") if proposal["status"] == "clarification_needed" else None,
-                proposal["reason"].strip()[:240],
-                information_need=needs[0].strip() if needs else None,
-                rejection_reason=initial_rejection,
-                repair_attempted=bool(attempt), reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
-            )
+            return _accepted_suggestion(proposal, attempt, initial_rejection, keep_explanation=explanation_required)
         if attempt == 0:
             initial_rejection = rejection
             repair_context = dict(payload, original_proposal=proposal if proposal is not None else str(raw),
                                   rejection_reason=rejection)
             prompt = (
                 prompt + "\n這是唯一一次修復：依下列 validator rejection_reason 修正 proposal，"
-                "只產生目前 required intent 的一個具體問句，不得新增患者事實或控制 state。\n"
+                "只產生目前 required intent 的一個具體問句，不得新增患者事實或控制 state；"
+                "若 rejection_reason=missing_or_invalid_explanation，保留合格 question 並補上合格 explanation。\n"
                 + json.dumps(repair_context, ensure_ascii=False)
             )
+    if degraded is not None:
+        # The question itself passed validation; ask it without an explanation rather than fail the turn.
+        logger.info("clarification proposal case_id=%s accepted=true rejection_reason=explanation_degraded", case.case_id)
+        return _accepted_suggestion(*degraded, "explanation_degraded", keep_explanation=False,
+                                    repair_attempted=bool(attempt))
     return ClarificationSuggestion(
         "clarification_needed", None, None, "clarification_generation_failed",
         rejection_reason=rejection, repair_attempted=bool(attempt), reply_source="TECHNICAL_FALLBACK",
     )
+
+
+def _accepted_suggestion(proposal: dict, attempt: int, rejection_reason: str | None, *,
+                         keep_explanation: bool, repair_attempted: bool | None = None) -> ClarificationSuggestion:
+    clarifying = proposal["status"] == "clarification_needed"
+    needs = (proposal.get("information_needs") or []) if clarifying else []
+    return ClarificationSuggestion(
+        proposal["status"],
+        proposal.get("question", "").strip() if clarifying else None,
+        proposal.get("intent") if clarifying else None,
+        proposal["reason"].strip()[:240],
+        information_need=needs[0].strip() if needs else None,
+        rejection_reason=rejection_reason,
+        repair_attempted=bool(attempt) if repair_attempted is None else repair_attempted,
+        reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
+        # AI explanations are kept only for a validated request_explanation turn; otherwise dropped.
+        explanation=proposal["explanation"].strip() if keep_explanation and clarifying else None,
+    )
+
+
+def _valid_explanation(value: object) -> bool:
+    # Explanations may mention several symptoms, so the multi-dimension guard is not applied.
+    return (
+        isinstance(value, str) and 4 <= len(value.strip()) <= 150
+        and not _UNSAFE_QUESTION.search(value) and not _INTERNAL_STATE_TEXT.search(value)
+        and not _EXPLANATION_PUNCTUATION.search(value)
+    )
+
+
+def _asked_before(case: TriageCase, question: str) -> bool:
+    """Displayed replies may prefix an explanation line; compare the question itself too."""
+    question = question.strip()
+    return any(
+        item.role == "assistant" and (item.content == question or item.content.endswith("\n" + question))
+        for item in case.history_records
+    )
+
+
+def _with_explanation(suggestion: ClarificationSuggestion, question: str) -> str:
+    return f"{suggestion.explanation}\n{question}" if suggestion.explanation else question
 
 
 def _question_rejection(case: TriageCase, proposal: object, required_intent: str | None,
@@ -266,7 +317,7 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
         return "generic_question"
     if re.search(r"剛才問題|上一個追問", question):
         return "generic_retry"
-    if any(item.role == "assistant" and item.content == question.strip() for item in case.history_records):
+    if _asked_before(case, question):
         return "duplicate_question"
     if safety_planning and question.strip() == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
         return "repeated_safety_checklist"
@@ -470,7 +521,7 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
         state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
-    if not question or any(m.role == "assistant" and m.content == question for m in case.history_records):
+    if not question or _asked_before(case, question):
         if state.safety_answer_validation == "request_explanation":
             question = TECHNICAL_CLARIFICATION_REPLY
             state.reply_source = "TECHNICAL_FALLBACK"
@@ -479,6 +530,7 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
             state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     else:
         state.reply_source = suggestion.reply_source
+        question = _with_explanation(suggestion, question)
     state.clarification_status = "safety_check"
     state.last_question_key = RED_FLAG_QUESTION_KEY
     state.is_complete = False
@@ -600,7 +652,7 @@ def advance_conversation(
             and (suggestion.intent not in state.asked_clarification_intents
                  or suggestion.intent == state.department_next_question_intent)
         ))
-        and not any(item.role == "assistant" and item.content == suggestion.question for item in case.history_records)
+        and not _asked_before(case, suggestion.question or "")
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
     if valid_question:
@@ -614,6 +666,7 @@ def advance_conversation(
         # Information needs belong to this proposal, never to the previous owner.
         state.next_information_needed = [suggestion.information_need] if suggestion.information_need else []
         state.reply_source = suggestion.reply_source
+        question = _with_explanation(suggestion, question)
     else:
         question = TECHNICAL_CLARIFICATION_REPLY
         reason = "clarification_generation_failed"

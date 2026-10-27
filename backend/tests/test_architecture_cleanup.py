@@ -16,6 +16,7 @@ from test_phase7_natural_safety import runtime, evidence, pending, respond
 
 ACTIVE = [{"dept_id": 1333, "parent_dept": "耳鼻喉部", "child_dept": "耳科"}]
 QUESTION = "我想確認這次頭痛是否突然開始？"
+EXPLANATION = "突然開始是指頭痛在很短時間內變得很明顯，這能幫助確認是否需要優先處理。"
 
 
 @pytest.mark.parametrize("success", [True, False])
@@ -31,13 +32,13 @@ def test_safety_explanation_has_ai_question_or_technical_failure(runtime, succes
         ttas_evidence=[], time_preferences=[], prior_answer_reference=None, department_preference=None,
         dialogue_act=dict(act="request_explanation", source_text=text, confidence=0.99)))
     planner.return_value = json.dumps(dict(status="clarification_needed", intent="safety_screen",
-        question=QUESTION if success else "", reason="安全資訊尚未確認", information_needs=["頭痛發作方式"]))
+        question=QUESTION if success else "", explanation=EXPLANATION, reason="安全資訊尚未確認", information_needs=["頭痛發作方式"]))
     result = client.post("/chat", json={"case_id": case.case_id, "message": text}).json()
     state = result["conversation_state"]
     assert state["safety_answer_attempts"] == 0
     assert state["clarification_status"] == "safety_check"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
-    assert result["reply"] == (QUESTION if success else cs.TECHNICAL_CLARIFICATION_REPLY)
+    assert result["reply"] == (f"{EXPLANATION}\n{QUESTION}" if success else cs.TECHNICAL_CLARIFICATION_REPLY)
     assert state["reply_source"] == ("AI_PLANNER" if success else "TECHNICAL_FALLBACK")
     assert planner.await_count == (1 if success else 2)
     department.assert_not_awaited()

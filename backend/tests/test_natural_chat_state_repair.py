@@ -278,7 +278,7 @@ def test_turn_log_has_ownership_and_reply_origin_but_no_patient_text(runtime, ca
     save_case(case)
     text = "SENTINEL_PRIVATE_我聽不懂"
     interpreter.return_value = json.dumps(dict(pending_answer=None, ttas_evidence=[], time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], dialogue_act=act(text, "request_explanation")))
-    planner.return_value = json.dumps(plan())
+    planner.return_value = json.dumps({**plan(), "explanation": "頭暈的感受是指暈的時候身體或周圍的感覺"})
     with caplog.at_level(logging.INFO):
         client.post("/chat", json=dict(case_id=case.case_id, message=text))
     assert text not in caplog.text
@@ -801,10 +801,12 @@ def active_safety_case():
 
 
 SAFETY_EXPLANATION_QUESTION = "我想確認這次不舒服是否突然出現？"
+SAFETY_EXPLANATION = "突然出現是指不舒服在很短時間內發生，這能幫助確認是否需要優先處理。"
 
 
 def safety_explanation_plan():
-    return {**plan(SAFETY_EXPLANATION_QUESTION, "safety_screen"), "information_needs": ["不舒服是否突然出現"]}
+    return {**plan(SAFETY_EXPLANATION_QUESTION, "safety_screen"), "information_needs": ["不舒服是否突然出現"],
+            "explanation": SAFETY_EXPLANATION}
 
 
 def test_control_safety_explanation_does_not_consume_answer_attempt(runtime, caplog):
@@ -823,7 +825,7 @@ def test_control_safety_explanation_does_not_consume_answer_attempt(runtime, cap
     assert state["clarification_status"] == "safety_check"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
     assert result["triage_case"]["patient_input"]["red_flags_status"] == "not_checked"
-    assert result["reply"] == SAFETY_EXPLANATION_QUESTION
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"
     assert state["reply_source"] == "AI_PLANNER"
     department.assert_not_awaited()
     planner.assert_awaited_once()

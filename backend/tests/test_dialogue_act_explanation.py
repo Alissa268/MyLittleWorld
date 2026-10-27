@@ -1,12 +1,17 @@
 """Validated dialogue act diagnostics and planner explanations; all AI responses are mocked."""
+import asyncio
 import json
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.schemas import DialogueActInterpretation
+from app.schemas import DialogueActInterpretation, Message
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
-from test_natural_chat_state_repair import act, clinical_case, plan
+from test_natural_chat_state_repair import (
+    FOCUSED, INTENT, SAFETY_EXPLANATION, SAFETY_EXPLANATION_QUESTION, act, active_safety_case, clinical_case, plan,
+    safety_explanation_plan,
+)
 from test_phase7_natural_safety import runtime  # noqa: F401
 
 
@@ -66,3 +71,159 @@ def test_validated_dialogue_act_rejects_unreliable_acts(dialogue_act, sources):
 def test_validated_dialogue_act_accepts_grounded_confident_act():
     value = DialogueActInterpretation(act="request_explanation", source_text="聽不懂", confidence=0.99)
     assert cs.validated_dialogue_act(value, ["我聽不懂"]) == "request_explanation"
+
+
+EXPLANATION = "頭暈的感受是指暈的時候周圍或身體的感覺，這能幫助分辨不舒服的類型。"
+MULTI_SYMPTOM_EXPLANATION = "暈的感受包括天旋地轉、眼前發黑，還有是否走路不穩，這些能幫助了解暈的類型。"
+
+
+def explained(explanation=EXPLANATION, question=FOCUSED, intent=INTENT):
+    return json.dumps({**plan(question, intent), "explanation": explanation}, ensure_ascii=False)
+
+
+def ask_explanation(client, interpreter, case):
+    save_case(case)
+    interpret(interpreter, act("我聽不懂", "request_explanation"))
+    return client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，這是什麼意思？")).json()
+
+
+def test_explanation_is_shown_before_question_and_pending_keeps_question_only(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = explained()
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert result["reply"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert result["next_question"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert state["pending_clarification_question"] == FOCUSED
+    assert result["triage_case"]["history_records"][-1]["content"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert state["reply_source"] == "AI_PLANNER"
+    assert state["question_rejection_reason"] is None
+    planner.assert_awaited_once()
+
+
+def test_missing_explanation_triggers_one_repair_that_can_add_it(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.side_effect = [json.dumps(plan(), ensure_ascii=False), explained()]
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert "missing_or_invalid_explanation" in planner.await_args_list[1].args[0]
+    assert result["reply"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert state["pending_clarification_question"] == FOCUSED
+    assert state["reply_source"] == "AI_REPAIR"
+    assert state["question_rejection_reason"] == "missing_or_invalid_explanation"
+
+
+def test_repair_without_explanation_degrades_to_valid_question(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = json.dumps(plan(), ensure_ascii=False)
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert result["reply"] == FOCUSED
+    assert state["pending_clarification_question"] == FOCUSED
+    assert state["question_rejection_reason"] == "explanation_degraded"
+    assert state["reply_source"] == "AI_REPAIR"
+    assert result["reply"] != cs.TECHNICAL_CLARIFICATION_REPLY
+
+
+def test_explanation_may_list_several_symptoms(runtime):
+    client, interpreter, planner, _ = runtime
+    assert cs._MULTI_DIMENSION_QUESTION.search(MULTI_SYMPTOM_EXPLANATION)
+    planner.return_value = explained(MULTI_SYMPTOM_EXPLANATION)
+    result = ask_explanation(client, interpreter, clinical_case())
+    assert result["reply"] == f"{MULTI_SYMPTOM_EXPLANATION}\n{FOCUSED}"
+    planner.assert_awaited_once()
+
+
+@pytest.mark.parametrize("explanation", [
+    "這和耳鼻喉科的評估有關，能幫助了解暈的類型。",
+    "頭暈的感受是什麼意思呢？這能幫助分辨類型。",
+    "這能幫助分辨類型；也能確認安全。",
+    "從描述看來你得了眩暈症，所以需要確認感受。",
+    "確診前需要先確認頭暈的感受。",
+    "這需要醫師判斷，所以想先確認感受。",
+    "已記錄本輪新資訊，需要再確認感受。",
+    "短",
+    "說明" * 76,
+    None,
+    ["頭暈的感受"],
+])
+def test_invalid_explanation_is_rejected(runtime, explanation):
+    client, interpreter, planner, _ = runtime
+    assert not cs._valid_explanation(explanation)
+    planner.side_effect = [explained(explanation), explained()]
+    result = ask_explanation(client, interpreter, clinical_case())
+    assert "missing_or_invalid_explanation" in planner.await_args_list[1].args[0]
+    assert result["reply"] == f"{EXPLANATION}\n{FOCUSED}"
+
+
+def test_explanation_is_dropped_when_act_is_not_request_explanation(runtime):
+    client, interpreter, planner, _ = runtime
+    case = clinical_case()
+    state = case.conversation_state
+    state.pending_clarification_intent = None
+    state.asked_clarification_intents = []
+    save_case(case)
+    interpret(interpreter, act("天旋地轉", "answer"))
+    planner.return_value = explained()
+    result = client.post("/chat", json=dict(case_id=case.case_id, message="天旋地轉")).json()
+    assert result["conversation_state"]["last_dialogue_act"] == "answer"
+    assert result["reply"] == FOCUSED
+    assert EXPLANATION not in json.dumps(result, ensure_ascii=False)
+    planner.assert_awaited_once()
+
+
+def test_unvalidated_request_explanation_does_not_keep_explanation():
+    case = clinical_case()
+    unreliable = DialogueActInterpretation(act="request_explanation", source_text="原文不存在", confidence=0.99)
+    with patch.object(cs, "complete_runtime_json", AsyncMock(return_value=explained())) as planner:
+        suggestion = asyncio.run(cs.request_clarification(case, ["我聽不懂"], dialogue_act=unreliable))
+    planner.assert_awaited_once()
+    assert suggestion.question == FOCUSED
+    assert suggestion.explanation is None
+
+
+def test_duplicate_check_compares_question_inside_explained_reply():
+    case = clinical_case()
+    case.history_records.append(Message(role="assistant", content=f"{EXPLANATION}\n{FOCUSED}"))
+    rejection = cs._question_rejection(case, json.loads(explained()), INTENT, False)
+    assert rejection == "duplicate_question"
+
+
+def test_safety_explanation_keeps_attempts_and_shows_explanation(runtime):
+    client, interpreter, planner, department = runtime
+    planner.return_value = json.dumps(safety_explanation_plan(), ensure_ascii=False)
+    result = ask_explanation(client, interpreter, active_safety_case())
+    state = result["conversation_state"]
+    assert state["safety_answer_attempts"] == 1
+    assert state["safety_answer_validation"] == "request_explanation"
+    assert state["clarification_status"] == "safety_check"
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"
+    assert result["reply"] != cs.SAFETY_RETRY_REPLY
+    assert state["reply_source"] == "AI_PLANNER"
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+    department.assert_not_awaited()
+
+
+def test_safety_explanation_degrades_without_technical_fallback(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = json.dumps({**safety_explanation_plan(), "explanation": None}, ensure_ascii=False)
+    result = ask_explanation(client, interpreter, active_safety_case())
+    state = result["conversation_state"]
+    assert state["safety_answer_attempts"] == 1
+    assert result["reply"] == SAFETY_EXPLANATION_QUESTION
+    assert state["question_rejection_reason"] == "explanation_degraded"
+    assert state["reply_source"] == "AI_REPAIR"
+    assert result["reply"] not in {cs.SAFETY_RETRY_REPLY, cs.TECHNICAL_CLARIFICATION_REPLY}
+
+
+def test_repeated_safety_question_after_explained_reply_is_not_reused(runtime):
+    client, interpreter, planner, _ = runtime
+    case = active_safety_case()
+    case.history_records.append(
+        Message(role="assistant", content=f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"))
+    planner.return_value = json.dumps(safety_explanation_plan(), ensure_ascii=False)
+    result = ask_explanation(client, interpreter, case)
+    assert result["conversation_state"]["question_rejection_reason"] == "duplicate_question"
+    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
