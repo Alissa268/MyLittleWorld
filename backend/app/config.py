@@ -39,6 +39,17 @@ class Settings(BaseSettings):
         le=60,
         alias="DOCTOR_SCORING_TOTAL_TIMEOUT_SECONDS",
     )
+    # 線索題收斂（docs/修改計畫.md 第 9 節「線索題收斂」）
+    clue_question_limit: int = Field(default=5, ge=1, le=10, alias="CLUE_QUESTION_LIMIT")
+    clue_concepts_per_question: int = Field(default=3, ge=1, le=5, alias="CLUE_CONCEPTS_PER_QUESTION")
+    clue_planner_concept_limit: int = Field(default=10, ge=1, le=20, alias="CLUE_PLANNER_CONCEPT_LIMIT")
+    family_medicine_department_name: str = Field(
+        default="家庭醫學科(一般門診/戒菸)", alias="FAMILY_MEDICINE_DEPARTMENT_NAME",
+    )
+    family_medicine_fallback_message: str = Field(
+        default="目前的症狀無法明確區分科別，系統建議先由家庭醫學科初步評估。",
+        alias="FAMILY_MEDICINE_FALLBACK_MESSAGE",
+    )
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
     deploy_mode: str = Field(default="local", alias="DEPLOY_MODE")
     disable_local_embedding: bool = Field(default=False, alias="DISABLE_LOCAL_EMBEDDING")

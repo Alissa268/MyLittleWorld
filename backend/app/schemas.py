@@ -297,6 +297,14 @@ class SemanticOfficialLink(BaseModel):
     knowledge_concept: str
 
 
+class ClueConceptRecord(BaseModel):
+    # One official concept asked by a clue question, with the candidate department it targeted.
+    concept: str
+    dept_id: int
+    question_index: int = Field(ge=1)
+    answer: Literal["present", "absent", "uncertain", "unanswered"] = "unanswered"
+
+
 class CandidateDepartment(BaseModel):
     dept_id: int
     parentDept: str
@@ -341,6 +349,10 @@ class ConversationState(BaseModel):
     department_next_information_needed: Optional[str] = None
     department_next_question_intent: Optional[str] = None
     semantic_official_links: List[SemanticOfficialLink] = Field(default_factory=list)
+    # Clue-question convergence; defaults keep older case snapshots loadable.
+    clue_questions_asked: int = Field(default=0, ge=0)
+    clue_concepts_asked: List[ClueConceptRecord] = Field(default_factory=list)
+    clue_tiebreak_used: bool = False
 
 
 class UrgencyResult(BaseModel):
