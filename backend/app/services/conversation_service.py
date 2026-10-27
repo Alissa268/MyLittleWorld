@@ -151,7 +151,8 @@ async def request_clarification(
         "dialogue_act.act=request_explanation 時，explanation 用 1～2 句白話說明使用者看不懂的內容"
         "（例如上一題提到的症狀是什麼意思），以及為什麼需要確認這項資訊；explanation 不得診斷，"
         "不得出現科、醫師、醫生、掛號等字，不得含問號或分號。question 仍只問同一 intent 的一個聚焦問題"
-        "（安全篩檢時 intent 仍為 safety_screen）。其他情況 explanation 一律輸出 null。"
+        "（安全篩檢時 intent 仍為 safety_screen）。此時 question 可在 explanation 之後原樣重問上一題，"
+        "或改問同一面向更聚焦的一題；更早問過的其他問題仍不得重問。其他情況 explanation 一律輸出 null。"
         "claims_already_answered 時，先參照 accepted clarification_evidence，不得重問已回答 intent，"
         "也不得僅因使用者表示說過就新增證據。若仍缺資訊，明確指出那一個資訊。"
         "不要使用『剛才問題』『再補充細節』『換個方式』等沒有具體資訊的罐頭。"
@@ -175,7 +176,8 @@ async def request_clarification(
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
-    explanation_required = validated_dialogue_act(dialogue_act, user_sources) == "request_explanation"
+    act = validated_dialogue_act(dialogue_act, user_sources)
+    explanation_required = act == "request_explanation"
     rejection = None
     initial_rejection = None
     # A proposal whose question passed but whose explanation did not.
@@ -198,7 +200,8 @@ async def request_clarification(
             except (TypeError, ValueError):
                 rejection = "invalid_json"
             else:
-                rejection =_question_rejection(case, proposal, required_intent, safety_planning)
+                # A restated explained question without a valid explanation stays a duplicate, so it never degrades.
+                rejection = _question_rejection(case, proposal, required_intent, safety_planning, act)
                 if (rejection is None and explanation_required
                         and proposal["status"] == "clarification_needed"
                         and not _valid_explanation(proposal.get("explanation"))):
@@ -217,7 +220,10 @@ async def request_clarification(
             prompt = (
                 prompt + "\n這是唯一一次修復：依下列 validator rejection_reason 修正 proposal，"
                 "只產生目前 required intent 的一個具體問句，不得新增患者事實或控制 state；"
-                "若 rejection_reason=missing_or_invalid_explanation，保留合格 question 並補上合格 explanation。\n"
+                "若 rejection_reason=missing_or_invalid_explanation，保留合格 question 並補上合格 explanation。"
+                "若 rejection_reason=duplicate_question 或 repeated_safety_checklist：只有 dialogue_act.act="
+                "request_explanation 且附上合格 explanation 時，才可原樣重問上一題；否則改問同一面向、"
+                "未曾問過的一個聚焦問題。\n"
                 + json.dumps(repair_context, ensure_ascii=False)
             )
     if degraded is not None:
@@ -267,12 +273,32 @@ def _asked_before(case: TriageCase, question: str) -> bool:
     )
 
 
+def _explained_question(case: TriageCase) -> str | None:
+    """The question part of the last assistant reply before this turn (last line of an explained reply)."""
+    last = next((item.content for item in reversed(case.history_records) if item.role == "assistant"), None)
+    return last.rsplit("\n", 1)[-1].strip() if last else None
+
+
+def _repeated_question(case: TriageCase, question: str, *, dialogue_act: str | None,
+                       explanation: object, safety_planning: bool) -> str | None:
+    """Shared duplicate rule: only a validly explained restatement of the explained question may repeat."""
+    question = question.strip()
+    if (dialogue_act == "request_explanation" and _valid_explanation(explanation)
+            and question == _explained_question(case)):
+        return None
+    if _asked_before(case, question):
+        return "duplicate_question"
+    if safety_planning and question == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
+        return "repeated_safety_checklist"
+    return None
+
+
 def _with_explanation(suggestion: ClarificationSuggestion, question: str) -> str:
     return f"{suggestion.explanation}\n{question}" if suggestion.explanation else question
 
 
 def _question_rejection(case: TriageCase, proposal: object, required_intent: str | None,
-                        safety_planning: bool) -> str | None:
+                        safety_planning: bool, dialogue_act: str | None = None) -> str | None:
     if not isinstance(proposal, dict):
         return "invalid_schema"
     if set(proposal) & {"stage", "confirmed", "red_flags_checked", "department_result", "is_complete", "doctor_id", "schedule_id"}:
@@ -317,10 +343,10 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
         return "generic_question"
     if re.search(r"剛才問題|上一個追問", question):
         return "generic_retry"
-    if _asked_before(case, question):
-        return "duplicate_question"
-    if safety_planning and question.strip() == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
-        return "repeated_safety_checklist"
+    repeated = _repeated_question(case, question, dialogue_act=dialogue_act,
+                                  explanation=proposal.get("explanation"), safety_planning=safety_planning)
+    if repeated:
+        return repeated
     if not safety_planning and _asks_filled_duration(case, intent, question):
         return "already_collected_duration"
     return None
@@ -521,7 +547,8 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
         state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
-    if not question or _asked_before(case, question):
+    if not question or _repeated_question(case, question, dialogue_act=state.last_dialogue_act,
+                                          explanation=suggestion.explanation, safety_planning=True):
         if state.safety_answer_validation == "request_explanation":
             question = TECHNICAL_CLARIFICATION_REPLY
             state.reply_source = "TECHNICAL_FALLBACK"
@@ -652,7 +679,8 @@ def advance_conversation(
             and (suggestion.intent not in state.asked_clarification_intents
                  or suggestion.intent == state.department_next_question_intent)
         ))
-        and not _asked_before(case, suggestion.question or "")
+        and not _repeated_question(case, suggestion.question or "", dialogue_act=state.last_dialogue_act,
+                                   explanation=suggestion.explanation, safety_planning=False)
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
     if valid_question:

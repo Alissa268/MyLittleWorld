@@ -8,6 +8,7 @@ import pytest
 from app.schemas import DialogueActInterpretation, Message
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
+from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from test_natural_chat_state_repair import (
     FOCUSED, INTENT, SAFETY_EXPLANATION, SAFETY_EXPLANATION_QUESTION, act, active_safety_case, clinical_case, plan,
     safety_explanation_plan,
@@ -218,12 +219,112 @@ def test_safety_explanation_degrades_without_technical_fallback(runtime):
     assert result["reply"] not in {cs.SAFETY_RETRY_REPLY, cs.TECHNICAL_CLARIFICATION_REPLY}
 
 
-def test_repeated_safety_question_after_explained_reply_is_not_reused(runtime):
+def test_earlier_explained_safety_question_is_not_reused(runtime):
     client, interpreter, planner, _ = runtime
     case = active_safety_case()
     case.history_records.append(
         Message(role="assistant", content=f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"))
+    case.history_records.append(Message(role="assistant", content=CHECKLIST))
     planner.return_value = json.dumps(safety_explanation_plan(), ensure_ascii=False)
     result = ask_explanation(client, interpreter, case)
     assert result["conversation_state"]["question_rejection_reason"] == "duplicate_question"
     assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+
+
+CHECKLIST = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+EARLIER = "你頭暈時有什麼感受？"
+
+
+def restate_checklist(explanation=SAFETY_EXPLANATION):
+    return json.dumps({**safety_explanation_plan(), "question": CHECKLIST, "explanation": explanation},
+                      ensure_ascii=False)
+
+
+def test_safety_explanation_may_restate_explained_checklist(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = restate_checklist()
+    result = ask_explanation(client, interpreter, active_safety_case())
+    state = result["conversation_state"]
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
+    assert state["safety_answer_attempts"] == 1
+    assert state["safety_answer_validation"] == "request_explanation"
+    assert state["reply_source"] == "AI_PLANNER"
+    assert state["question_rejection_reason"] is None
+    planner.assert_awaited_once()
+
+
+def test_restated_checklist_without_explanation_is_rejected_not_degraded(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = restate_checklist(None)
+    result = ask_explanation(client, interpreter, active_safety_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert "duplicate_question" in planner.await_args_list[1].args[0]
+    assert state["question_rejection_reason"] == "duplicate_question"
+    assert state["question_repair_attempted"] is True
+    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+
+
+def test_restated_checklist_repair_may_add_explanation(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.side_effect = [restate_checklist(None), restate_checklist()]
+    result = ask_explanation(client, interpreter, active_safety_case())
+    state = result["conversation_state"]
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
+    assert state["reply_source"] == "AI_REPAIR"
+    assert state["safety_answer_attempts"] == 1
+
+
+def explained_again_case():
+    case = clinical_case()
+    case.history_records += [Message(role="user", content="不太懂"), Message(role="assistant", content=FOCUSED)]
+    case.conversation_state.pending_clarification_question = FOCUSED
+    return case
+
+
+def test_explained_earlier_question_is_still_duplicate(runtime):
+    client, interpreter, planner, _ = runtime
+    case = explained_again_case()
+    assert cs._question_rejection(case, json.loads(explained(question=EARLIER)), INTENT, False,
+                                  "request_explanation") == "duplicate_question"
+    planner.return_value = explained(question=EARLIER)
+    result = ask_explanation(client, interpreter, case)
+    assert result["conversation_state"]["question_rejection_reason"] == "duplicate_question"
+    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+
+
+@pytest.mark.parametrize("dialogue_act", ["answer", None])
+def test_restating_last_question_without_request_explanation_is_duplicate(dialogue_act):
+    proposal = json.loads(explained(question=EARLIER))
+    assert cs._question_rejection(clinical_case(), proposal, INTENT, False, dialogue_act) == "duplicate_question"
+
+
+def test_clarifying_explanation_may_restate_pending_question(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = explained()
+    result = ask_explanation(client, interpreter, explained_again_case())
+    state = result["conversation_state"]
+    assert result["reply"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert state["pending_clarification_question"] == FOCUSED
+    assert state["pending_clarification_intent"] == INTENT
+    assert state["reply_source"] == "AI_PLANNER"
+    assert state["question_rejection_reason"] is None
+    planner.assert_awaited_once()
+
+
+def test_repeated_safety_explanations_still_stop_at_hard_turn_cap(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = restate_checklist()
+    case = active_safety_case()
+    save_case(case)
+    interpret(interpreter, act("我聽不懂", "request_explanation"))
+    for turn in range(1, cs.HARD_TURN_CAP + 1):
+        result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，這是什麼意思？")).json()
+        state = result["conversation_state"]
+        assert state["safety_answer_attempts"] == 1
+        if turn < cs.HARD_TURN_CAP:
+            assert state["clarification_status"] == "safety_check"
+            assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
+    assert state["clarification_status"] == "unresolved"
+    assert state["reply_source"] == "SAFETY_CONTROLLED_FALLBACK"
+    assert not result["triage_case"]["patient_input"]["red_flags_checked"]
