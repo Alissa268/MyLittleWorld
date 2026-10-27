@@ -72,6 +72,18 @@ class ClarificationSuggestion:
     reply_source: str = "AI_PLANNER"
 
 
+def validated_dialogue_act(
+    dialogue_act: DialogueActInterpretation | None, user_sources: list[str],
+) -> str | None:
+    """Return the act only when it is confident and grounded in this turn's text."""
+    if dialogue_act is None or dialogue_act.confidence < ACCEPT_THRESHOLD:
+        return None
+    source = dialogue_act.source_text.strip()
+    if not source or not any(source in text for text in user_sources):
+        return None
+    return dialogue_act.act
+
+
 def _pending_question(case: TriageCase) -> str | None:
     if case.conversation_state.pending_clarification_intent and case.conversation_state.pending_clarification_question:
         return case.conversation_state.pending_clarification_question

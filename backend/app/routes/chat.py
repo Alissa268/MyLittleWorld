@@ -26,6 +26,7 @@ from app.services.conversation_service import (
     clear_answered_pending,
     request_clarification,
     safety_screen_resolved,
+    validated_dialogue_act,
 )
 from app.services.department_reasoning_service import accepted_semantic_evidence, reason_about_departments
 from app.services.department_preference_service import resolve_requested_department
@@ -72,6 +73,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         urgent_terminal_at_request_start = _is_urgent_terminal(case)
         safety_check_turn = case.conversation_state.clarification_status == "safety_check"
         free_text_request = _request_has_text_input(req)
+        case.conversation_state.last_dialogue_act = None
     record_chat_route_trace(
         case_id=case.case_id,
         triage_branch="ai_first_free_text",
@@ -212,6 +214,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             with perf.measure("semantic_refinement"), ai_phase("semantic_refinement"):
                 ai_suggestion = await refine_case_with_ai(case, user_sources=user_text_parts)
             case.conversation_state.revision_mode = False
+        case.conversation_state.last_dialogue_act = validated_dialogue_act(
+            getattr(ai_suggestion, "dialogue_act", None), user_text_parts,
+        )
         if ai_suggestion is not None and getattr(ai_suggestion, "department_preference", None) is not None:
             department_preference_name = ai_suggestion.department_preference.department_name
         if free_text_request and not ai_available and not safety_check_turn:

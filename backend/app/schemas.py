@@ -317,6 +317,8 @@ class ConversationState(BaseModel):
     consecutive_no_progress_turns: int = Field(default=0, ge=0)
     safety_answer_attempts: int = 0
     safety_answer_validation: Optional[str] = None
+    # Diagnostic only: Backend-validated dialogue act value of this turn, never its source text.
+    last_dialogue_act: Optional[str] = None
     reply_source: Optional[str] = None
     question_rejection_reason: Optional[str] = None
     question_repair_attempted: bool = False
