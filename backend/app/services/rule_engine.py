@@ -7,6 +7,7 @@ from typing import Any
 
 from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
+from app.services.department_knowledge import normalize_concept
 from app.services.field_acceptance import ai_normalized_value_valid, normalized_value_valid
 from app.services.question_specs import QUESTION_SPECS
 
@@ -95,7 +96,7 @@ def apply_semantic_extractions(
             if is_ai_extraction:
                 _log_ai_apply_decision(case, extraction, False, "red_flags_not_semantic_evidence")
             continue
-        if (
+        duplicate_candidate = bool(
             is_ai_extraction
             and not case.conversation_state.revision_mode
             and not replace_existing
@@ -106,7 +107,16 @@ def apply_semantic_extractions(
                 and extraction.assertion in {"absent", "uncertain"}
             )
             and _field_has_value(case, extraction.field)
-        ):
+        )
+        # A further present symptom concept never replaces the stored symptom,
+        # but it stays retrievable evidence instead of being discarded.
+        additional_symptom = bool(
+            duplicate_candidate
+            and extraction.field == "symptom"
+            and extraction.assertion == "present"
+            and _is_new_symptom_concept(case, extraction, accepted_extractions)
+        )
+        if duplicate_candidate and not additional_symptom:
             _log_ai_apply_decision(case, extraction, False, "duplicate_existing_value")
             continue
         value_valid = (
@@ -164,6 +174,10 @@ def apply_semantic_extractions(
                 )
             _log_ai_apply_decision(case, extraction, False, reason)
             continue
+        if additional_symptom:
+            accepted_extractions.append(extraction)
+            _log_ai_apply_decision(case, extraction, True, None)
+            continue
         _record_semantic_extraction(case, extraction)
         _apply_semantic_extraction(case, extraction, replace_existing=replace_existing)
         accepted_extractions.append(extraction)
@@ -183,6 +197,20 @@ def _has_nonempty_medical_concept(extraction: SemanticExtraction) -> bool:
             isinstance(item, str) and item.strip() for item in extraction.normalized_value
         )
     return False
+
+
+def _is_new_symptom_concept(
+    case: TriageCase, extraction: SemanticExtraction, pending: list[SemanticExtraction],
+) -> bool:
+    """Compare structured concepts only; the stored symptom keeps the AI source text."""
+    concept = normalize_concept(str(extraction.normalized_value))
+    known = {normalize_concept(case.patient_input.symptom or "")}
+    known.update(
+        normalize_concept(str(item.normalized_value))
+        for item in (*case.semantic_extractions, *pending)
+        if item.field == "symptom" and item.assertion == "present"
+    )
+    return bool(concept) and concept not in known
 
 
 def _field_has_value(case: TriageCase, field_name: str) -> bool:

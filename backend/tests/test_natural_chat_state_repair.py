@@ -608,7 +608,11 @@ def test_second_c3_c4_no_valid_correction_no_scalar_replacement(kind, confidence
     with patch.object(adapter, "_ai_available", return_value=True), patch.object(adapter, "complete_prompt", provider):
         asyncio.run(adapter.refine_case_with_ai(case, user_sources=[CORRECTION_TEXT]))
     assert case.patient_input.symptom == "頭暈"
-    assert case.semantic_extractions == []
+    # A grounded new_information turn keeps its additional symptom as evidence only;
+    # invalid correction turns are rejected before any evidence is applied.
+    assert [(item.normalized_value, item.assertion) for item in case.semantic_extractions] == (
+        [("頭痛", "present")] if kind == "new_information" else []
+    )
     assert case.conversation_state.pending_clarification_intent == INTENT
 
 
