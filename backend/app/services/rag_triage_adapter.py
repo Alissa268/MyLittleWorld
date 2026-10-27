@@ -9,6 +9,7 @@ from typing import Any
 
 from app.config import get_settings
 from app.schemas import (
+    ConceptAnswer,
     DepartmentPreferenceInterpretation,
     DialogueActInterpretation,
     PendingAnswerInterpretation,
@@ -26,6 +27,7 @@ from app.services.conversation_service import (
     validate_prior_answer_reference,
 )
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
+from app.services.department_clues import pending_clue_concepts
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.department_preference_service import validate_department_preference, active_department_candidates
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
@@ -91,11 +93,13 @@ async def refine_case_with_ai(
         return None
 
     pending_intent = _active_pending_intent(case)
+    clue_concepts = _pending_clue_concepts(case)
     dialogue_act = _dialogue_act_from_ai(data.get("dialogue_act"), user_sources)
     semantic_extractions, pending_answer, ttas_evidence = _validated_turn_interpretation(
         data,
         pending_intent=pending_intent,
         user_sources=user_sources,
+        clue_concepts=clue_concepts,
     )
     prior_reference = validate_prior_answer_reference(
         data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
@@ -116,6 +120,7 @@ async def refine_case_with_ai(
         ttas_evidence=ttas_evidence,
         time_preferences=time_preferences,
         department_preference=department_preference,
+        clue_concepts=clue_concepts,
     )
 
     if repair_reason is not None:
@@ -135,6 +140,7 @@ async def refine_case_with_ai(
                 repair_data,
                 pending_intent=pending_intent,
                 user_sources=user_sources,
+                clue_concepts=clue_concepts,
             )
             prior_reference = validate_prior_answer_reference(
                 data.get("prior_answer_reference"), dialogue_act, pending_intent, prior_extractions, prior_user_sources,
@@ -165,6 +171,7 @@ async def refine_case_with_ai(
             ttas_evidence=ttas_evidence,
             time_preferences=time_preferences,
             department_preference=department_preference,
+            clue_concepts=clue_concepts,
         )
         if remaining_rejection is not None:
             logger.warning(
@@ -280,6 +287,7 @@ def _turn_interpretation_rejection_reason(
     ttas_evidence: list[TTASEvidence],
     time_preferences: list[TimePreference],
     department_preference: DepartmentPreferenceInterpretation | None,
+    clue_concepts: list[str] | None = None,
 ) -> str | None:
     """Reject structurally incomplete AI turns; never infer user semantics here."""
     required = {
@@ -308,6 +316,11 @@ def _turn_interpretation_rejection_reason(
         return "new_information_without_grounded_evidence"
     if pending_intent is not None and dialogue_act.act == "answer" and pending_answer is None:
         return "answer_without_pending_answer"
+    # A clue question claimed answered must say which official concepts were answered;
+    # partial/unclear without concept answers is a legitimate miss that Backend re-asks.
+    if (clue_concepts and dialogue_act.act == "answer" and pending_answer is not None
+            and pending_answer.answer_status == "answered" and not pending_answer.concept_answers):
+        return "answer_without_concept_answers"
     if (
         pending_intent is not None
         and pending_answer is None
@@ -323,6 +336,7 @@ def _validated_turn_interpretation(
     *,
     pending_intent: str | None,
     user_sources: list[str],
+    clue_concepts: list[str] | None = None,
 ) -> tuple[list[SemanticExtraction], PendingAnswerInterpretation | None, list[TTASEvidence]]:
     return (
         _semantic_extractions_from_ai(data.get("semantic_extractions"), user_sources=user_sources),
@@ -330,6 +344,7 @@ def _validated_turn_interpretation(
             data.get("pending_answer"),
             pending_intent=pending_intent,
             user_sources=user_sources,
+            clue_concepts=clue_concepts,
         ),
         validate_ttas_evidence_items(data.get("ttas_evidence"), user_sources=user_sources),
     )
@@ -339,6 +354,12 @@ def _active_pending_intent(case: TriageCase) -> str | None:
     if case.conversation_state.clarification_status == "safety_check":
         return SAFETY_PENDING_INTENT
     return case.conversation_state.pending_clarification_intent
+
+
+def _pending_clue_concepts(case: TriageCase) -> list[str]:
+    if _active_pending_intent(case) == SAFETY_PENDING_INTENT:
+        return []
+    return pending_clue_concepts(case.conversation_state)
 
 
 def _is_accepted_clinical_evidence(extraction: SemanticExtraction) -> bool:
@@ -426,11 +447,13 @@ def _pending_answer_from_ai(
     *,
     pending_intent: str | None,
     user_sources: list[str],
+    clue_concepts: list[str] | None = None,
 ) -> PendingAnswerInterpretation | None:
     if pending_intent is None or not isinstance(value, dict):
         return None
     base_keys = {"answered_intent", "answer_status", "answer_source_text", "answer_confidence"}
-    if set(value) not in {frozenset(base_keys), frozenset(base_keys | {"answer_assertion"})}:
+    if (not base_keys <= set(value) or set(value) - base_keys - {"answer_assertion", "concept_answers"}
+            or not isinstance(value.get("concept_answers", []), list)):
         logger.info("turn pending answer accepted=false reason=invalid_schema")
         return None
     intent = value.get("answered_intent")
@@ -464,7 +487,36 @@ def _pending_answer_from_ai(
         answer_source_text=source.strip(),
         answer_confidence=float(confidence),
         answer_assertion=assertion,
+        concept_answers=_concept_answers_from_ai(value.get("concept_answers", []), clue_concepts or [], user_sources),
     )
+
+
+def _concept_answers_from_ai(value: list, clue_concepts: list[str], user_sources: list[str]) -> list[ConceptAnswer]:
+    """Keep only per-concept answers naming an asked official concept, grounded in this turn."""
+    accepted: list[ConceptAnswer] = []
+    for item in value:
+        concept = item.get("concept") if isinstance(item, dict) else None
+        source = item.get("source_text") if isinstance(item, dict) else None
+        confidence = item.get("confidence") if isinstance(item, dict) else None
+        assertion = item.get("answer_assertion") if isinstance(item, dict) else None
+        reason = (
+            "invalid_schema" if not isinstance(item, dict)
+            or set(item) != {"concept", "answer_assertion", "source_text", "confidence"} else
+            "concept_not_asked" if concept not in clue_concepts else
+            "duplicate_concept" if any(answer.concept == concept for answer in accepted) else
+            "invalid_assertion" if not isinstance(assertion, str) or assertion not in _EVIDENCE_ASSERTIONS else
+            "ungrounded_source" if not isinstance(source, str) or not source.strip()
+            or not any(source.strip() in text for text in user_sources) else
+            "invalid_confidence" if type(confidence) not in {int, float} or not math.isfinite(confidence)
+            or not ACCEPT_THRESHOLD <= confidence <= 1 else None
+        )
+        if reason is not None:
+            logger.info("turn concept answer accepted=false reason=%s", reason)
+            continue
+        accepted.append(ConceptAnswer(
+            concept=concept, answer_assertion=assertion, source_text=source.strip(), confidence=float(confidence),
+        ))
+    return accepted
 
 
 def _has_nonempty_medical_concept(field: str, value: Any) -> bool:
@@ -494,6 +546,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_rea
         "這次必須完整輸出 semantic_extractions、pending_answer、ttas_evidence、time_preferences、"
         "dialogue_act、prior_answer_reference、department_preference 七個頂層欄位；不適用時用 [] 或 null，不得省略。"
         "若 dialogue_act=request_explanation，pending_answer 可以為 null，且不得捏造 medical evidence。"
+        "若 rejection_reason=answer_without_concept_answers，pending_answer 必須依規則 15b 補上 concept_answers。"
         "若 dialogue_act=correction，必須輸出本輪逐字原文可支持的更正 evidence；"
         "correction act 本身不能取代 evidence。"
         "保留所有有逐字 source_text 支持的 present、absent、uncertain medical evidence，以及可驗證的"
@@ -525,6 +578,7 @@ def _build_symptom_collection_prompt(
                 tuple(case.semantic_extractions), _prior_user_sources(case, current_user_text or []),
             )
         ] if pending_intent and pending_intent != SAFETY_PENDING_INTENT else [],
+        "pending_clue_concepts": _pending_clue_concepts(case),
     }
     try:
         prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
@@ -557,6 +611,7 @@ def _build_symptom_collection_prompt(
 {json.dumps(pending_context, ensure_ascii=False, indent=2)}
 15. 若 pending_clarification_intent 為 null，pending_answer 必須為 null。否則 pending_answer 包含 answered_intent、answer_status、answer_source_text、answer_confidence，並可包含 answer_assertion；answered_intent 只是 Backend/AI 間的 opaque correlation key，必須原樣 echo pending intent。是否回答應只比較實際 pending_question 與 current_user_text，不得解析 key 名稱或要求患者回答 key 中看似列出的全部概念。answer_status 只能是 answered、partial、unclear，source 必須是 current_user_text 的最短連續逐字片段，confidence 為 0 到 1。明確否定仍可構成 answered。
   15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報安全問題中的狀況，absent 只表示患者明確否認 complete_safety_screen 整份問題，uncertain 表示無法確定。即使 pending_question 已縮小成聚焦追問，僅否認這一項也不能當成整份陰性。部分否認應為 partial，不知道或離題應為 unclear；抱怨跳針不得當成陰性。保留本輪回報的頭痛、頭暈等 evidence，不得由「其他沒有」否定已回報的症狀。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為整份 safety negative。明確陽性仍須抽對應 catalog 內 TTAS evidence，不能由 answer_assertion 決定級數。
+  15b. 若 pending_clue_concepts 非空，pending_question 是詢問這些官方症狀概念的線索題。pending_answer 必須另含 concept_answers 陣列，每項只含 concept、answer_assertion、source_text、confidence：concept 必須逐字取自 pending_clue_concepts（可把患者用語對應到官方概念，但輸出官方字串）；answer_assertion 為 present、absent 或 uncertain；source_text 為 current_user_text 中支持該回答的最短連續逐字片段，簡短回答如「有」「沒有」也可以，但只在能明確判斷它回答了哪些概念時才輸出；confidence 為 0 到 1。患者沒有回答到的概念不要輸出，不得猜測。若全部概念都沒有回答，answer_status 用 partial 或 unclear，concept_answers 用 []。pending_clue_concepts 為空時 concept_answers 用 [] 或省略。
   16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
   17. 同一次 Turn Interpretation 必須完成 TTAS evidence 掃描。請逐一對照下方「目前 production 可執行的 TTAS evidence catalog」與 current_user_text。凡本輪患者原文直接支持的 evidence，都必須輸出；即使同一個事實已經同時出現在 semantic_extractions，也不可因此省略 ttas_evidence。
   18. catalog 的 label_zh / meaning_zh 是語意概念，不是固定關鍵字清單。患者可以使用不同自然說法；只要語意直接等價，而且 source_text 能逐字在 current_user_text 找到，即可抽取。不得只因出現相似字詞就硬套欄位。

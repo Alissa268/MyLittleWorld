@@ -7,10 +7,12 @@ import logging
 import math
 import re
 
+from app.config import get_settings
 from app.db import fetch_active_departments
 from app.schemas import (
     CandidateDepartment, CandidateDepartmentEvidence, DepartmentResult, SemanticOfficialLink, TriageCase,
 )
+from app.services import department_clues as clues
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.department_knowledge import (
@@ -262,10 +264,7 @@ def retained_semantic_official_evidence(
     state = case.conversation_state
     evidence = accepted_semantic_evidence(case)
     present_sources = _present_sources(evidence)
-    contradicted = {
-        normalize_concept(str(item["normalized_value"])) for item in evidence
-        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] in {"absent", "uncertain"}
-    }
+    contradicted = _contradicted_concepts(evidence)
     resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
     kept, found = [], {}
     for link in state.semantic_official_links:
@@ -288,6 +287,33 @@ def retained_semantic_official_evidence(
             )
     state.semantic_official_links = kept
     return list(found.values())
+
+
+def _contradicted_concepts(evidence: list[dict]) -> set[str]:
+    return {
+        normalize_concept(str(item["normalized_value"])) for item in evidence
+        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] in {"absent", "uncertain"}
+    }
+
+
+def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict]) -> None:
+    """Persist the Backend-ranked askable clues of all retrieved candidates for the planner."""
+    state = case.conversation_state
+    settings = get_settings()
+    candidates = clues.candidate_dept_ids(retrieved)
+    mentioned = clues.mentioned_concepts(retrieved, accepted_semantic_evidence(case))
+    askable = clues.clue_concepts(records, candidates, mentioned, state.clue_concepts_asked)
+    state.department_clue_candidates = sorted(candidates)
+    state.department_clue_offer = clues.clue_offer(
+        clues.rank_clue_concepts(askable, settings.clue_planner_concept_limit)
+    )
+
+
+def _clue_answers(case: TriageCase) -> list[dict]:
+    return [
+        dict(concept=record.concept, answer=record.answer)
+        for record in case.conversation_state.clue_concepts_asked if record.answer != "unanswered"
+    ]
 
 
 def remember_semantic_official_links(case: TriageCase, retrieved: list[dict]) -> None:
@@ -400,6 +426,8 @@ async def reason_about_departments(case: TriageCase) -> None:
     state.department_uncertainty_reason = None
     state.department_next_information_needed = None
     state.department_next_question_intent = None
+    state.department_clue_offer = []
+    state.department_clue_candidates = []
     case.department_result = None
     try:
         active = fetch_active_departments()
@@ -419,18 +447,28 @@ async def reason_about_departments(case: TriageCase) -> None:
             retrieved = await retrieve_semantic_official_evidence(case, records, resolutions)
             remember_semantic_official_links(case, retrieved)
         retrieved = _merge_official_evidence(retrieved, retained)
+        retrieved = _merge_official_evidence(retrieved, clues.clue_answer_evidence(
+            state.clue_concepts_asked, records, resolutions,
+            _contradicted_concepts(accepted_semantic_evidence(case)),
+        ))
         if not retrieved:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             return
+        store_clue_offer(case, records, retrieved)
         payload = {
             "accepted_semantic_evidence": accepted_semantic_evidence(case),
             "retrieved_official_evidence": retrieved,
             "previously_asked_intents": state.asked_clarification_intents,
         }
+        clue_answers = _clue_answers(case)
+        if clue_answers:
+            payload["clue_answers"] = clue_answers
         prompt = (
             "僅比較 retrieved_official_evidence 中的正式 DB 科別，不可新增科別、猜 dept_id、診斷或控制流程。"
             "accepted_semantic_evidence 是已驗證的 present/absent/uncertain 語意證據；"
             "retrieved_official_evidence 只會由 present 證據建立，候選 supporting_evidence 只能引用其中項目。"
+            + ("clue_answers 是使用者對線索題（詢問是否有某些官方症狀概念）的回答紀錄，"
+               "answer 為 present、absent 或 uncertain。" if clue_answers else "") +
             "輸出 JSON：status (resolved/ambiguous/unresolved), candidates (最多 3 個，每項 dept_id, "
             "confidence 0..1, supporting_evidence 陣列；每筆有逐字 patient_source_text, knowledge_source_id, "
             "knowledge_concept), uncertainty_reason, next_question_intent。"
@@ -467,4 +505,6 @@ async def reason_about_departments(case: TriageCase) -> None:
         logger.warning("department convergence unavailable case_id=%s error=%s", case.case_id, type(exc).__name__)
         state.department_status = "unresolved"
         state.candidate_departments = []
+        state.department_clue_offer = []
+        state.department_clue_candidates = []
         state.department_uncertainty_reason = "科別證據比對暫時無法完成"

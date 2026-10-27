@@ -9,6 +9,11 @@ distinct ``patient_source_text`` in retrieved official evidence plus distinct cl
 ``question_index`` answered present for that department. Commit 3 把 concept_answers 轉成
 語意證據時，必須標記來源是線索題回答，計分時從 retrieved 的文字計數中排除，避免和題號計數重複加分。
 Such items carry ``evidence_origin == CLUE_ANSWER_ORIGIN`` and are skipped by the text count.
+A concept held by several candidates credits every department in its ``dept_ids``.
+
+``ConversationState.department_clue_offer`` holds only the top ``clue_planner_concept_limit``
+ranked clues for the planner. 平手加問（Commit 5）必須從全部可問線索找，不能只用
+department_clue_offer：tiebreak_clues() must receive the full clue_concepts() result.
 """
 
 from __future__ import annotations
@@ -16,11 +21,14 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Iterable, Literal
 
-from app.schemas import ClueConceptRecord
-from app.services.department_knowledge import normalize_concept
+from app.schemas import ClueConceptRecord, ClueOffer, ConversationState
+from app.services.department_knowledge import lookup_concept, normalize_concept
 
 CLUE_ANSWER_ORIGIN = "clue_answer"
 MAX_CLUE_CONCEPT_RECORDS = 30
+CLUE_INTENT_PREFIX = "department_clue_"
+CLUE_TEMPLATE = "請問您有沒有以下情況：{}？"
+CLUE_REASK_TEMPLATE = "想再確認一次，請問您有沒有以下情況：{}？"
 _SYMPTOM_FIELDS = {"symptom", "accompanying_symptoms"}
 _CONCLUDED_ANSWERS = {"present", "absent"}
 
@@ -105,7 +113,7 @@ def rank_clue_concepts(clues: Iterable[ClueConcept], limit: int) -> list[ClueCon
 
 
 def common_clue_departments(
-    selected: list[str], offered: list[ClueConcept], per_question: int,
+    selected: list[str], offered: Iterable[ClueConcept | ClueOffer], per_question: int,
 ) -> set[int]:
     """Departments shared by 1..per_question distinct offered concepts; empty when invalid."""
     by_concept = {clue.concept: clue for clue in offered}
@@ -115,18 +123,90 @@ def common_clue_departments(
         return set()
     common = set(by_concept[selected[0]].dept_ids)
     for concept in selected[1:]:
-        common &= by_concept[concept].dept_ids
+        common &= set(by_concept[concept].dept_ids)
     return common
+
+
+def clue_offer(ranked: Iterable[ClueConcept]) -> list[ClueOffer]:
+    """Planner-facing form of ranked clues: official concept and opaque department ids only."""
+    return [ClueOffer(concept=clue.concept, dept_ids=sorted(clue.dept_ids)) for clue in ranked]
+
+
+def clue_intent(question_index: int) -> str:
+    """Opaque Backend/AI correlation key of one clue question."""
+    return f"{CLUE_INTENT_PREFIX}{question_index}"
+
+
+def pending_clue_index(state: ConversationState) -> int | None:
+    """The pending clue question's index, only while it still owns the pending intent."""
+    index = state.pending_clue_question_index
+    if index is not None and state.pending_clarification_intent == clue_intent(index):
+        return index
+    return None
+
+
+def pending_clue_concepts(state: ConversationState) -> list[str]:
+    index = pending_clue_index(state)
+    if index is None:
+        return []
+    return [record.concept for record in state.clue_concepts_asked if record.question_index == index]
+
+
+def concepts_missing_from_question(question: str, concepts: Iterable[str]) -> list[str]:
+    """Official concepts not quoted verbatim in the planner's question (AI output only)."""
+    return [concept for concept in concepts if concept not in question]
+
+
+def template_clue_selection(offer: list[ClueOffer], per_question: int) -> tuple[list[str], int | None]:
+    """Up to per_question top-ranked offered concepts sharing the first clue's department."""
+    if not offer or not offer[0].dept_ids:
+        return [], None
+    dept_id = min(offer[0].dept_ids)
+    selected = [item.concept for item in offer if dept_id in item.dept_ids][:max(per_question, 1)]
+    return selected, dept_id
+
+
+def clue_template_question(concepts: list[str], *, reask: bool = False) -> str:
+    """Backend-owned fallback wording; it only lists already validated official concepts."""
+    return (CLUE_REASK_TEMPLATE if reask else CLUE_TEMPLATE).format("、".join(concepts))
 
 
 def append_clue_records(
     asked: list[ClueConceptRecord], concepts: list[str], dept_id: int, question_index: int,
-    limit: int = MAX_CLUE_CONCEPT_RECORDS,
+    limit: int = MAX_CLUE_CONCEPT_RECORDS, dept_ids: dict[str, list[int]] | None = None,
 ) -> list[ClueConceptRecord]:
     """Return a new bounded list with one question's concepts appended as unanswered."""
-    added = [ClueConceptRecord(concept=concept, dept_id=dept_id, question_index=question_index)
+    added = [ClueConceptRecord(concept=concept, dept_id=dept_id, question_index=question_index,
+                               dept_ids=list((dept_ids or {}).get(concept) or [dept_id]))
              for concept in concepts]
     return (list(asked) + added)[-limit:]
+
+
+def clue_answer_evidence(
+    asked: list[ClueConceptRecord], records: list[dict], resolutions: list[dict], contradicted: set[str],
+) -> list[dict]:
+    """Official evidence rebuilt from present clue answers, marked with CLUE_ANSWER_ORIGIN.
+
+    A concept that current semantic evidence marks absent/uncertain is skipped.
+    """
+    resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
+    found: dict[tuple, dict] = {}
+    for item in asked:
+        source = (item.answer_source_text or "").strip()
+        if item.answer != "present" or not source or normalize_concept(item.concept) in contradicted:
+            continue
+        for record in lookup_concept(item.concept, records):
+            row = resolved.get(record["canonical_dept_id"])
+            if row is None:
+                continue
+            key = (row["db_dept_id"], source, record["source_id"], record["concept"])
+            found[key] = dict(
+                dept_id=row["db_dept_id"], parentDept=row["db_parent_dept"], childDept=row["db_child_dept"],
+                patient_source_text=source, knowledge_source_id=record["source_id"],
+                knowledge_concept=record["concept"], knowledge_evidence_text=record["evidence_text"],
+                source_priority=record["source_priority"], evidence_origin=CLUE_ANSWER_ORIGIN,
+            )
+    return list(found.values())
 
 
 def department_scores(
@@ -142,14 +222,17 @@ def department_scores(
         if item["dept_id"] in texts and item.get("evidence_origin") != CLUE_ANSWER_ORIGIN:
             texts[item["dept_id"]].add(item["patient_source_text"])
     for record in asked:
-        if record.answer == "present" and record.dept_id in questions:
-            questions[record.dept_id].add(record.question_index)
+        if record.answer != "present":
+            continue
+        for dept_id in record.dept_ids:
+            if dept_id in questions:
+                questions[dept_id].add(record.question_index)
     return {dept_id: len(texts[dept_id]) + len(questions[dept_id]) for dept_id in candidates}
 
 
 def clue_confirmed_departments(asked: list[ClueConceptRecord], candidates: set[int]) -> set[int]:
-    """Candidate departments of concepts the patient answered present."""
-    return {record.dept_id for record in asked if record.answer == "present"} & candidates
+    """Candidate departments of concepts the patient answered present, across all their dept_ids."""
+    return {dept_id for record in asked if record.answer == "present" for dept_id in record.dept_ids} & candidates
 
 
 def tiebreak_clues(clues: Iterable[ClueConcept], tied: set[int]) -> list[ClueConcept]:

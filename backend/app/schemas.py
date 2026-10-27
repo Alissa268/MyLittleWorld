@@ -96,12 +96,21 @@ class DialogueActInterpretation(BaseModel):
     confidence: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
 
 
+class ConceptAnswer(BaseModel):
+    # One Backend-validated answer to an official concept asked by a clue question.
+    concept: str
+    answer_assertion: EvidenceAssertion
+    source_text: str
+    confidence: float
+
+
 class PendingAnswerInterpretation(BaseModel):
     answered_intent: str
     answer_status: PendingAnswerStatus
     answer_source_text: str
     answer_confidence: float
     answer_assertion: Optional[EvidenceAssertion] = None
+    concept_answers: List[ConceptAnswer] = Field(default_factory=list)
 
 
 class DepartmentPreferenceInterpretation(BaseModel):
@@ -303,6 +312,21 @@ class ClueConceptRecord(BaseModel):
     dept_id: int
     question_index: int = Field(ge=1)
     answer: Literal["present", "absent", "uncertain", "unanswered"] = "unanswered"
+    # Every candidate department holding the concept; older snapshots default to [dept_id].
+    dept_ids: List[int] = Field(default_factory=list)
+    answer_source_text: Optional[str] = None
+
+    @model_validator(mode="after")
+    def _default_dept_ids(self) -> "ClueConceptRecord":
+        if not self.dept_ids:
+            self.dept_ids = [self.dept_id]
+        return self
+
+
+class ClueOffer(BaseModel):
+    # A ranked askable official concept and the candidate departments holding it.
+    concept: str
+    dept_ids: List[int] = Field(default_factory=list)
 
 
 class CandidateDepartment(BaseModel):
@@ -353,6 +377,11 @@ class ConversationState(BaseModel):
     clue_questions_asked: int = Field(default=0, ge=0)
     clue_concepts_asked: List[ClueConceptRecord] = Field(default_factory=list)
     clue_tiebreak_used: bool = False
+    # Recomputed every department turn, like candidate_departments.
+    department_clue_offer: List[ClueOffer] = Field(default_factory=list)
+    department_clue_candidates: List[int] = Field(default_factory=list)
+    pending_clue_question_index: Optional[int] = None
+    clue_reask_count: int = Field(default=0, ge=0)
 
 
 class UrgencyResult(BaseModel):

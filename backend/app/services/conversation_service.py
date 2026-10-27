@@ -8,7 +8,12 @@ import math
 import re
 from dataclasses import dataclass
 
-from app.schemas import DialogueActInterpretation, PendingAnswerInterpretation, PriorAnswerReference, SemanticExtraction, TriageCase
+from app.config import get_settings
+from app.schemas import (
+    ClueOffer, DialogueActInterpretation, PendingAnswerInterpretation, PriorAnswerReference, SemanticExtraction,
+    TriageCase,
+)
+from app.services import department_clues as clues
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.field_acceptance import ai_normalized_value_valid
@@ -74,6 +79,64 @@ class ClarificationSuggestion:
     repair_attempted: bool = False
     reply_source: str = "AI_PLANNER"
     explanation: str | None = None
+    # Validated official concepts of a clue question and the shared department it targets.
+    clue_concepts: tuple[str, ...] = ()
+    clue_dept_id: int | None = None
+
+
+@dataclass(frozen=True)
+class ClueQuestionSpec:
+    """Backend-owned clue-mode contract for one planner call."""
+    intent: str
+    concepts: tuple[ClueOffer, ...]
+    reask: bool
+    per_question: int
+
+
+def _clue_question_spec(case: TriageCase, safety_planning: bool) -> ClueQuestionSpec | None:
+    """Clue mode re-asks a pending clue question, or asks a new one while askable clues remain.
+
+    Until Commit 5 wires decide(), reaching clue_question_limit falls back to free planning.
+    """
+    if safety_planning:
+        return None
+    state = case.conversation_state
+    index = clues.pending_clue_index(state)
+    if index is not None:
+        concepts = tuple(ClueOffer(concept=record.concept, dept_ids=record.dept_ids)
+                         for record in state.clue_concepts_asked if record.question_index == index)
+        return ClueQuestionSpec(clues.clue_intent(index), concepts, True, len(concepts)) if concepts else None
+    settings = get_settings()
+    if (state.pending_clarification_intent is None and state.department_status != "resolved"
+            and state.department_clue_offer and state.clue_questions_asked < settings.clue_question_limit):
+        return ClueQuestionSpec(clues.clue_intent(state.clue_questions_asked + 1),
+                                tuple(state.department_clue_offer), False, settings.clue_concepts_per_question)
+    return None
+
+
+def settle_unanswered_clue_question(case: TriageCase, user_sources: list[str], act: str | None) -> None:
+    """Bound re-asking a clue question that got no accepted concept answer this turn.
+
+    The first miss re-asks the same concepts once; the second marks its unanswered concepts
+    uncertain and releases the pending question. Its question count is never changed.
+    """
+    state = case.conversation_state
+    index = clues.pending_clue_index(state)
+    if index is None or not user_sources or act == "request_explanation":
+        return
+    if state.clue_reask_count < 1:
+        state.clue_reask_count += 1
+        logger.info("clue question case_id=%s index=%s reask=true", case.case_id, index)
+        return
+    for record in state.clue_concepts_asked:
+        if record.question_index == index and record.answer == "unanswered":
+            record.answer = "uncertain"
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.pending_clue_question_index = None
+    state.clue_reask_count = 0
+    state.next_information_needed = []
+    logger.info("clue question case_id=%s index=%s reask_exhausted=true", case.case_id, index)
 
 
 def validated_dialogue_act(
@@ -107,8 +170,13 @@ async def request_clarification(
     """Treat the provider's JSON as a proposal, never a workflow transition."""
     state = case.conversation_state
     safety_planning = state.clarification_status == "safety_check" and not safety_screen_resolved(case)
+    act = validated_dialogue_act(dialogue_act, user_sources)
+    if not safety_planning:
+        settle_unanswered_clue_question(case, user_sources, act)
+    clue = _clue_question_spec(case, safety_planning)
     required_intent = (
         SAFETY_PENDING_INTENT if safety_planning else
+        clue.intent if clue is not None else
         state.pending_clarification_intent or state.department_next_question_intent
     )
     if required_intent in state.clarification_evidence:
@@ -135,6 +203,11 @@ async def request_clarification(
         "safety_answer_validation": state.safety_answer_validation,
         "dialogue_act": (dialogue_act or DialogueActInterpretation()).model_dump(),
     }
+    if clue is not None:
+        payload.update(
+            clue_mode=True, clue_reask=clue.reask, clue_concepts_per_question=clue.per_question,
+            clue_offer=[item.model_dump() for item in clue.concepts],
+        )
     answer_contract = (
         "本輪 pending answer 已由 Turn Interpreter 與 semantic evidence 一併處理；你只規劃下一個問題，"
         "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
@@ -177,9 +250,9 @@ async def request_clarification(
         "answered_intent, answer_source_text, answer_status, answer_confidence, information_needs。"
         "information_needs 是僅含一個患者能回答的具體資訊需求的字串陣列；不能寫安全狀態或工作流程。"
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
+        + (_clue_prompt(clue) if clue is not None else "") +
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
-    act = validated_dialogue_act(dialogue_act, user_sources)
     explanation_required = act == "request_explanation"
     rejection = None
     initial_rejection = None
@@ -204,7 +277,7 @@ async def request_clarification(
                 rejection = "invalid_json"
             else:
                 # A restated explained question without a valid explanation stays a duplicate, so it never degrades.
-                rejection = _question_rejection(case, proposal, required_intent, safety_planning, act)
+                rejection = _question_rejection(case, proposal, required_intent, safety_planning, act, clue=clue)
                 explanation = proposal.get("explanation") if isinstance(proposal, dict) else None
                 if (rejection is None and explanation_required
                         and proposal["status"] == "clarification_needed"
@@ -220,7 +293,8 @@ async def request_clarification(
             case.case_id, rejection is None, rejection, bool(attempt),
         )
         if rejection is None:
-            return _accepted_suggestion(proposal, attempt, initial_rejection, keep_explanation=explanation_required)
+            return _accepted_suggestion(proposal, attempt, initial_rejection, keep_explanation=explanation_required,
+                                        clue=clue)
         if attempt == 0:
             initial_rejection = rejection
             repair_context = dict(payload, original_proposal=proposal if proposal is not None else str(raw),
@@ -240,17 +314,66 @@ async def request_clarification(
         # The question itself passed validation; ask it without an explanation rather than fail the turn.
         logger.info("clarification proposal case_id=%s accepted=true rejection_reason=explanation_degraded", case.case_id)
         return _accepted_suggestion(*degraded, "explanation_degraded", keep_explanation=False,
-                                    repair_attempted=bool(attempt))
+                                    repair_attempted=bool(attempt), clue=clue)
+    if clue is not None and rejection not in {"provider_timeout", "provider_failure"}:
+        # The provider answered but no proposal passed: list the validated official concepts verbatim.
+        logger.info("clarification proposal case_id=%s accepted=true rejection_reason=%s reply_source=CLUE_TEMPLATE",
+                    case.case_id, rejection)
+        return _clue_template_suggestion(clue, rejection, attempt)
     return ClarificationSuggestion(
         "clarification_needed", None, None, "clarification_generation_failed",
         rejection_reason=rejection, repair_attempted=bool(attempt), reply_source="TECHNICAL_FALLBACK",
     )
 
 
+def _clue_prompt(clue: ClueQuestionSpec) -> str:
+    return (
+        "目前是線索題模式：clue_offer 是 Backend 依官方科別知識排序的可問症狀概念，dept_ids 只是不透明分組 ID。"
+        + ("這是同一題線索題的重問或解釋：clue_concepts 必須正好是 clue_offer 的全部概念，並換一種說法詢問。"
+           if clue.reask else
+           f"從 clue_offer 選 1～{clue.per_question} 個概念，所選概念的 dept_ids 必須至少有一個共同值，"
+           "優先選排序在前的概念。")
+        + "question 必須逐字包含每個所選概念字串，可在概念後用括號附白話說明；可用頓號合併在同一問句，"
+        "整題只能有一個問號，不得診斷、不得提及科別。status 必須為 clarification_needed，"
+        "intent 必須原樣等於 required_next_question_intent。另輸出 clue_concepts：所選概念字串陣列，"
+        "每項逐字取自 clue_offer。information_needs 可為 null。\n"
+    )
+
+
+def _clue_rejection(proposal: dict, question: str, clue: ClueQuestionSpec) -> str | None:
+    selected = proposal.get("clue_concepts")
+    if not isinstance(selected, list) or not all(isinstance(item, str) for item in selected):
+        return "invalid_clue_concepts"
+    if clue.reask:
+        if len(selected) != len(set(selected)) or set(selected) != {item.concept for item in clue.concepts}:
+            return "clue_concepts_mismatch"
+    elif not clues.common_clue_departments(selected, clue.concepts, clue.per_question):
+        return "invalid_clue_concepts"
+    if clues.concepts_missing_from_question(question, selected):
+        return "clue_concept_not_in_question"
+    return None
+
+
+def _clue_template_suggestion(clue: ClueQuestionSpec, rejection: str | None, attempt: int) -> ClarificationSuggestion:
+    if clue.reask:
+        concepts, dept_id = [item.concept for item in clue.concepts], None
+    else:
+        concepts, dept_id = clues.template_clue_selection(list(clue.concepts), clue.per_question)
+    return ClarificationSuggestion(
+        "clarification_needed", clues.clue_template_question(concepts, reask=clue.reask), clue.intent,
+        "clue_template_fallback", rejection_reason=rejection, repair_attempted=bool(attempt),
+        reply_source="CLUE_TEMPLATE", clue_concepts=tuple(concepts), clue_dept_id=dept_id,
+    )
+
+
 def _accepted_suggestion(proposal: dict, attempt: int, rejection_reason: str | None, *,
-                         keep_explanation: bool, repair_attempted: bool | None = None) -> ClarificationSuggestion:
+                         keep_explanation: bool, repair_attempted: bool | None = None,
+                         clue: ClueQuestionSpec | None = None) -> ClarificationSuggestion:
     clarifying = proposal["status"] == "clarification_needed"
-    needs = (proposal.get("information_needs") or []) if clarifying else []
+    needs = (proposal.get("information_needs") or []) if clarifying and clue is None else []
+    selected = tuple(proposal["clue_concepts"]) if clarifying and clue is not None else ()
+    common = (clues.common_clue_departments(list(selected), clue.concepts, clue.per_question)
+              if selected and not clue.reask else set())
     return ClarificationSuggestion(
         proposal["status"],
         proposal.get("question", "").strip() if clarifying else None,
@@ -262,6 +385,8 @@ def _accepted_suggestion(proposal: dict, attempt: int, rejection_reason: str | N
         reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
         # AI explanations are kept only for a validated request_explanation turn; otherwise dropped.
         explanation=proposal["explanation"].strip() if keep_explanation and clarifying else None,
+        clue_concepts=selected,
+        clue_dept_id=min(common) if common else None,
     )
 
 
@@ -308,7 +433,8 @@ def _with_explanation(suggestion: ClarificationSuggestion, question: str) -> str
 
 
 def _question_rejection(case: TriageCase, proposal: object, required_intent: str | None,
-                        safety_planning: bool, dialogue_act: str | None = None) -> str | None:
+                        safety_planning: bool, dialogue_act: str | None = None, *,
+                        clue: ClueQuestionSpec | None = None) -> str | None:
     if not isinstance(proposal, dict):
         return "invalid_schema"
     if set(proposal) & {"stage", "confirmed", "red_flags_checked", "department_result", "is_complete", "doctor_id", "schedule_id"}:
@@ -318,6 +444,8 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
     if not isinstance(proposal.get("reason"), str) or not proposal["reason"].strip():
         return "invalid_reason"
     if proposal["status"] == "sufficient":
+        if clue is not None:
+            return "clue_question_required"
         if safety_planning:
             return "safety_still_pending"
         if required_intent is not None:
@@ -342,15 +470,21 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
         return "simplified_chinese_output"
     if _UNSAFE_QUESTION.search(question) or _INTERNAL_STATE_TEXT.search(question):
         return "unsafe_or_internal_question"
-    if _MULTI_QUESTION.search(question) or _MULTI_DIMENSION_QUESTION.search(question):
+    # Rule B lets one clue question list several official concepts; it still needs a single question mark.
+    if _MULTI_QUESTION.search(question) or (clue is None and _MULTI_DIMENSION_QUESTION.search(question)):
         return "multiple_information_needs"
-    needs = proposal.get("information_needs")
-    if not isinstance(needs, list) or len(needs) != 1 or not isinstance(needs[0], str) or not needs[0].strip():
-        return "invalid_information_need"
-    if _GENERIC_INFORMATION_NEED.fullmatch(needs[0].strip().strip("。？！? ")):
-        return "generic_information_need"
-    if _patient_information_need(needs[0]) is None:
-        return "invalid_information_need"
+    if clue is None:
+        needs = proposal.get("information_needs")
+        if not isinstance(needs, list) or len(needs) != 1 or not isinstance(needs[0], str) or not needs[0].strip():
+            return "invalid_information_need"
+        if _GENERIC_INFORMATION_NEED.fullmatch(needs[0].strip().strip("。？！? ")):
+            return "generic_information_need"
+        if _patient_information_need(needs[0]) is None:
+            return "invalid_information_need"
+    else:
+        clue_reason = _clue_rejection(proposal, question, clue)
+        if clue_reason:
+            return clue_reason
     if _GENERIC_CLARIFICATION_QUESTION.fullmatch(question.strip()):
         return "generic_question"
     if re.search(r"剛才問題|上一個追問", question):
@@ -448,6 +582,8 @@ def invalidate_corrected_department_context(case: TriageCase) -> None:
     state.department_next_information_needed = None
     state.department_next_question_intent = None
     state.semantic_official_links = []
+    state.department_clue_offer = []
+    state.department_clue_candidates = []
     state.pending_clarification_intent = None
     state.pending_clarification_question = None
     state.next_information_needed = []
@@ -461,6 +597,9 @@ def capture_pending_answer(
     user_sources: list[str],
 ) -> bool:
     """Persist only a grounded, confident answer before candidate recomputation."""
+    clue_index = clues.pending_clue_index(case.conversation_state)
+    if clue_index is not None:
+        return _capture_clue_answers(case, suggestion, user_sources, clue_index)
     if not suggestion or suggestion.answer_status != "answered" or suggestion.answer_confidence is None:
         return False
     state = case.conversation_state
@@ -474,6 +613,56 @@ def capture_pending_answer(
     state.pending_clarification_question = None
     state.next_information_needed = []
     return True
+
+
+def _capture_clue_answers(
+    case: TriageCase, suggestion: ClarificationSuggestion | PendingAnswerInterpretation | None,
+    user_sources: list[str], index: int,
+) -> bool:
+    """Record grounded per-concept answers; concepts left unanswered stay askable."""
+    state = case.conversation_state
+    if not suggestion or not _grounded_clarification_answer(
+        suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
+        suggestion.answer_confidence, state.pending_clarification_intent, user_sources,
+    ):
+        return False
+    asked = {record.concept for record in state.clue_concepts_asked if record.question_index == index}
+    accepted = {}
+    for item in getattr(suggestion, "concept_answers", None) or []:
+        source = item.source_text.strip()
+        if (item.concept in asked and item.concept not in accepted and source
+                and any(source in text for text in user_sources)
+                and math.isfinite(item.confidence) and ACCEPT_THRESHOLD <= item.confidence <= 1):
+            accepted[item.concept] = (item.answer_assertion, source)
+    if not accepted:
+        return False
+    for record in state.clue_concepts_asked:
+        if record.question_index == index and record.concept in accepted:
+            record.answer, record.answer_source_text = accepted[record.concept]
+    state.clarification_evidence[suggestion.answered_intent] = suggestion.answer_source_text.strip()
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.pending_clue_question_index = None
+    state.clue_reask_count = 0
+    state.next_information_needed = []
+    logger.info("clue answer case_id=%s index=%s accepted_concepts=%s", case.case_id, index, len(accepted))
+    return True
+
+
+def _record_clue_question(case: TriageCase, suggestion: ClarificationSuggestion) -> None:
+    """Count a newly asked clue question and store its concepts as unanswered."""
+    state = case.conversation_state
+    index = state.clue_questions_asked + 1
+    if suggestion.intent != clues.clue_intent(index) or suggestion.clue_dept_id is None:
+        return
+    offered = {item.concept: item.dept_ids for item in state.department_clue_offer}
+    state.clue_concepts_asked = clues.append_clue_records(
+        state.clue_concepts_asked, list(suggestion.clue_concepts), suggestion.clue_dept_id, index,
+        dept_ids=offered,
+    )
+    state.clue_questions_asked = index
+    state.pending_clue_question_index = index
+    state.clue_reask_count = 0
 
 
 def capture_safety_screen_answer(
@@ -699,6 +888,8 @@ def advance_conversation(
     if valid_question:
         question = suggestion.question or ""
         if state.pending_clarification_intent is None:
+            if suggestion.clue_concepts:
+                _record_clue_question(case, suggestion)
             state.pending_clarification_intent = suggestion.intent
             if suggestion.intent not in state.asked_clarification_intents:
                 state.asked_clarification_intents.append(suggestion.intent or "")
