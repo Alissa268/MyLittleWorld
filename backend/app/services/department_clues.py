@@ -246,12 +246,27 @@ def clue_answer_evidence(
     return list(found.values())
 
 
+def answered_concept_departments(record: ClueConceptRecord, records: list[dict] | None) -> set[int]:
+    """Departments that currently hold an answered concept in the official knowledge base.
+
+    The ``dept_ids`` snapshot taken when the question was asked is used only when no
+    records are given or the knowledge base no longer lists the concept.
+    """
+    if records is not None:
+        holders = {item["canonical_dept_id"] for item in lookup_concept(record.concept, records)}
+        if holders:
+            return holders
+    return set(record.dept_ids)
+
+
 def department_scores(
     retrieved: list[dict], candidates: set[int], asked: list[ClueConceptRecord],
+    records: list[dict] | None = None,
 ) -> dict[int, int]:
     """Distinct retrieved text pieces plus distinct present clue questions, per candidate.
 
     Synonyms matched from one text piece score once; absent answers never subtract.
+    A present concept credits every current candidate holding it in ``records``.
     """
     texts: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
     questions: dict[int, set[int]] = {dept_id: set() for dept_id in candidates}
@@ -261,15 +276,20 @@ def department_scores(
     for record in asked:
         if record.answer != "present":
             continue
-        for dept_id in record.dept_ids:
+        for dept_id in answered_concept_departments(record, records):
             if dept_id in questions:
                 questions[dept_id].add(record.question_index)
     return {dept_id: len(texts[dept_id]) + len(questions[dept_id]) for dept_id in candidates}
 
 
-def clue_confirmed_departments(asked: list[ClueConceptRecord], candidates: set[int]) -> set[int]:
-    """Candidate departments of concepts the patient answered present, across all their dept_ids."""
-    return {dept_id for record in asked if record.answer == "present" for dept_id in record.dept_ids} & candidates
+def clue_confirmed_departments(
+    asked: list[ClueConceptRecord], candidates: set[int], records: list[dict] | None = None,
+) -> set[int]:
+    """Current candidates holding a concept the patient answered present (current KB holders)."""
+    return {
+        dept_id for record in asked if record.answer == "present"
+        for dept_id in answered_concept_departments(record, records)
+    } & candidates
 
 
 def tiebreak_clues(

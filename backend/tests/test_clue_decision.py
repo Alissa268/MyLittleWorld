@@ -110,7 +110,9 @@ def test_present_answer_to_unique_clue_asks_confirmation_of_that_department():
     case, body = dizzy_start("decide-unique")
     assert body["conversation_state"]["reply_source"] == "CLUE_TEMPLATE"
     assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
-    first = case.conversation_state.clue_concepts_asked[0]
+    # Confirmation follows the concept's current official holders, not the snapshot taken when asked.
+    first = next(record for record in case.conversation_state.clue_concepts_asked
+                 if len({item["canonical_dept_id"] for item in lookup_concept(record.concept, RECORDS)}) == 1)
     assert len(first.dept_ids) == 1
     case, body = turn(case, "有", assertion=lambda name: "present" if name == first.concept else "absent")
     decision = body["conversation_state"]["clue_decision"]
@@ -349,3 +351,73 @@ def test_old_snapshots_load_without_decision_fields():
     assert (state.clue_decision, state.revision_history_start) == (None, 0)
     record = ClueDecisionRecord.model_validate({"kind": "decide"})
     assert (record.reason, record.dept_id, record.tied_dept_ids) == ("", None, [])
+
+
+# --- Clue answers use current knowledge-base holders and current candidates ---------------------
+
+ORTHO, RHEUMA = 1298, 1255
+JOINT_HOLDERS = {record["canonical_dept_id"] for record in lookup_concept("關節痛", RECORDS)}
+
+
+class BackPainConvergence:
+    """Fake convergence AI ranking orthopedics, neurosurgery and rehabilitation as in 310."""
+
+    async def __call__(self, prompt, *, purpose):
+        retrieved = json.loads(prompt.split("\n資料：", 1)[1])["retrieved_official_evidence"]
+        candidates = []
+        for dept_id, confidence in ((ORTHO, 0.7), (1244, 0.6), (1265, 0.5)):
+            item = next(entry for entry in retrieved if entry["dept_id"] == dept_id)
+            support = {key: item[key] for key in ("patient_source_text", "knowledge_source_id", "knowledge_concept")}
+            candidates.append({"dept_id": dept_id, "confidence": confidence, "supporting_evidence": [support]})
+        return json.dumps({"status": "ambiguous", "candidates": candidates}, ensure_ascii=False)
+
+
+def test_present_clue_with_new_holder_candidates_does_not_confirm_single_department():
+    case, body = turn(new_case("decide-joint-pain"), "周一開始腰酸背痛", [symptom("腰酸背痛", "腰酸背痛")],
+                      convergence=BackPainConvergence())
+    state = case.conversation_state
+    assert RHEUMA not in state.department_clue_candidates
+    asked = next(record for record in state.clue_concepts_asked if record.concept == "關節痛")
+    assert asked.dept_ids == [ORTHO]
+
+    case, body = turn(case, "有關節疼", assertion=lambda name: "present" if name == "關節痛" else "absent",
+                      convergence=BackPainConvergence())
+    state = case.conversation_state
+    assert {ORTHO, RHEUMA} <= set(state.department_clue_candidates)
+    assert state.clue_decision.kind == "ask_clue"
+    assert state.department_status != "resolved" and body["department_result"] is None
+    pending = clues.pending_clue_concepts(state)
+    assert pending and state.clue_questions_asked == 2
+    assert any(len({record["canonical_dept_id"] for record in lookup_concept(name, RECORDS)} & {ORTHO, RHEUMA}) == 1
+               for name in pending)
+
+
+def test_present_concept_with_one_current_candidate_holder_still_confirms():
+    asked = [ClueConceptRecord(concept="關節痛", dept_id=ORTHO, dept_ids=[ORTHO], question_index=1, answer="present")]
+    candidates = {ORTHO, ENT}
+    confirmed = clues.clue_confirmed_departments(asked, candidates, RECORDS)
+    assert confirmed == {ORTHO}
+    decision = clues.decide(
+        ai_resolved_dept_id=None, candidates=candidates, scores={ORTHO: 2, ENT: 1}, askable=[],
+        questions_asked=1, tiebreak_used=False, user_declined=False, clue_confirmed_dept_ids=confirmed,
+        question_limit=5, non_target_dept_ids={FAMILY},
+    )
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", ORTHO, "clue_confirmed_single_department")
+
+
+def test_present_concept_scores_every_current_holder_once_per_question():
+    candidates = {ORTHO, RHEUMA, ENT}
+    asked = [
+        ClueConceptRecord(concept="關節痛", dept_id=ORTHO, dept_ids=[ORTHO], question_index=1, answer="present"),
+        ClueConceptRecord(concept="膝關節疼痛", dept_id=ORTHO, dept_ids=[ORTHO], question_index=1, answer="present"),
+    ]
+    assert JOINT_HOLDERS & candidates == {ORTHO, RHEUMA}
+    assert clues.department_scores([], candidates, asked, RECORDS) == {ORTHO: 1, RHEUMA: 1, ENT: 0}
+    assert clues.clue_confirmed_departments(asked, candidates, RECORDS) == {ORTHO, RHEUMA}
+    # Without records only the snapshot taken when the question was asked is available.
+    assert clues.department_scores([], candidates, asked) == {ORTHO: 1, RHEUMA: 0, ENT: 0}
+
+
+def test_concept_no_longer_in_knowledge_base_falls_back_to_snapshot():
+    record = ClueConceptRecord(concept="已移除概念", dept_id=ENT, dept_ids=[ENT], question_index=1, answer="present")
+    assert clues.answered_concept_departments(record, RECORDS) == {ENT}

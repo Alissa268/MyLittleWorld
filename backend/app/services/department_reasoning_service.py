@@ -298,10 +298,10 @@ def _contradicted_concepts(evidence: list[dict]) -> set[str]:
     }
 
 
-def _clue_priority(state, retrieved: list[dict], candidates: set[int]) -> dict:
+def _clue_priority(state, retrieved: list[dict], candidates: set[int], records: list[dict] | None) -> dict:
     """Target priority from scores, then the validated convergence candidates' order."""
     return clues.department_priority(
-        clues.department_scores(retrieved, candidates, state.clue_concepts_asked),
+        clues.department_scores(retrieved, candidates, state.clue_concepts_asked, records),
         [item.dept_id for item in state.candidate_departments],
         {get_settings().family_medicine_dept_id},
     )
@@ -321,7 +321,7 @@ def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict
                                   {settings.family_medicine_dept_id})
     state.department_clue_candidates = sorted(candidates)
     state.department_clue_offer = clues.clue_offer(clues.rank_clue_concepts(
-        askable, settings.clue_planner_concept_limit, _clue_priority(state, retrieved, candidates),
+        askable, settings.clue_planner_concept_limit, _clue_priority(state, retrieved, candidates, records),
     ))
     return askable
 
@@ -345,11 +345,13 @@ def _live_department(active: list[dict], dept_id: int | None, confidence: float,
 
 def apply_clue_decision(
     case: TriageCase, askable: list[clues.ClueConcept], retrieved: list[dict], active: list[dict],
+    records: list[dict] | None = None,
 ) -> None:
     """Run decide() once safety is resolved; every adopted decision still waits for user confirmation.
 
     Not run while a clue question awaits its answer or the patient asked for an explanation,
-    unless the convergence AI already resolved one candidate.
+    unless the convergence AI already resolved one candidate. Clue answers are judged by the
+    current official holders of each concept (``records``) and the current candidates.
     """
     state = case.conversation_state
     if not safety_screen_resolved(case):
@@ -363,10 +365,10 @@ def apply_clue_decision(
     candidates = set(state.department_clue_candidates)
     decision = clues.decide(
         ai_resolved_dept_id=ai_resolved, candidates=candidates,
-        scores=clues.department_scores(retrieved, candidates, state.clue_concepts_asked),
+        scores=clues.department_scores(retrieved, candidates, state.clue_concepts_asked, records),
         askable=askable, questions_asked=state.clue_questions_asked, tiebreak_used=state.clue_tiebreak_used,
         user_declined=False,
-        clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates),
+        clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates, records),
         question_limit=settings.clue_question_limit, non_target_dept_ids={settings.family_medicine_dept_id},
     )
     kind, dept_id, result = decision.kind, decision.dept_id, None
@@ -374,7 +376,7 @@ def apply_clue_decision(
         # Tiebreak clues come from every askable clue, never only the planner's top-ranked offer.
         state.department_clue_offer = clues.clue_offer(clues.tiebreak_clues(
             askable, set(decision.tied_dept_ids), {settings.family_medicine_dept_id},
-            _clue_priority(state, retrieved, candidates),
+            _clue_priority(state, retrieved, candidates, records),
         ))
     elif kind == "decide" and dept_id == ai_resolved:
         result = case.department_result
@@ -595,7 +597,7 @@ async def reason_about_departments(case: TriageCase) -> None:
             )
         else:
             state.department_status = "ambiguous"
-        apply_clue_decision(case, askable, retrieved, active)
+        apply_clue_decision(case, askable, retrieved, active, records)
     except Exception as exc:
         logger.warning("department convergence unavailable case_id=%s error=%s", case.case_id, type(exc).__name__)
         state.department_status = "unresolved"
