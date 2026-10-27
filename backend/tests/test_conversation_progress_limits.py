@@ -23,6 +23,8 @@ def clinical_case(turns=7, stalls=0):
     state.pending_clarification_intent = "nausea_presence"
     state.pending_clarification_question = "腹痛時是否有噁心？"
     state.asked_clarification_intents = ["nausea_presence"]
+    # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+    state.availability_status = "answered"
     return case
 
 

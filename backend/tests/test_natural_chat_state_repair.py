@@ -35,6 +35,8 @@ def clinical_case():
     state.pending_clarification_intent = INTENT
     state.asked_clarification_intents = [INTENT]
     state.next_information_needed = ["頭暈的感受"]
+    # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+    state.availability_status = "answered"
     return case
 
 

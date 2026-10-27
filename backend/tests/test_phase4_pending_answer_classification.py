@@ -47,6 +47,8 @@ def pending_pain_case(case_id: str = "phase4-focused-pending") -> TriageCase:
     case.conversation_state.free_text_mode = True
     case.conversation_state.pending_clarification_intent = "pain_presence"
     case.conversation_state.asked_clarification_intents = ["pain_presence"]
+    # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+    case.conversation_state.availability_status = "answered"
     case.conversation_state.department_status = "resolved"
     case.department_result = DepartmentResult(
         dept_id=1242, parentDept="內科部", childDept="腎臟科", confidence=0.94,

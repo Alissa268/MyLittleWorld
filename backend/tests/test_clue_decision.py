@@ -55,6 +55,8 @@ def new_case(case_id):
     case = TriageCase(case_id=case_id)
     case.patient_input.red_flags_checked = True
     case.patient_input.red_flags_status = "negative"
+    # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+    case.conversation_state.availability_status = "answered"
     return case
 
 
@@ -232,6 +234,8 @@ def decision_case(candidates=(A, B), asked=5):
     state.department_status = "ambiguous"
     state.department_clue_candidates = list(candidates)
     state.clue_questions_asked = asked
+    # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+    state.availability_status = "answered"
     return case
 
 

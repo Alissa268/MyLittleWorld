@@ -1035,6 +1035,8 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
                     interpretation_complete=True,
                 )
             case.patient_input.symptom = "頭暈"
+            # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+            case.conversation_state.availability_status = "answered"
             case.semantic_extractions.append(SemanticExtraction(
                 field="duration", normalized_value="一週", source_text="上禮拜",
                 confidence=0.9, semantic_status="available",

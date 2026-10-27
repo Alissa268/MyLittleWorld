@@ -23,6 +23,7 @@ from app.services.conversation_service import (
     SAFETY_UNRESOLVED_REPLY,
     SAFETY_ANSWER_CAP,
     advance_conversation,
+    awaiting_availability_answer,
     capture_pending_answer,
     capture_prior_answer_reference,
     capture_safety_screen_answer,
@@ -310,6 +311,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and semantic_ai_allowed
                     and case.conversation_state.clarification_status != "unresolved"
                     and (not safety_check_turn or safety_completed_this_turn or case.conversation_state.safety_answer_attempts < SAFETY_ANSWER_CAP)
+                    # Backend re-asks its fixed availability question; no planner call is needed.
+                    and not awaiting_availability_answer(case)
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):

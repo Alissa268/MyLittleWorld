@@ -98,6 +98,8 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
         initial = TriageCase(case_id="phase41-route-after-safety")
         initial.patient_input.red_flags_checked = True
         initial.patient_input.red_flags_status = "negative"
+        # Time was already answered; this test covers the medical confirmation gate, not 6-H availability.
+        initial.conversation_state.availability_status = "answered"
         save_case(initial)
         first, _, _ = self.post(
             "我最近有血尿，已經兩天了",

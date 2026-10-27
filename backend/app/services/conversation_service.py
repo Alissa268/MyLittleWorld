@@ -31,6 +31,9 @@ SAFETY_UNRESOLVED_REPLY = (
 )
 SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
 SAFETY_PENDING_INTENT = "safety_screen"
+AVAILABILITY_PENDING_INTENT = "appointment_availability"
+AVAILABILITY_QUESTION = "最近哪幾天、哪個時段比較方便看診？不方便的時間也可以告訴我；都可以的話直接說『都可以』。"
+AVAILABILITY_QUESTION_LIMIT = 2
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
 FAMILY_MEDICINE_UNAVAILABLE_REPLY = "資訊不足，無法判斷科別。請改用手動選科或洽醫院掛號服務。"
@@ -864,14 +867,20 @@ def advance_conversation(
         return
     # A Backend clue decision counts as sufficient; the safety and grounding gates still apply.
     backend_decided = decision in {"decide", "family_medicine"} and state.department_status == "resolved"
+    # An availability turn follows a medically sufficient turn; the gates below still apply.
+    availability_turn = state.availability_status == "asked"
     sufficient = (
-        (state.clarification_status == "safety_check" or backend_decided
+        (state.clarification_status == "safety_check" or backend_decided or availability_turn
          or (suggestion is not None and suggestion.status == "sufficient"))
         and safety_ready
-        and state.pending_clarification_intent is None
+        and state.pending_clarification_intent in {None, AVAILABILITY_PENDING_INTENT}
     )
     if sufficient:
         if safety_screen_resolved(case) and state.department_status == "resolved":
+            if not availability_settled(case):
+                _ask_availability(case)
+                return
+            _release_availability_pending(case)
             state.clarification_status = "sufficient"
             state.uncertainty_reasons = []
             state.next_information_needed = []
@@ -884,6 +893,8 @@ def advance_conversation(
             state.reply_source = "CONFIRMATION"
             return
 
+    # A changed department or safety state takes the turn back from the availability question.
+    _release_availability_pending(case)
     if (state.turn_count >= ABSOLUTE_TURN_CAP
             or state.consecutive_no_progress_turns >= HARD_TURN_CAP):
         _unresolved(case)
@@ -957,6 +968,65 @@ def advance_conversation(
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append(f"自然對話澄清中：{reason}")
+
+
+def has_accepted_time_preferences(case: TriageCase) -> bool:
+    availability = case.availability
+    return bool(availability.time_preferences or availability.preferred_dates
+                or availability.preferred_days or availability.preferred_sessions)
+
+
+def availability_settled(case: TriageCase) -> bool:
+    """Settle availability: accepted time data or a grounded answer, else unspecified after the limit."""
+    state = case.conversation_state
+    if state.availability_status in {"answered", "unspecified"}:
+        return True
+    if has_accepted_time_preferences(case) or AVAILABILITY_PENDING_INTENT in state.clarification_evidence:
+        state.availability_status = "answered"
+    elif state.availability_question_attempts >= AVAILABILITY_QUESTION_LIMIT:
+        state.availability_status = "unspecified"
+        logger.info("availability case_id=%s unspecified=true attempts=%s",
+                    case.case_id, state.availability_question_attempts)
+    return state.availability_status in {"answered", "unspecified"}
+
+
+def awaiting_availability_answer(case: TriageCase) -> bool:
+    """The fixed availability question is still pending while department and safety stay settled."""
+    state = case.conversation_state
+    return bool(
+        state.pending_clarification_intent == AVAILABILITY_PENDING_INTENT
+        and state.department_status == "resolved"
+        and safety_screen_resolved(case)
+    )
+
+
+def _release_availability_pending(case: TriageCase) -> None:
+    state = case.conversation_state
+    if state.pending_clarification_intent == AVAILABILITY_PENDING_INTENT:
+        state.pending_clarification_intent = None
+        state.pending_clarification_question = None
+        state.next_information_needed = []
+
+
+def _ask_availability(case: TriageCase) -> None:
+    """Backend-owned fixed question; medical completion is unchanged, confirmation waits for it."""
+    state = case.conversation_state
+    state.availability_status = "asked"
+    state.availability_question_attempts += 1
+    state.pending_clarification_intent = AVAILABILITY_PENDING_INTENT
+    state.pending_clarification_question = AVAILABILITY_QUESTION
+    if AVAILABILITY_PENDING_INTENT not in state.asked_clarification_intents:
+        state.asked_clarification_intents.append(AVAILABILITY_PENDING_INTENT)
+    state.next_information_needed = []
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = []
+    state.last_question_key = None
+    state.reply_source = "AVAILABILITY_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = AVAILABILITY_QUESTION
+    case.triage.is_final = False
+    case.triage.reasons.append("症狀資訊已完成，確認前詢問看診時間；時間不是醫療完成門檻。")
 
 
 def _enter_safety_check(case: TriageCase) -> None:
