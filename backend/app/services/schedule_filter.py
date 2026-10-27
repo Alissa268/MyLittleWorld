@@ -92,27 +92,6 @@ def availability_slots(availability: Availability) -> list[tuple[str, str]]:
     return [(day, session) for day in days for session in sessions]
 
 
-def availability_from_project_smart_slots(slots: Iterable[Any], can_take_leave: bool = False) -> Availability:
-    days: list[str] = []
-    sessions: list[str] = []
-    for slot in slots:
-        if isinstance(slot, dict):
-            day = str(slot.get("day") or "").strip()
-            session = normalize_session(slot.get("session"))
-        else:
-            day = str(getattr(slot, "day", "") or "").strip()
-            session = normalize_session(getattr(slot, "session", ""))
-        if day and day not in days:
-            days.append(day)
-        if session and session not in sessions:
-            sessions.append(session)
-    return Availability(
-        preferred_days=days,
-        preferred_sessions=sessions,
-        can_take_leave=can_take_leave,
-    )
-
-
 def row_matches_availability(row: dict[str, Any], availability: Availability) -> bool:
     preferred_dates = {
         str(value or "").strip()
@@ -175,21 +154,6 @@ def row_is_available(row: dict[str, Any]) -> bool:
 
 def open_rows(rows: Iterable[dict[str, Any]], now: datetime | None = None) -> list[dict[str, Any]]:
     return [row for row in rows if row_is_available(row) and session_is_open(row, now=now)]
-
-
-def filter_rows_by_availability(
-    rows: Iterable[dict[str, Any]],
-    availability: Availability,
-    now: datetime | None = None,
-) -> list[dict[str, Any]]:
-    candidates = open_rows(rows, now=now)
-    if not availability_slots(availability):
-        return candidates
-
-    matched = [row for row in candidates if row_matches_availability(row, availability)]
-    if matched or not availability.can_take_leave:
-        return matched
-    return candidates
 
 
 def select_feasible_rows(

@@ -341,10 +341,6 @@ def _build_recommendations(
             reasons.append("您方便的時段近期無號，改推薦時間最接近的門診")
         if slot.get("visit_type"):
             reasons.append(f"掛號別：{slot.get('visit_type')}")
-        if slot.get("source") == "mock":
-            fallback_reason = slot.get("fallback_reason") or "DB schedule unavailable"
-            reasons.append(f"使用 mock 班表 fallback：{fallback_reason}")
-            reasons.append("Azure SQL 查詢失敗或無資料，使用 mock 班表")
 
         item = RecommendationItem(
             recommendation_id=f"{prefix}_{case_id}_{len(items) + 1:03d}",
@@ -574,10 +570,6 @@ def _date_sort_key(value) -> str:
     if isinstance(value, date):
         return value.isoformat()
     return str(value)
-
-
-def _weekday_label(value) -> str:
-    return schedule_weekday_label(value)
 
 
 def _optional_int(value: object) -> int | None:

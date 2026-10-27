@@ -6,7 +6,6 @@ import pytest
 
 from app.services.department_knowledge import (
     canonical_department_id,
-    exact_db_department_ids,
     load_department_canonical_mapping,
     load_department_knowledge,
     lookup_concept,
@@ -291,17 +290,6 @@ def test_duplicate_live_rows_for_canonical_id_are_unresolved(knowledge):
     ])[0]
     assert resolution["status"] == "unresolved"
     assert resolution["reason"] == "duplicate_canonical_dept_id_in_live_db"
-
-
-def test_exact_db_department_ids_is_compatibility_view_over_canonical_mapping(knowledge):
-    _, records = knowledge
-    ids = exact_db_department_ids(records, [
-        {"dept_id": 1241, "parentDept": "內科", "childDept": "心臟內科"},
-        {"dept_id": "1242", "parentDept": "內科", "childDept": "腎臟科"},
-    ])
-    assert ids["心臟內科"] == 1241
-    assert ids["腎臟科"] == 1242
-    assert ids["一般內科"] is None
 
 
 def test_production_knowledge_files_are_not_loaded_from_docs_or_package():

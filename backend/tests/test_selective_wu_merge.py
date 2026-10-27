@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import unittest
 import importlib
 import json
+from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 from datetime import date, timedelta
 
@@ -13,7 +15,7 @@ from app.schemas import DepartmentResult, TriageCase
 from app.services.conversation_service import ClarificationSuggestion
 from app.services import appointment_service, department_preference_service, rag_triage_adapter, specialty_scoring
 from app.services.rule_engine import apply_user_message
-from app.services.specialty_scoring import score_doctor_deterministically
+from app.services.specialty_scoring import score_doctor_specialties
 
 
 class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
@@ -73,7 +75,8 @@ class SelectiveWuMergeTest(unittest.IsolatedAsyncioTestCase):
             "specialty_tags": "腸胃疾病、消化系統、腹痛",
         }
 
-        score = score_doctor_deterministically(case, department, row)
+        with patch.object(specialty_scoring, "get_settings", return_value=SimpleNamespace(ai_doctor_scoring_enabled=False)):
+            score = asyncio.run(score_doctor_specialties(case, department, [row]))["gi-1"]
 
         self.assertEqual(score.score, 0.5)
         self.assertEqual(score.source, "neutral")

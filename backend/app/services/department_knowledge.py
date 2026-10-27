@@ -242,20 +242,6 @@ def resolve_department_names(records: list[dict], db_departments: list[dict]) ->
     return resolutions
 
 
-def exact_db_department_ids(records: list[dict], db_departments: list[dict]) -> dict[str, int | None]:
-    """Compatibility helper keyed by knowledge mapping name."""
-    by_id = {
-        entry["canonical_dept_id"]: entry.get("db_dept_id")
-        for entry in resolve_department_names(records, db_departments)
-    }
-    return {
-        name: by_id.get(canonical_department_id(record.get("canonical_dept_id")))
-        for name, record in {
-            record["department_name"]: record for record in records
-        }.items()
-    }
-
-
 def _db_child_name(row: dict) -> object:
     return row.get("childDept", row.get("child_dept"))
 

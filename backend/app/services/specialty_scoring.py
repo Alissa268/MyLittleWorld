@@ -125,22 +125,6 @@ async def score_doctor_specialties(
     return results
 
 
-def score_doctor_deterministically(
-    case: TriageCase,
-    department: DepartmentResult,
-    row: dict[str, Any],
-) -> SpecialtyScore:
-    """Backward-compatible neutral fallback; it performs no medical keyword inference."""
-    del case
-    return _neutral_score(row, department)
-
-
-def clamp_score(value: Any) -> float:
-    if type(value) not in {int, float} or not math.isfinite(float(value)):
-        return TAG_NEUTRAL_SCORE
-    return max(0.0, min(float(value), 1.0))
-
-
 def _neutral_score(row: dict[str, Any], department: DepartmentResult) -> SpecialtyScore:
     has_tags = _has_specialty(row.get("specialty_tags") or row.get("specialty"))
     reason = (
@@ -268,6 +252,3 @@ def _row_doctor_id(row: dict[str, Any]) -> str:
     value = row.get("doctor_id")
     return str(value).strip() if value is not None else ""
 
-
-def _row_key(row: dict[str, Any]) -> str:
-    return _row_doctor_id(row)

@@ -9,7 +9,7 @@ import pytest
 
 from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase
 from app.services import specialty_scoring
-from app.services.specialty_scoring import score_doctor_deterministically, score_doctor_specialties
+from app.services.specialty_scoring import score_doctor_specialties
 
 
 class AiSettings:
@@ -60,7 +60,10 @@ def _response(rows: list[dict], *, offset: float = 0.0) -> str:
 
 
 def test_deterministic_fallback_is_neutral_and_has_no_keyword_inference():
-    score = score_doctor_deterministically(_case(), _department(), _row(tags="膝關節、運動傷害"))
+    disabled = SimpleNamespace(ai_doctor_scoring_enabled=False)
+    with patch.object(specialty_scoring, "get_settings", return_value=disabled):
+        scores = asyncio.run(score_doctor_specialties(_case(), _department(), [_row(tags="膝關節、運動傷害")]))
+    score = scores["doc-1"]
     assert score.score == 0.5
     assert score.source == "neutral"
 

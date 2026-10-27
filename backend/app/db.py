@@ -730,26 +730,3 @@ def _fetch_available_slots_from_db(
             _set_last_db_fallback_reason("no usable rows returned")
     return slots if max_slots is None else slots[:max_slots]
 
-
-def map_schedule_record(record: dict[str, Any]) -> dict[str, Any]:
-    return {
-        "parent_dept": record.get("parent_dept") or record.get("parentDept") or "",
-        "child_dept": record.get("child_dept") or record.get("childDept") or "",
-        "dept_id": record.get("dept_id") or record.get("deptId"),
-        "doctor_id": str(record.get("doctor_id") or record.get("doctorId") or record.get("doctor") or ""),
-        "doctor": record.get("doctor") or record.get("doctor_name") or record.get("doctorName") or "",
-        "schedule_id": str(record.get("schedule_id") or record.get("scheduleId") or ""),
-        "date": record.get("date") or "",
-        "session": record.get("session") or "",
-        "slot": record.get("slot") or record.get("room") or "",
-        "room": record.get("room") or record.get("slot") or "",
-        "specialty_tags": record.get("specialty_tags") or record.get("specialtyTags") or record.get("specialty") or "",
-        "status": record.get("status") or "open",
-        "is_leave": bool(record.get("is_leave", False)),
-        "substitute_doctor": record.get("substitute_doctor") or record.get("substituteDoctor") or "",
-        "source": record.get("source") or "db",
-        "source_detail": record.get("source_detail") or record.get("sourceDetail") or "",
-        "fallback_reason": record.get("fallback_reason") or record.get("fallbackReason") or "",
-        "visit_type": record.get("visit_type") or record.get("visitType") or "",
-        "status_raw": record.get("status_raw") or record.get("statusRaw") or "",
-    }
