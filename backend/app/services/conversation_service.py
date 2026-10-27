@@ -334,7 +334,9 @@ def _clue_prompt(clue: ClueQuestionSpec) -> str:
            f"從 clue_offer 選 1～{clue.per_question} 個概念，所選概念的 dept_ids 必須至少有一個共同值，"
            "優先選排序在前的概念。")
         + "question 必須逐字包含每個所選概念字串，可在概念後用括號附白話說明；可用頓號合併在同一問句，"
-        "整題只能有一個問號，不得診斷、不得提及科別。status 必須為 clarification_needed，"
+        "整題只能有一個問號，不得診斷、不得提及科別。"
+        "所選概念可能是症狀也可能是病名，問法要讓患者能回答「現在有沒有這個狀況，或以前曾被告知有」，"
+        "不得使用「醫師」「醫生」「診斷」等字，不得暗示患者可能罹患該病。status 必須為 clarification_needed，"
         "intent 必須原樣等於 required_next_question_intent。另輸出 clue_concepts：所選概念字串陣列，"
         "每項逐字取自 clue_offer。information_needs 可為 null。\n"
     )

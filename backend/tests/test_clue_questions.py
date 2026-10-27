@@ -152,13 +152,32 @@ def test_repair_failure_uses_backend_template_and_counts_one_question():
     suggestion, provider = plan(case, proposal("請問您有沒有眼睛痛？", ["眼睛痛"]), "not json")
     assert provider.await_count == 2
     assert suggestion.reply_source == "CLUE_TEMPLATE"
-    assert suggestion.question == "請問您有沒有以下情況：耳鳴、聽力變化、噁心？"
+    assert suggestion.question == "請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
     assert (suggestion.intent, suggestion.clue_dept_id) == (FIRST, ENT)
     apply(case, suggestion)
     state = case.conversation_state
     assert state.reply_source == "CLUE_TEMPLATE" and state.clue_questions_asked == 1
     assert [item.concept for item in state.clue_concepts_asked] == ["耳鳴", "聽力變化", "噁心"]
     assert state.clue_concepts_asked[2].dept_ids == [ENT, NEURO]
+
+
+def test_templates_cover_current_and_previously_told_and_pass_question_guards():
+    concepts = ["耳鳴", "聽力變化", "噁心"]
+    template = clues.clue_template_question(concepts)
+    reask = clues.clue_template_question(concepts[:2], reask=True)
+    assert template == "請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
+    assert reask == "想再確認一次，請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化？"
+    # Proposed verbatim by the planner, both pass every existing question guard unchanged.
+    suggestion, provider = plan(clue_case(), proposal(template, concepts))
+    assert provider.await_count == 1 and suggestion.rejection_reason is None and suggestion.question == template
+    suggestion, provider = plan(pending_clue_case(), proposal(reask, concepts[:2]), user_sources=("嗯",))
+    assert provider.await_count == 1 and suggestion.rejection_reason is None and suggestion.question == reask
+
+
+def test_planner_prompt_asks_current_or_previously_told_without_doctor_words():
+    _, provider = plan(clue_case(), proposal("請問您有沒有耳鳴？", ["耳鳴"]))
+    prompt = provider.await_args.args[0]
+    assert "以前曾被告知有" in prompt and "不得暗示患者可能罹患該病" in prompt
 
 
 def test_provider_timeout_keeps_technical_fallback_and_counts_nothing():
@@ -239,6 +258,19 @@ def test_present_absent_and_uncertain_answers_update_records():
         ("耳鳴", "present", "耳鳴有"), ("聽力變化", "absent", "聽力沒變"), ("耳朵悶塞", "uncertain", "悶塞不確定")]
     assert state.pending_clarification_intent is None and state.pending_clue_question_index is None
     assert state.clarification_evidence[FIRST] == text[0]
+
+
+def test_previously_told_by_doctor_answer_is_recorded_present():
+    case = pending_clue_case(("高血壓", "心悸"))
+    text = ["醫師說過我有高血壓"]
+    answer = interpret(pending_answer(text, concept("高血壓", "present", "醫師說過我有高血壓"), status="partial"),
+                       text, ("高血壓", "心悸"))
+    assert conversation_service.capture_pending_answer(case, answer, text)
+    assert [(item.concept, item.answer, item.answer_source_text)
+            for item in case.conversation_state.clue_concepts_asked] == [
+        ("高血壓", "present", "醫師說過我有高血壓"), ("心悸", "unanswered", None)]
+    prompt = rag_triage_adapter._build_symptom_collection_prompt(pending_clue_case(), text)
+    assert "醫師說過我有 ○○" in prompt and "以前被說有 ○○" in prompt
 
 
 def test_bare_yes_grounds_and_unanswered_concepts_stay_unanswered():
@@ -387,6 +419,35 @@ def test_two_bare_yes_answers_score_two_for_the_department():
     scores = clues.department_scores(retrieved, clues.candidate_dept_ids(retrieved),
                                      case.conversation_state.clue_concepts_asked)
     assert scores[ENT] == 1 + 2
+
+
+def test_specialty_only_kb_concept_is_not_offered():
+    assert {r["evidence_type"] for r in RECORDS if r["concept"] == "國字臉"} == {"department_specialty_evidence"}
+    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "國字臉")
+    offered = {clue.concept for clue in clues.clue_concepts(RECORDS, {holder, ENT}, set(), [])}
+    assert offered and "國字臉" not in offered
+
+
+def test_kb_concept_with_direct_and_specialty_records_is_offered_for_every_holder():
+    holders = {r["canonical_dept_id"]: r["evidence_type"] for r in lookup_concept("頭痛", RECORDS)}
+    specialty = {dept for dept, kind in holders.items() if kind == "department_specialty_evidence"}
+    direct = {dept for dept, kind in holders.items() if kind == "direct_routing_evidence"}
+    assert specialty and direct and ENT not in holders
+    candidates = {min(specialty), min(direct), ENT}
+    clue = next(item for item in clues.clue_concepts(RECORDS, candidates, set(), []) if item.concept == "頭痛")
+    assert clue.dept_ids == {min(specialty), min(direct)}
+
+
+def test_specialty_evidence_still_counts_in_retrieved_and_scores():
+    case = kb_case()
+    case.history_records.append(Message(role="user", content="國字臉"))
+    case.semantic_extractions.append(extraction("國字臉", "國字臉"))
+    retrieved = converge(case)["retrieved_official_evidence"]
+    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "國字臉")
+    assert any(item["knowledge_concept"] == "國字臉" and item["dept_id"] == holder for item in retrieved)
+    scores = clues.department_scores(retrieved, clues.candidate_dept_ids(retrieved), [])
+    assert scores[holder] == 1
+    assert holder in case.conversation_state.department_clue_candidates
 
 
 def test_cross_department_present_concept_credits_both_and_does_not_confirm_single():

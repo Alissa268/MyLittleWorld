@@ -20,10 +20,11 @@ def asked(concept, dept_id, index, answer="unanswered"):
 
 RECORDS = [
     record("頭暈", ENT), record("頭暈", NEURO), record("頭暈", CARDIO),
-    record("耳鳴", ENT), record("聽力變化", ENT, "department_specialty_evidence", 2),
-    record("肢體無力", NEURO, "department_specialty_evidence", 2),
-    record("心悸", CARDIO, "department_specialty_evidence", 1),
+    record("耳鳴", ENT), record("聽力變化", ENT, priority=2),
+    record("肢體無力", NEURO, priority=2),
+    record("心悸", CARDIO, priority=1),
     record("噁心", ENT, priority=2), record("噁心", NEURO, priority=2),
+    record("國字臉", ENT, "department_specialty_evidence", 1),
 ]
 CANDIDATES = {ENT, NEURO, CARDIO}
 
@@ -43,11 +44,22 @@ def test_candidates_are_all_retrieved_departments():
     assert clues.candidate_dept_ids(retrieved) == CANDIDATES
 
 
-def test_unique_concepts_rank_first_then_direct_then_priority():
+def test_unique_concepts_rank_first_then_priority_then_text():
     ranked = clues.rank_clue_concepts(clues.clue_concepts(RECORDS, CANDIDATES, set(), []), 10)
-    assert [clue.concept for clue in ranked] == ["耳鳴", "心悸", "聽力變化", "肢體無力", "噁心"]
-    assert ranked[0].unique and ranked[0].dept_ids == {ENT}
+    assert [clue.concept for clue in ranked] == ["心悸", "耳鳴", "聽力變化", "肢體無力", "噁心"]
+    assert ranked[0].unique and ranked[0].dept_ids == {CARDIO}
     assert not ranked[-1].unique and ranked[-1].dept_ids == {ENT, NEURO}
+
+
+def test_specialty_only_concept_is_never_a_clue():
+    concepts = {clue.concept for clue in clues.clue_concepts(RECORDS, CANDIDATES, set(), [])}
+    assert "國字臉" not in concepts
+
+
+def test_concept_with_one_direct_record_is_asked_with_every_holding_candidate():
+    records = RECORDS + [record("耳痛", ENT), record("耳痛", NEURO, "department_specialty_evidence", 3)]
+    clue = next(item for item in clues.clue_concepts(records, CANDIDATES, set(), []) if item.concept == "耳痛")
+    assert clue.dept_ids == {ENT, NEURO} and not clue.unique
 
 
 def test_rank_respects_limit():

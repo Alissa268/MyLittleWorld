@@ -27,8 +27,9 @@ from app.services.department_knowledge import lookup_concept, normalize_concept
 CLUE_ANSWER_ORIGIN = "clue_answer"
 MAX_CLUE_CONCEPT_RECORDS = 30
 CLUE_INTENT_PREFIX = "department_clue_"
-CLUE_TEMPLATE = "請問您有沒有以下情況：{}？"
-CLUE_REASK_TEMPLATE = "想再確認一次，請問您有沒有以下情況：{}？"
+# The official routing tables list symptoms and diseases together, so wording covers both.
+CLUE_TEMPLATE = "請問您有沒有以下情況，或以前曾被告知有：{}？"
+CLUE_REASK_TEMPLATE = "想再確認一次，請問您有沒有以下情況，或以前曾被告知有：{}？"
 _SYMPTOM_FIELDS = {"symptom", "accompanying_symptoms"}
 _CONCLUDED_ANSWERS = {"present", "absent"}
 
@@ -76,6 +77,10 @@ def clue_concepts(
     Records are matched by ``canonical_dept_id``, which equals the live ``dept_id`` once
     resolved. A concept held by every candidate cannot distinguish them and is dropped.
     Concepts answered present/absent are never asked again; uncertain/unanswered stay.
+    Only concepts with at least one candidate ``direct_routing_evidence`` record (the
+    hospital's symptom-to-department guidance) are askable; their ``dept_ids`` still hold
+    every candidate with the concept. Specialty-only concepts are never asked but keep
+    their part in retrieval and scoring.
     """
     concluded = {normalize_concept(item.concept) for item in asked if item.answer in _CONCLUDED_ANSWERS}
     inconclusive = {normalize_concept(item.concept) for item in asked if item.answer not in _CONCLUDED_ANSWERS}
@@ -93,7 +98,7 @@ def clue_concepts(
         entry["priority"] = priority if entry["priority"] is None else min(entry["priority"], priority)
     clues = []
     for key, entry in grouped.items():
-        if entry["depts"] == candidates:
+        if entry["depts"] == candidates or not entry["direct"]:
             continue
         clues.append(ClueConcept(
             concept=min(entry["names"]), dept_ids=frozenset(entry["depts"]),
