@@ -12,6 +12,7 @@ import com.example.medicalaiguidance.screen.ConfirmNeedScreen
 import com.example.medicalaiguidance.screen.DoctorSelectionScreen
 import com.example.medicalaiguidance.screen.HistoryScreen
 import com.example.medicalaiguidance.screen.HomeScreen
+import com.example.medicalaiguidance.screen.MockScheduleTestScreen
 import com.example.medicalaiguidance.screen.GettingStartedScreen
 import com.example.medicalaiguidance.screen.QuickSearchScreen
 import com.example.medicalaiguidance.screen.VisitTypeSelectionScreen
@@ -20,6 +21,7 @@ import com.example.medicalaiguidance.viewmodel.HistoryViewModel
 
 object Route {
     const val HOME = "home"
+    const val MOCK_SCHEDULE_TEST = "mock_schedule_test"
     const val CHAT = "chat"
     const val CHAT_START = "chat/start/{visitPlan}"
     const val CHAT_HISTORY = "chat/history/{historyId}"
@@ -43,6 +45,9 @@ fun NavGraph(navController: NavHostController) {
     ) {
         composable(Route.HOME) {
             HomeScreen(navController = navController)
+        }
+        composable(Route.MOCK_SCHEDULE_TEST) {
+            MockScheduleTestScreen(navController = navController)
         }
 
         composable(Route.GETTING_STARTED) {

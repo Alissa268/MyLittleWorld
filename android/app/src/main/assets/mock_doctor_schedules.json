@@ -1,0 +1,326 @@
+[
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "曾于庭",
+    "clinicName": "家庭醫學科(一般門診/戒菸)",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-30",
+    "dayOfWeek": "週五",
+    "timeSlot": "上午診",
+    "doctorName": "蘇宇平",
+    "clinicName": "一般骨科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "林宜璇",
+    "clinicName": "一般內科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "下午診",
+    "doctorName": "林炯熙",
+    "clinicName": "一般內科",
+    "status": "額滿"
+  },
+  {
+    "date": "2026-10-30",
+    "dayOfWeek": "週五",
+    "timeSlot": "上午診",
+    "doctorName": "林炯熙",
+    "clinicName": "一般內科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "葉筱芸",
+    "clinicName": "一般內科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "下午診",
+    "doctorName": "蔡依霖",
+    "clinicName": "一般內科",
+    "status": "請假"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "上午診",
+    "doctorName": "侯重光",
+    "clinicName": "一般內科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-05",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "葉筱芸",
+    "clinicName": "一般內科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "張晉瑜",
+    "clinicName": "眼科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "下午診",
+    "doctorName": "張晉瑜",
+    "clinicName": "眼科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "盧俊良",
+    "clinicName": "胃腸肝膽科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-30",
+    "dayOfWeek": "週五",
+    "timeSlot": "下午診",
+    "doctorName": "排班醫師",
+    "clinicName": "胃腸肝膽科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "李佳儒",
+    "clinicName": "胃腸肝膽科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "吳博貴",
+    "clinicName": "關節重建",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "吳博貴",
+    "clinicName": "關節重建",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-05",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "吳博貴",
+    "clinicName": "關節重建",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "上午診",
+    "doctorName": "林育寬",
+    "clinicName": "關節重建",
+    "status": "可掛號",
+    "roomNumber": "1 診"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "下午診",
+    "doctorName": "林育寬",
+    "clinicName": "關節重建",
+    "status": "可掛號",
+    "roomNumber": "2 診"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "下午診",
+    "doctorName": "劉建麟",
+    "clinicName": "脊椎外科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "下午診",
+    "doctorName": "劉建麟",
+    "clinicName": "脊椎外科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "下午診",
+    "doctorName": "王世典",
+    "clinicName": "脊椎外科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-30",
+    "dayOfWeek": "週五",
+    "timeSlot": "下午診",
+    "doctorName": "王世典",
+    "clinicName": "脊椎外科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "上午診",
+    "doctorName": "林泰祺",
+    "clinicName": "眼科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "上午診",
+    "doctorName": "蔡傑智",
+    "clinicName": "眼科",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "上午診",
+    "doctorName": "卓明潔",
+    "clinicName": "家庭醫學科(一般門診/戒菸)",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "下午診",
+    "doctorName": "王怡人",
+    "clinicName": "家庭醫學科(一般門診/戒菸)",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "夜間診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "夜診區"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "上午診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "1 診"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "下午診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "2 診"
+  },
+  {
+    "date": "2026-10-28",
+    "dayOfWeek": "週三",
+    "timeSlot": "夜間診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "3 診"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "上午診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "4 診"
+  },
+  {
+    "date": "2026-10-30",
+    "dayOfWeek": "週五",
+    "timeSlot": "上午診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "5 診"
+  },
+  {
+    "date": "2026-10-31",
+    "dayOfWeek": "週六",
+    "timeSlot": "上午診",
+    "doctorName": "張雲亭",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "6 診"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "上午診",
+    "doctorName": "何翊芯",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "上午診"
+  },
+  {
+    "date": "2026-11-02",
+    "dayOfWeek": "週一",
+    "timeSlot": "下午診",
+    "doctorName": "何翊芯",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "下午診"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "上午診",
+    "doctorName": "何翊芯",
+    "clinicName": "皮膚科",
+    "status": "可掛號",
+    "roomNumber": "特殊特診"
+  },
+  {
+    "date": "2026-11-03",
+    "dayOfWeek": "週二",
+    "timeSlot": "下午診",
+    "doctorName": "胡力予",
+    "clinicName": "身心失眠",
+    "status": "可掛號"
+  },
+  {
+    "date": "2026-10-29",
+    "dayOfWeek": "週四",
+    "timeSlot": "下午診",
+    "doctorName": "蔡世仁",
+    "clinicName": "身心失眠",
+    "status": "可掛號"
+  }
+]

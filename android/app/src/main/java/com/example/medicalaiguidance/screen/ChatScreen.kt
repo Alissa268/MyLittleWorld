@@ -137,6 +137,7 @@ fun ChatScreen(
     val urgentWarning by viewModel.urgentWarning.collectAsState()
     val isHistoryReadOnly by viewModel.isHistoryReadOnly.collectAsState()
     val openedHistory by viewModel.openedHistory.collectAsState()
+    val historyResumeMessage by viewModel.historyResumeMessage.collectAsState()
     val canRetryHistoryResume by viewModel.canRetryHistoryResume.collectAsState()
     val isConfirmingRecommendation by viewModel.isConfirmingRecommendation.collectAsState()
     val speakingMessageId by viewModel.speakingMessageId.collectAsState()
@@ -484,7 +485,7 @@ fun ChatScreen(
                     }
                 }
                 val historySnapshot = openedHistory
-                if (historySnapshot != null && (isHistoryReadOnly || historySnapshot.selectedRecommendationId != null)) {
+                if (historySnapshot != null && (historySnapshot.status == com.example.medicalaiguidance.model.HistoryStatus.COMPLETED || historySnapshot.selectedRecommendationId != null)) {
                     item(key = "completed_history_${historySnapshot.id}") {
                         CompletedHistorySnapshot(
                             history = historySnapshot,
@@ -494,7 +495,12 @@ fun ChatScreen(
                             },
                             primaryDark = primaryDark
                         )
-                        if (isHistoryReadOnly) {
+                    }
+                }
+                if (isHistoryReadOnly && historySnapshot?.status == com.example.medicalaiguidance.model.HistoryStatus.UNCOMPLETED) {
+                    item(key = "history_resume_status") {
+                        Column {
+                            historyResumeMessage?.let { Text(it, color = primaryDark) }
                             if (canRetryHistoryResume) {
                                 OutlinedButton(onClick = viewModel::retryHistoryResume) { Text("重試續接") }
                             }
@@ -552,7 +558,7 @@ fun ChatScreen(
 
             if (isHistoryReadOnly) {
                 Text(
-                    text = "歷史紀錄（僅供查看）",
+                    text = if (openedHistory?.status == com.example.medicalaiguidance.model.HistoryStatus.COMPLETED) "歷史紀錄（僅供查看）" else "歷史紀錄",
                     color = primaryDark,
                     fontSize = 15.sp,
                     fontWeight = FontWeight.Bold
