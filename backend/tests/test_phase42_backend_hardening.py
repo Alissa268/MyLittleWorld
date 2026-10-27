@@ -35,6 +35,7 @@ from app.services import case_store, conversation_service, followup_service
 from app.services.appointment_service import DepartmentResolutionError, recommend_appointments
 from app.services.case_store import get_case, sanitize_untrusted_snapshot, save_case, save_recommendations
 from app.services.chat_perf import ai_phase, begin_chat_perf, finish_chat_perf, record_ai_call
+from app.services.rag_triage_adapter import RagTriageSuggestion
 from app.services.rule_engine import apply_user_message
 from app.services.ttas_evaluator import apply_ttas_evaluation
 
@@ -248,6 +249,34 @@ def test_db_unavailable_is_globally_503_for_recommend_explicit_preference(monkey
     )
     assert response.status_code == 503
     assert response.json() == {"detail": "正式資料目前無法查詢，請稍後重試。"}
+
+
+def test_db_unavailable_is_globally_503_for_chat_natural_department_reasoning(monkeypatch):
+    case = TriageCase(case_id="case_db_chat_natural", visit_type=VisitType.INITIAL)
+    case.history_records = [
+        Message(role="user", content="我最近有血尿，已經兩天了"),
+        Message(role="assistant", content="請問您是否有腰部或腹部的疼痛感？"),
+    ]
+    case.patient_input.symptom = "血尿"
+    case.patient_input.red_flags_checked = True
+    case.conversation_state.free_text_mode = True
+    save_case(case)
+    semantic = AsyncMock(return_value=RagTriageSuggestion(semantic_extractions=[], pending_answer=None))
+    department = AsyncMock(side_effect=db.DatabaseUnavailableError("secret connection detail"))
+    monkeypatch.setattr("app.routes.chat.runtime_ai_available", lambda _settings: True)
+    monkeypatch.setattr("app.routes.chat.refine_case_with_ai", semantic)
+    monkeypatch.setattr("app.routes.chat.reason_about_departments", department)
+
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/chat",
+        json={"case_id": case.case_id, "message": "沒有腰痛，也沒有腹痛"},
+    )
+
+    semantic.assert_awaited_once()
+    department.assert_awaited_once()
+    assert response.status_code == 503
+    assert response.json() == {"detail": "正式資料目前無法查詢，請稍後重試。"}
+    assert "secret" not in response.text
 
 
 def test_department_tuple_is_revalidated_before_schedule_query(monkeypatch):
