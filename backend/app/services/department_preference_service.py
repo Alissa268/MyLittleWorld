@@ -22,18 +22,6 @@ def active_department_candidates() -> list[dict[str, Any]]:
         return []
 
 
-def accept_department_preference(
-    case: TriageCase, value: Any, user_sources: list[str],
-) -> DepartmentPreferenceInterpretation | None:
-    """Accept only grounded AI preference backed by one current active DB row."""
-    preference = validate_department_preference(value, user_sources)
-    if preference is None:
-        return None
-    case.patient_input.requested_department_id = preference.dept_id
-    case.patient_input.requested_department_name = preference.department_name
-    return preference
-
-
 def validate_department_preference(
     value: Any, user_sources: list[str],
 ) -> DepartmentPreferenceInterpretation | None:

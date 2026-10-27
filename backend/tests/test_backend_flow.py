@@ -14,8 +14,9 @@ from app.routes import chat as chat_route
 from app.services import appointment_service, department_preference_service, rag_triage_adapter
 from app.services.appointment_service import DepartmentResolutionError, recommend_appointments
 from app.services.case_store import get_case
-from app.services.rule_engine import apply_user_message, evaluate_urgency, next_question_for
+from app.services.rule_engine import apply_user_message, next_question_for
 from app.services.script_service import build_navigation_script
+from app.services.ttas_evaluator import apply_ttas_evaluation
 from app.services.conversation_service import ClarificationSuggestion
 
 
@@ -91,7 +92,7 @@ class BackendFlowTest(unittest.IsolatedAsyncioTestCase):
     async def test_high_urgency_red_flag(self):
         case = TriageCase(case_id="case_high")
         apply_user_message(case, "突發胸痛而且呼吸困難")
-        case.triage = evaluate_urgency(case)
+        case.triage = apply_ttas_evaluation(case)
 
         self.assertIsNone(case.triage.urgency_score)
         self.assertIsNone(case.triage.urgency_level)

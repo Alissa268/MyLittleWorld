@@ -95,15 +95,14 @@ def test_retry_skip_unknown_never_pollutes_patient_value():
 
 
 def test_duplicate_names_do_not_require_alias_guessing_when_ai_selects_exact_id():
-    case = TriageCase(case_id="strict-department")
     rows = [
         {"dept_id": 204, "parent_dept": "其他科", "child_dept": "皮膚科"},
         {"dept_id": 304, "parent_dept": "特別門診", "child_dept": "皮膚科"},
     ]
     with patch.object(preference, "fetch_active_departments", return_value=rows):
-        accepted = preference.accept_department_preference(case, {
+        accepted = preference.validate_department_preference({
             "dept_id": 304, "department_name": "皮膚科", "source_text": "我要看皮膚科", "confidence": 0.99,
         }, ["我要看皮膚科"])
     assert accepted is not None
-    assert case.patient_input.requested_department_id == 304
-    assert case.department_result is None
+    assert accepted.dept_id == 304
+    assert accepted.department_name == "皮膚科"

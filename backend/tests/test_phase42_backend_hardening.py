@@ -35,7 +35,8 @@ from app.services import case_store, conversation_service, followup_service
 from app.services.appointment_service import DepartmentResolutionError, recommend_appointments
 from app.services.case_store import get_case, sanitize_untrusted_snapshot, save_case, save_recommendations
 from app.services.chat_perf import ai_phase, begin_chat_perf, finish_chat_perf, record_ai_call
-from app.services.rule_engine import apply_user_message, evaluate_urgency
+from app.services.rule_engine import apply_user_message
+from app.services.ttas_evaluator import apply_ttas_evaluation
 
 
 @pytest.fixture(autouse=True)
@@ -550,7 +551,7 @@ def test_info_logs_do_not_contain_patient_health_text(caplog):
     case = TriageCase(case_id="case_log")
     with caplog.at_level(logging.INFO):
         apply_user_message(case, "我有血尿而且尿尿灼熱")
-        evaluate_urgency(case)
+        apply_ttas_evaluation(case)
     output = caplog.text
     assert "血尿" not in output
     assert "灼熱" not in output

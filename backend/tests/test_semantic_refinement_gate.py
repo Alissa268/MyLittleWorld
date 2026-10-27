@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import TriageCase
-from app.services import ai_reply_generator, ai_service, rag_triage_adapter
+from app.services import ai_service, rag_triage_adapter
 from app.services.case_store import save_case
 
 
@@ -230,10 +230,6 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
             "get_settings",
             return_value=settings,
         ), patch.object(
-            ai_reply_generator,
-            "get_settings",
-            return_value=settings,
-        ), patch.object(
             ai_service,
             "get_settings",
             return_value=settings,
@@ -330,10 +326,6 @@ class SemanticRefinementGateTest(unittest.IsolatedAsyncioTestCase):
 
         with patch.object(chat_route, "runtime_ai_available", return_value=True), patch.object(
             chat_route, "refine_case_with_ai", new=semantic,
-        ), patch.object(
-            ai_reply_generator,
-            "get_settings",
-            return_value=settings,
         ), patch.object(
             ai_service,
             "get_settings",

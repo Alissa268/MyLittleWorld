@@ -189,11 +189,9 @@ def test_changed_active_identity_is_rechecked_after_interpretation():
 def test_inactive_row_and_database_failure_cannot_accept_preference():
     value = dict(dept_id=1333, department_name="耳科", source_text="耳科", confidence=0.99)
     for rows in [[dict(ACTIVE[0], is_active=False)], RuntimeError("offline DB unavailable")]:
-        case = TriageCase(case_id="inactive")
         with patch.object(preference, "fetch_active_departments", side_effect=rows if isinstance(rows, Exception) else None,
                           return_value=rows if isinstance(rows, list) else None):
-            assert preference.accept_department_preference(case, value, ["耳科"]) is None
-        assert case.patient_input.requested_department_id is None
+            assert preference.validate_department_preference(value, ["耳科"]) is None
 
 
 def turn_payload(text="頭痛"):

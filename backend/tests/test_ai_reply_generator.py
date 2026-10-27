@@ -3,34 +3,24 @@ from __future__ import annotations
 import asyncio
 import importlib
 import unittest
-from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import ConversationStage, DepartmentResult, TriageCase
-from app.services import ai_reply_generator
+from app.services import ai_reply_generator, ai_service
 from app.services.question_specs import QUESTION_SPEC_BY_ID
 from app.services.rule_engine import QUESTION_TEXTS
 
 chat_route = importlib.import_module("app.routes.chat")
 
 
-def _settings(*, enabled: bool = True, key: str = "test-key", timeout: float = 0.05):
-    return SimpleNamespace(
-        ai_reply_generation_enabled=enabled,
-        ai_reply_timeout_seconds=timeout,
-        google_api_key=key,
-        llm_model="gemini-test",
-    )
-
-
 class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
     async def test_disabled_uses_deterministic_fallback(self):
         case = TriageCase(case_id="disabled")
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings(enabled=False)), patch.object(
-            ai_reply_generator, "complete_prompt", new_callable=AsyncMock
+        with patch.object(
+            ai_service, "complete_prompt", new_callable=AsyncMock
         ) as provider:
             reply = await ai_reply_generator.generate_triage_reply(
                 case=case,
@@ -43,8 +33,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
 
     async def test_missing_key_does_not_call_provider(self):
         case = TriageCase(case_id="missing-key")
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings(key="")), patch.object(
-            ai_reply_generator, "complete_prompt", new_callable=AsyncMock
+        with patch.object(
+            ai_service, "complete_prompt", new_callable=AsyncMock
         ) as provider:
             reply = await ai_reply_generator.generate_triage_reply(
                 case=case,
@@ -59,8 +49,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
         async def fail_provider(_: str) -> str:
             raise RuntimeError("quota")
 
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
-            ai_reply_generator, "complete_prompt", side_effect=fail_provider
+        with patch.object(
+            ai_service, "complete_prompt", side_effect=fail_provider
         ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)):
             response = TestClient(app).post("/chat", json={"message": "我頭暈兩天"})
 
@@ -74,11 +64,7 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
             return '{"reply":"不應抵達"}'
 
         case = TriageCase(case_id="timeout")
-        with patch.object(
-            ai_reply_generator,
-            "get_settings",
-            return_value=_settings(timeout=0.001),
-        ), patch.object(ai_reply_generator, "complete_prompt", side_effect=slow_provider):
+        with patch.object(ai_service, "complete_prompt", side_effect=slow_provider):
             reply = await ai_reply_generator.generate_triage_reply(
                 case=case,
                 next_question=QUESTION_TEXTS["symptom"],
@@ -93,8 +79,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
             "半邊無力或劇烈頭痛？"
         )
         provider = AsyncMock(return_value=f'{{"reply":"{contextual}"}}')
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
-            ai_reply_generator, "complete_prompt", new=provider
+        with patch.object(
+            ai_service, "complete_prompt", new=provider
         ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)):
             response = TestClient(app).post("/chat", json={"message": "我頭暈兩天"})
 
@@ -119,8 +105,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
             reason=["測試"],
         )
         provider = AsyncMock(return_value='{"reply":"資料已整理完成，請確認是否正確。"}')
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
-            ai_reply_generator, "complete_prompt", new=provider
+        with patch.object(
+            ai_service, "complete_prompt", new=provider
         ), patch.object(chat_route, "refine_case_with_ai", new=AsyncMock(return_value=None)) as detector:
             response = TestClient(app).post("/chat", json={"message": complete_message})
 
@@ -175,8 +161,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
         case = TriageCase(case_id="red-flag")
         case.conversation_state.last_question_key = "red_flags"
         fallback = QUESTION_TEXTS["red_flags"]
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
-            ai_reply_generator,
+        with patch.object(
+            ai_service,
             "complete_prompt",
             new=AsyncMock(return_value='{"reply":"請問有胸痛或呼吸困難嗎？"}'),
         ):
@@ -204,9 +190,7 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
                 next_question = QUESTION_TEXTS.get(target)
                 provider = AsyncMock(return_value=f'{{"reply":"{expected}"}}')
                 with patch.object(
-                    ai_reply_generator, "get_settings", return_value=_settings()
-                ), patch.object(
-                    ai_reply_generator,
+                    ai_service,
                     "complete_prompt",
                     new=provider,
                 ):
@@ -228,8 +212,8 @@ class AiReplyGeneratorTest(unittest.IsolatedAsyncioTestCase):
         case.conversation_state.last_question_key = "duration"
         case.conversation_state.awaiting_confirmation = True
         provider = AsyncMock(return_value='{"reply":"頭暈持續多久了？"}')
-        with patch.object(ai_reply_generator, "get_settings", return_value=_settings()), patch.object(
-            ai_reply_generator, "complete_prompt", new=provider
+        with patch.object(
+            ai_service, "complete_prompt", new=provider
         ):
             await ai_reply_generator.generate_triage_reply(
                 case=case,

@@ -189,22 +189,6 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
                 self.assertNotEqual(case.triage.next_question, question)
                 self.assertEqual(case.conversation_state.pending_clarification_intent, "severity")
 
-    async def test_invalid_follow_up_keeps_grounded_answer_fields_independent(self):
-        case = pending_case()
-        text = "只有一點血絲"
-        proposal = {
-            "status": "clarification_needed", "question": "程度如何？還有疼痛嗎？",
-            "intent": "severity", "reason": "還需其他資訊",
-            "answered_intent": "severity", "answer_source_text": text,
-            "answer_status": "answered", "answer_confidence": 0.95,
-        }
-        with patch.object(conversation_service, "complete_runtime_json", new=AsyncMock(return_value=json.dumps(proposal, ensure_ascii=False))):
-            suggestion = await request_clarification(case, [text])
-        self.assertIsNone(suggestion.question)
-        self.assertEqual(suggestion.answer_source_text, text)
-        self.assertTrue(capture_pending_answer(case, suggestion, [text]))
-        self.assertIsNone(case.conversation_state.pending_clarification_intent)
-
     async def test_new_detail_without_ai_question_preserves_evidence_and_reports_technical_failure(self):
         case = pending_case()
         text = "尿尿時有灼熱感"

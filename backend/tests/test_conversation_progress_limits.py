@@ -3,7 +3,7 @@ import json
 
 import pytest
 
-from app.schemas import DepartmentResult, Message, TriageCase
+from app.schemas import DepartmentResult, Message, PendingAnswerInterpretation, TriageCase
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
 from test_phase7_natural_safety import runtime, respond, evidence, route
@@ -154,9 +154,12 @@ def test_progress_does_not_bypass_safety():
     case = clinical_case(turns=8)
     case.patient_input.red_flags_checked = False
     case.history_records.append(Message(role="user", content="no"))
-    suggestion = cs.ClarificationSuggestion("clarification_needed", "腹痛在哪個位置？", "pain_location",
-        "確認位置", "nausea_presence", "no", "answered", 0.99)
-    cs.advance_conversation(case, suggestion, user_sources=["no"], current_extractions=[])
+    # Production captures the pending answer from the Turn Interpreter before planning.
+    answer = PendingAnswerInterpretation(answered_intent="nausea_presence", answer_status="answered",
+                                         answer_source_text="no", answer_confidence=0.99)
+    assert cs.capture_pending_answer(case, answer, ["no"])
+    suggestion = cs.ClarificationSuggestion("clarification_needed", "腹痛在哪個位置？", "pain_location", "確認位置")
+    cs.advance_conversation(case, suggestion, user_sources=["no"], current_extractions=[], made_progress=True)
     assert case.conversation_state.clarification_status == "safety_check"
     assert not case.patient_input.red_flags_checked
     assert not case.conversation_state.is_complete

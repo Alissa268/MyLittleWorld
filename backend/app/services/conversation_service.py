@@ -72,14 +72,6 @@ class ClarificationSuggestion:
     reply_source: str = "AI_PLANNER"
 
 
-@dataclass(frozen=True)
-class PendingAnswerClassification:
-    answered_intent: str
-    answer_source_text: str
-    answer_status: str
-    answer_confidence: float
-
-
 def _pending_question(case: TriageCase) -> str | None:
     if case.conversation_state.pending_clarification_intent and case.conversation_state.pending_clarification_question:
         return case.conversation_state.pending_clarification_question
@@ -89,70 +81,10 @@ def _pending_question(case: TriageCase) -> str | None:
     )
 
 
-async def classify_pending_answer(
-    case: TriageCase,
-    current_user_text: list[str],
-) -> PendingAnswerClassification | None:
-    """Classify only whether the current turn answered the pending question."""
-    pending_intent = case.conversation_state.pending_clarification_intent
-    pending_question = _pending_question(case)
-    if not pending_intent or not pending_question or not current_user_text:
-        return None
-    payload = {
-        "pending_clarification_intent": pending_intent,
-        "pending_question": pending_question,
-        "current_user_text": current_user_text,
-    }
-    prompt = (
-        "你只負責判斷 current_user_text 是否回答 pending_question 與 pending_clarification_intent。"
-        "不要規劃下一題、不要做科別推理、不要診斷，也不要輸出或修改任何 workflow state。"
-        "明確否定仍然是 answered，不需要出現正向症狀。例如問題『有沒有腰部或腹部疼痛？』，"
-        "回答『沒有腰痛，也沒有腹痛』應輸出 answered_intent=pain_presence、"
-        "answer_status=answered，並以該段逐字回答作 answer_source_text。"
-        "程度問題『血尿的量多不多？』回答『只有一點點血絲』也應是 answered。"
-        "只判斷本輪 current_user_text，不得引用 prior history。answer_source_text 必須是本輪回答中"
-        "直接支持判定的最短連續逐字片段，不可改寫。"
-        "answer_status 只能是 answered、partial、unclear 或 null；answer_confidence 必須是 0 到 1 的數字。"
-        "若本輪沒有回答 pending question，四個欄位都輸出 null。"
-        "只輸出固定 JSON：answered_intent, answer_status, answer_source_text, answer_confidence。\n"
-        f"資料：{json.dumps(payload, ensure_ascii=False)}"
-    )
-    try:
-        raw = await complete_runtime_json(prompt, purpose="pending_answer_classification")
-        data = json.loads(str(raw).strip())
-        expected_keys = {
-            "answered_intent", "answer_status", "answer_source_text", "answer_confidence",
-        }
-        if not isinstance(data, dict) or set(data) != expected_keys:
-            return None
-        intent = data.get("answered_intent")
-        source = data.get("answer_source_text")
-        status = data.get("answer_status")
-        confidence = data.get("answer_confidence")
-        if not _grounded_clarification_answer(
-            intent, source, status, confidence, pending_intent, current_user_text,
-        ):
-            return None
-        return PendingAnswerClassification(
-            answered_intent=intent,
-            answer_source_text=source.strip(),
-            answer_status=status,
-            answer_confidence=float(confidence),
-        )
-    except Exception as exc:
-        logger.warning(
-            "pending answer classifier failed case_id=%s error_type=%s",
-            case.case_id,
-            type(exc).__name__,
-        )
-        return None
-
-
 async def request_clarification(
     case: TriageCase,
     user_sources: list[str],
     *,
-    classify_answer_fields: bool = True,
     focused_answer_status: str | None = None,
     dialogue_act: DialogueActInterpretation | None = None,
 ) -> ClarificationSuggestion | None:
@@ -188,13 +120,6 @@ async def request_clarification(
         "dialogue_act": (dialogue_act or DialogueActInterpretation()).model_dump(),
     }
     answer_contract = (
-        "請先比對 pending_question 與本輪回答，再規劃下一題；不要把回答中的其他新症狀或安全篩檢否認混作 pending 回答。"
-        "若本輪以具體描述回答了 pending intent，用 answered_intent、逐字來自 current_user_text 的 "
-        "answer_source_text、answer_status (answered、partial 或 unclear) 與 0 到 1 的 "
-        "answer_confidence 表示；例如程度問題回答『只有一點』『不是很多』『明顯變多』『影響活動』，"
-        "即使沒有 canonical severity extraction，也可以是 answered。"
-        "回答欄位與整體 status 獨立，status=clarification_needed 時也須標記已回答的 pending intent。"
-        if classify_answer_fields else
         "本輪 pending answer 已由 Turn Interpreter 與 semantic evidence 一併處理；你只規劃下一個問題，"
         "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
     )
@@ -232,7 +157,6 @@ async def request_clarification(
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
-    compatibility_answer = (None, None, None, None)
     rejection = None
     initial_rejection = None
     for attempt in range(2):
@@ -253,13 +177,7 @@ async def request_clarification(
             except (TypeError, ValueError):
                 rejection = "invalid_json"
             else:
-                if classify_answer_fields and isinstance(proposal, dict):
-                    fields = tuple(proposal.get(key) for key in (
-                        "answered_intent", "answer_source_text", "answer_status", "answer_confidence",
-                    ))
-                    if _grounded_clarification_answer(*fields, state.pending_clarification_intent, user_sources):
-                        compatibility_answer = fields
-                rejection = _question_rejection(case, proposal, required_intent, safety_planning)
+                rejection =_question_rejection(case, proposal, required_intent, safety_planning)
         logger.info(
             "clarification proposal case_id=%s accepted=%s rejection_reason=%s repair_attempted=%s",
             case.case_id, rejection is None, rejection, bool(attempt),
@@ -270,7 +188,7 @@ async def request_clarification(
                 proposal["status"],
                 proposal.get("question", "").strip() if proposal["status"] == "clarification_needed" else None,
                 proposal.get("intent") if proposal["status"] == "clarification_needed" else None,
-                proposal["reason"].strip()[:240], *compatibility_answer,
+                proposal["reason"].strip()[:240],
                 information_need=needs[0].strip() if needs else None,
                 rejection_reason=initial_rejection,
                 repair_attempted=bool(attempt), reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
@@ -285,7 +203,7 @@ async def request_clarification(
                 + json.dumps(repair_context, ensure_ascii=False)
             )
     return ClarificationSuggestion(
-        "clarification_needed", None, None, "clarification_generation_failed", *compatibility_answer,
+        "clarification_needed", None, None, "clarification_generation_failed",
         rejection_reason=rejection, repair_attempted=bool(attempt), reply_source="TECHNICAL_FALLBACK",
     )
 
@@ -437,7 +355,7 @@ def invalidate_corrected_department_context(case: TriageCase) -> None:
 
 def capture_pending_answer(
     case: TriageCase,
-    suggestion: ClarificationSuggestion | PendingAnswerClassification | PendingAnswerInterpretation | None,
+    suggestion: ClarificationSuggestion | PendingAnswerInterpretation | None,
     user_sources: list[str],
 ) -> bool:
     """Persist only a grounded, confident answer before candidate recomputation."""
@@ -582,13 +500,6 @@ def advance_conversation(
         continue_safety_check(case, suggestion)
         return
 
-    grounded_answer = bool(suggestion) and _grounded_clarification_answer(
-        suggestion.answered_intent, suggestion.answer_source_text,
-        suggestion.answer_status, suggestion.answer_confidence,
-        state.pending_clarification_intent, user_sources,
-    )
-    if grounded_answer and suggestion.answer_status == "answered" and suggestion.answer_confidence >= ACCEPT_THRESHOLD:
-        made_progress = capture_pending_answer(case, suggestion, user_sources) or made_progress
     clear_answered_pending(case)
     if user_sources:
         state.consecutive_no_progress_turns = (

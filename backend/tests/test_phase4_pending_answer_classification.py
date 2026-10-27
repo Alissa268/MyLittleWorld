@@ -20,10 +20,8 @@ from app.services import conversation_service, rag_triage_adapter
 from app.services.case_store import save_case
 from app.services.conversation_service import (
     ClarificationSuggestion,
-    PendingAnswerClassification,
     advance_conversation,
     capture_pending_answer,
-    classify_pending_answer,
     request_clarification,
 )
 from app.services.rag_triage_adapter import RagTriageSuggestion
@@ -56,108 +54,6 @@ def pending_pain_case(case_id: str = "phase4-focused-pending") -> TriageCase:
     return case
 
 
-def classifier_json(
-    *,
-    intent: object = "pain_presence",
-    status: object = "answered",
-    source: object,
-    confidence: object = 0.95,
-) -> str:
-    return json.dumps({
-        "answered_intent": intent,
-        "answer_status": status,
-        "answer_source_text": source,
-        "answer_confidence": confidence,
-    }, ensure_ascii=False)
-
-
-def run_classifier(case: TriageCase, text: str, raw: object):
-    provider = AsyncMock(
-        side_effect=raw if isinstance(raw, Exception) else None,
-        return_value=raw if isinstance(raw, str) else None,
-    )
-    with patch(
-        "app.services.conversation_service.complete_runtime_json",
-        new=provider,
-    ):
-        result = asyncio.run(classify_pending_answer(case, [text]))
-    return result, provider
-
-
-def test_explicit_negative_answer_is_grounded_and_clears_pending_without_semantic_extraction():
-    case = pending_pain_case("phase4-negative-answer")
-    text = "沒有腰痛，也沒有腹痛"
-    result, provider = run_classifier(case, text, classifier_json(source=text))
-
-    assert isinstance(result, PendingAnswerClassification)
-    assert capture_pending_answer(case, result, [text]) is True
-    assert case.conversation_state.pending_clarification_intent is None
-    assert case.conversation_state.clarification_evidence["pain_presence"] == text
-    assert len(case.semantic_extractions) == 1
-    assert case.semantic_extractions[0].field == "duration"
-    prompt = provider.await_args.args[0]
-    assert "明確否定仍然是 answered" in prompt
-    assert "沒有腰痛，也沒有腹痛" in prompt
-
-
-def test_positive_answer_clears_pending():
-    case = pending_pain_case("phase4-positive-answer")
-    text = "右腰會痛"
-    result, _ = run_classifier(case, text, classifier_json(source=text))
-
-    assert capture_pending_answer(case, result, [text]) is True
-    assert case.conversation_state.pending_clarification_intent is None
-    assert case.conversation_state.clarification_evidence["pain_presence"] == text
-
-
-@pytest.mark.parametrize("status", ["partial", "unclear"])
-def test_partial_or_unclear_answer_keeps_pending(status):
-    case = pending_pain_case(f"phase4-{status}-answer")
-    text = "好像有一點，但不確定" if status == "partial" else "不知道"
-    result, _ = run_classifier(
-        case,
-        text,
-        classifier_json(status=status, source=text),
-    )
-
-    assert result is not None
-    assert capture_pending_answer(case, result, [text]) is False
-    assert case.conversation_state.pending_clarification_intent == "pain_presence"
-    assert case.conversation_state.clarification_evidence == {}
-
-
-@pytest.mark.parametrize(
-    ("raw", "text", "expect_classification"),
-    [
-        (classifier_json(intent="other_intent", source="右腰會痛"), "右腰會痛", False),
-        (classifier_json(source="先前說過腰痛"), "現在沒有了", False),
-        (classifier_json(source="右腰會痛", confidence=0.2), "右腰會痛", True),
-    ],
-)
-def test_wrong_intent_ungrounded_source_and_low_confidence_cannot_clear(
-    raw,
-    text,
-    expect_classification,
-):
-    case = pending_pain_case(f"phase4-invalid-{len(text)}")
-    result, _ = run_classifier(case, text, raw)
-
-    assert (result is not None) is expect_classification
-    assert capture_pending_answer(case, result, [text]) is False
-    assert case.conversation_state.pending_clarification_intent == "pain_presence"
-    assert case.conversation_state.clarification_evidence == {}
-
-
-@pytest.mark.parametrize("raw", ["{bad json", TimeoutError()])
-def test_malformed_or_provider_failure_fails_closed(raw):
-    case = pending_pain_case(f"phase4-provider-failure-{type(raw).__name__}")
-    result, _ = run_classifier(case, "沒有腰痛，也沒有腹痛", raw)
-
-    assert result is None
-    assert capture_pending_answer(case, result, ["沒有腰痛，也沒有腹痛"]) is False
-    assert case.conversation_state.pending_clarification_intent == "pain_presence"
-
-
 def test_planner_answer_fields_cannot_override_focused_classifier_failure():
     case = pending_pain_case("phase4-planner-cannot-override")
     text = "沒有腰痛，也沒有腹痛"
@@ -178,7 +74,6 @@ def test_planner_answer_fields_cannot_override_focused_classifier_failure():
         suggestion = asyncio.run(request_clarification(
             case,
             [text],
-            classify_answer_fields=False,
         ))
 
     assert suggestion is not None
@@ -227,11 +122,8 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
         )
 
     settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
-    legacy_classifier = AsyncMock(side_effect=AssertionError("primary flow must not classify twice"))
     with patch("app.routes.chat.get_settings", return_value=settings), patch(
         "app.routes.chat.refine_case_with_ai", new=semantic,
-    ), patch(
-        "app.services.conversation_service.classify_pending_answer", new=legacy_classifier,
     ), patch(
         "app.services.conversation_service.complete_runtime_json", new=provider,
     ), patch(
@@ -252,7 +144,6 @@ def test_chat_orders_semantic_classifier_department_and_planner_and_avoids_neutr
         "department",
         "conversation_clarification",
     ]
-    legacy_classifier.assert_not_awaited()
     assert data["conversation_state"]["pending_clarification_intent"] is None
     assert data["conversation_state"]["clarification_evidence"]["pain_presence"] == "沒有腰痛，也沒有腹痛"
     assert len(data["triage_case"]["semantic_extractions"]) == 1
@@ -493,7 +384,6 @@ def test_route_repair_failure_keeps_pending_and_skips_department_resolution():
         intent,
         "本輪 interpretation 尚未留下可靠 evidence",
     ))
-    legacy_classifier = AsyncMock(side_effect=AssertionError("legacy classifier must not run"))
     settings = SimpleNamespace(cerebras_api_key="test-key", batch_triage_enabled=False)
 
     with patch("app.routes.chat.get_settings", return_value=settings), patch.object(
@@ -502,8 +392,6 @@ def test_route_repair_failure_keeps_pending_and_skips_department_resolution():
         rag_triage_adapter, "complete_prompt", new=interpreter,
     ), patch("app.routes.chat.reason_about_departments", new=department), patch(
         "app.routes.chat.request_clarification", new=planner,
-    ), patch(
-        "app.services.conversation_service.classify_pending_answer", new=legacy_classifier,
     ), patch(
         "app.routes.chat.generate_triage_reply",
         new=AsyncMock(side_effect=lambda **kwargs: kwargs["fallback_reply"]),
@@ -517,7 +405,6 @@ def test_route_repair_failure_keeps_pending_and_skips_department_resolution():
     result = response.json()
     assert interpreter.await_count == 2
     department.assert_not_awaited()
-    legacy_classifier.assert_not_awaited()
     assert result["conversation_state"]["pending_clarification_intent"] == intent
     assert result["conversation_state"]["department_status"] == "unresolved"
     assert result["triage_case"]["semantic_extractions"] == []

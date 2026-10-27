@@ -386,7 +386,6 @@ async def chat(req: ChatRequest) -> TriageResult:
                         suggestion = await request_clarification(
                             case,
                             user_text_parts,
-                            classify_answer_fields=False,
                             focused_answer_status=(
                                 pending_interpretation.answer_status
                                 if pending_interpretation is not None else None

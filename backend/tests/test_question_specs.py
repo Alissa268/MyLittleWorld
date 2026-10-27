@@ -5,7 +5,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 from app.schemas import TriageCase
-from app.services import ai_reply_generator
+from app.services import ai_reply_generator, ai_service
 from app.services.batch_question_service import build_question_batch
 from app.services.question_specs import (
     QUESTION_SPECS,
@@ -67,7 +67,7 @@ class QuestionSpecTest(unittest.IsolatedAsyncioTestCase):
         case = TriageCase(case_id="no-question-ai")
         before = case.model_copy(deep=True)
         selected = select_question_variant("duration", random.Random(7))
-        with patch.object(ai_reply_generator, "complete_prompt", new_callable=AsyncMock) as provider:
+        with patch.object(ai_service, "complete_prompt", new_callable=AsyncMock) as provider:
             reply = await ai_reply_generator.generate_triage_reply(
                 case=case,
                 next_question=selected,

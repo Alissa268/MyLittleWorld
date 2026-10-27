@@ -185,7 +185,7 @@ def test_invalid_question_repaired_once_with_structured_reason():
     invalid = plan("你確診了，現在要掛哪個科別？")
     provider = AsyncMock(side_effect=[json.dumps(invalid), json.dumps(plan())])
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     assert provider.await_count == 2
     assert suggestion.question == FOCUSED
     assert suggestion.reply_source == "AI_REPAIR"
@@ -199,7 +199,7 @@ def test_invalid_repair_is_transparent_technical_failure_not_normal_retry():
     case = clinical_case()
     provider = AsyncMock(return_value=json.dumps(plan("你確診了，現在要掛哪個科別？")))
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
     assert provider.await_count == 2
     assert case.triage.next_question == TECHNICAL
@@ -214,7 +214,7 @@ def test_answered_intent_different_wording_cannot_be_reasked():
     case.conversation_state.pending_clarification_intent = None
     provider = AsyncMock(return_value=json.dumps(plan("暈的時候會覺得周圍旋轉嗎？")))
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["我說過了"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["我說過了"]))
     cs.advance_conversation(case, suggestion, user_sources=["我說過了"], current_extractions=[])
     assert suggestion.question is None
     assert suggestion.rejection_reason == "intent_already_answered"
@@ -386,7 +386,7 @@ def test_malformed_and_untrusted_planner_never_gain_state_authority(invalid):
     provider = AsyncMock(return_value=raw)
     case = clinical_case()
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
     assert case.triage.next_question == TECHNICAL
     assert not case.conversation_state.confirmed
@@ -408,7 +408,7 @@ def test_explicit_revision_releases_answered_intent_dedupe_only_through_backend(
     case.conversation_state.department_next_question_intent = INTENT
     provider = AsyncMock(return_value=json.dumps(plan()))
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["更新資訊"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["更新資訊"]))
     cs.advance_conversation(case, suggestion, user_sources=["更新資訊"], current_extractions=[])
     assert case.triage.next_question == FOCUSED
     assert case.conversation_state.pending_clarification_intent == INTENT
@@ -419,7 +419,7 @@ def test_second_a1_missing_information_need_rejected_then_repaired():
     invalid.pop("information_needs")
     provider = AsyncMock(side_effect=[json.dumps(invalid), json.dumps(plan())])
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"]))
     assert provider.await_count == 2
     assert suggestion.rejection_reason == "invalid_information_need"
     assert suggestion.reply_source == "AI_REPAIR"
@@ -432,7 +432,7 @@ def test_second_a2_missing_need_after_repair_is_technical_failure():
     provider = AsyncMock(return_value=json.dumps(invalid))
     case = clinical_case()
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
     assert provider.await_count == 2
     assert case.triage.next_question == TECHNICAL
@@ -446,7 +446,7 @@ def test_second_a2_missing_need_after_repair_is_technical_failure():
 def test_second_a3_generic_question_with_concrete_need_requires_repair(question):
     provider = AsyncMock(side_effect=[json.dumps(plan(question)), json.dumps(plan())])
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(clinical_case(), ["不懂"]))
     assert suggestion.reply_source == "AI_REPAIR"
     assert suggestion.rejection_reason == "generic_question"
     assert provider.await_count == 2
@@ -649,7 +649,7 @@ def test_second_d1_d2_sufficient_with_unresolved_rejected_then_repaired(required
         case.conversation_state.asked_clarification_intents = []
     provider = AsyncMock(side_effect=[json.dumps(dict(status="sufficient", reason="enough")), json.dumps(plan())])
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     assert suggestion.rejection_reason == expected
     assert suggestion.reply_source == "AI_REPAIR"
     assert suggestion.question == FOCUSED
@@ -667,7 +667,7 @@ def test_second_d3_truly_sufficient_does_not_need_information_needs():
     case.history_records.insert(1, Message(role="user", content="頭暈3天"))
     provider = AsyncMock(return_value=json.dumps(dict(status="sufficient", reason="enough")))
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["沒有補充"], classify_answer_fields=False))
+        suggestion = asyncio.run(cs.request_clarification(case, ["沒有補充"]))
     cs.advance_conversation(case, suggestion, user_sources=["沒有補充"], current_extractions=[])
     provider.assert_awaited_once()
     assert state.is_complete

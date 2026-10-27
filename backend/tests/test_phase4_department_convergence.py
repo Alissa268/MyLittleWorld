@@ -597,10 +597,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             chat_route, "refine_case_with_ai", new=semantic,
         ), patch.object(
             chat_route, "apply_user_message", wraps=apply_user_message,
-        ) as apply_message, patch(
-            "app.services.conversation_service.classify_pending_answer",
-            new=AsyncMock(side_effect=AssertionError("standalone classifier must not run")),
-        ), patch.object(chat_route, "reason_about_departments", new=department), patch.object(
+        ) as apply_message, patch.object(chat_route, "reason_about_departments", new=department), patch.object(
             chat_route, "request_clarification", new=planner,
         ), patch.object(
             chat_route, "generate_triage_reply",
@@ -747,13 +744,10 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             )
 
         planner = AsyncMock(side_effect=plan)
-        legacy_classifier = AsyncMock(side_effect=AssertionError("legacy classifier must not run"))
         with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
             chat_route, "refine_case_with_ai", new=semantic,
         ), patch.object(chat_route, "reason_about_departments", new=department), patch.object(
             chat_route, "request_clarification", new=planner,
-        ), patch(
-            "app.services.conversation_service.classify_pending_answer", new=legacy_classifier,
         ), patch.object(
             chat_route, "generate_triage_reply",
             new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
@@ -775,7 +769,6 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             }).json()
 
         self.assertEqual(semantic.await_count, 3)
-        legacy_classifier.assert_not_awaited()
         self.assertEqual(department.await_count, 3)
         self.assertEqual(planner.await_count, 3)
         semantic_history = a3["triage_case"]["semantic_extractions"]
@@ -929,7 +922,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
         provider = AsyncMock(return_value=json.dumps(raw, ensure_ascii=False))
         with patch("app.services.conversation_service.complete_runtime_json", new=provider):
             suggestion = await request_clarification(
-                case, ["我有症狀甲"], classify_answer_fields=False,
+                case, ["我有症狀甲"],
             )
 
         self.assertEqual(suggestion.question, raw["question"])
@@ -957,7 +950,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             new=AsyncMock(return_value=json.dumps(raw, ensure_ascii=False)),
         ):
             suggestion = await request_clarification(
-                case, ["我有症狀甲"], classify_answer_fields=False,
+                case, ["我有症狀甲"],
             )
 
         self.assertIsNone(suggestion.question)

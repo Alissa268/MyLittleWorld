@@ -4,12 +4,10 @@ import logging
 from datetime import date
 from typing import Any
 
-from app.config import get_settings  # Legacy test seam; runtime reply is deterministic.
 from app.schemas import TriageCase
 from app.services.chat_perf import record_ai_reply_outcome
 
 logger = logging.getLogger(__name__)
-complete_prompt: Any = None  # Legacy test seam; runtime status replies never call an LLM.
 
 
 def build_department_confirmation_reply(case: TriageCase) -> str:

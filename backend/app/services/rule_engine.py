@@ -5,7 +5,7 @@ import re
 import logging
 from typing import Any, Optional
 
-from app.schemas import Message, SemanticExtraction, TriageCase, UrgencyResult
+from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.clarification_engine import clarification_prompt
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, MAX_QUESTION_ATTEMPTS, accepted
 from app.services.field_acceptance import ai_normalized_value_valid, normalized_value_valid
@@ -39,36 +39,6 @@ def apply_user_message(
     if text and record_history:
         case.history_records.append(Message(role="user", content=text))
     return case
-
-
-def evaluate_urgency(case: TriageCase, *, mark_next_question: bool | None = True) -> UrgencyResult:
-    """Compatibility wrapper around the official deterministic TTAS evaluator.
-
-    This function intentionally performs no raw-text medical interpretation and
-    assigns no project-defined urgency score. Production chat calls the TTAS
-    evaluator directly; older structured callers may keep using this wrapper.
-    """
-    from app.services.ttas_evaluator import apply_ttas_evaluation
-
-    result = apply_ttas_evaluation(case)
-    if result.warning_required or mark_next_question is None:
-        return result
-    next_question = (
-        next_question_for(case)
-        if mark_next_question
-        else (
-            question_text_for_field(case, missing[0])
-            if (missing := missing_checklist_fields(case))
-            else None
-        )
-    )
-    return result.model_copy(
-        update={
-            "need_more_info": next_question is not None,
-            "next_question": next_question,
-            "is_final": next_question is None,
-        }
-    )
 
 
 def next_question_for(case: TriageCase) -> Optional[str]:
