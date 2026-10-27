@@ -43,9 +43,8 @@ class Settings(BaseSettings):
     clue_question_limit: int = Field(default=5, ge=1, le=10, alias="CLUE_QUESTION_LIMIT")
     clue_concepts_per_question: int = Field(default=3, ge=1, le=5, alias="CLUE_CONCEPTS_PER_QUESTION")
     clue_planner_concept_limit: int = Field(default=10, ge=1, le=20, alias="CLUE_PLANNER_CONCEPT_LIMIT")
-    family_medicine_department_name: str = Field(
-        default="家庭醫學科(一般門診/戒菸)", alias="FAMILY_MEDICINE_DEPARTMENT_NAME",
-    )
+    # Canonical KB/DB id, validated against live Department rows like resolve_department_names.
+    family_medicine_dept_id: int = Field(default=1233, ge=1, alias="FAMILY_MEDICINE_DEPT_ID")
     family_medicine_fallback_message: str = Field(
         default="目前的症狀無法明確區分科別，系統建議先由家庭醫學科初步評估。",
         alias="FAMILY_MEDICINE_FALLBACK_MESSAGE",

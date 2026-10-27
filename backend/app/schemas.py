@@ -323,6 +323,15 @@ class ClueConceptRecord(BaseModel):
         return self
 
 
+class ClueDecisionRecord(BaseModel):
+    # Diagnostic record of this turn's department_clues.decide() result.
+    kind: Literal["ask_clue", "decide", "tiebreak", "family_medicine", "family_medicine_unavailable",
+                  "defer_to_safety_net"]
+    reason: str = ""
+    dept_id: Optional[int] = None
+    tied_dept_ids: List[int] = Field(default_factory=list)
+
+
 class ClueOffer(BaseModel):
     # A ranked askable official concept and the candidate departments holding it.
     concept: str
@@ -382,6 +391,9 @@ class ConversationState(BaseModel):
     department_clue_candidates: List[int] = Field(default_factory=list)
     pending_clue_question_index: Optional[int] = None
     clue_reask_count: int = Field(default=0, ge=0)
+    clue_decision: Optional[ClueDecisionRecord] = None
+    # history_records length at the latest revision; clue duplicate checks start here.
+    revision_history_start: int = Field(default=0, ge=0)
 
 
 class UrgencyResult(BaseModel):

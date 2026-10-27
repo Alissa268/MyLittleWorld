@@ -9,7 +9,7 @@ from fastapi.testclient import TestClient
 
 from app.main import app
 from app.schemas import (
-    ClueConceptRecord, ClueOffer, ConversationState, DialogueActInterpretation, Message,
+    ClueConceptRecord, ClueDecisionRecord, ClueOffer, ConversationState, DialogueActInterpretation, Message,
     PendingAnswerInterpretation, SemanticExtraction, TriageCase,
 )
 from app.services import conversation_service, rag_triage_adapter
@@ -190,14 +190,22 @@ def test_provider_timeout_keeps_technical_fallback_and_counts_nothing():
     assert (state.clue_questions_asked, state.clue_concepts_asked, state.pending_clue_question_index) == (0, [], None)
 
 
-def test_question_limit_returns_to_free_planning_until_commit_5():
+def test_only_ask_clue_or_tiebreak_decisions_ask_a_new_clue_question():
     case = clue_case()
     case.conversation_state.clue_questions_asked = 5
-    free = dict(proposal("頭暈時會不會覺得天旋地轉？", None, intent="dizziness_type"),
-                information_needs=["頭暈型態"])
-    suggestion, provider = plan(case, free)
-    assert "clue_mode" not in payload_of(provider)
-    assert suggestion.reply_source == "AI_PLANNER" and suggestion.clue_concepts == ()
+    case.conversation_state.clue_decision = ClueDecisionRecord(kind="tiebreak", reason="question_limit")
+    sixth = clues.clue_intent(6)
+    suggestion, provider = plan(case, proposal("請問您有沒有耳鳴？", ["耳鳴"], intent=sixth))
+    assert payload_of(provider)["required_next_question_intent"] == sixth and suggestion.clue_concepts == ("耳鳴",)
+    apply(case, suggestion)
+    assert case.conversation_state.clue_tiebreak_used and case.conversation_state.clue_questions_asked == 6
+    for kind in ("decide", "family_medicine", "defer_to_safety_net"):
+        case = clue_case()
+        case.conversation_state.clue_decision = ClueDecisionRecord(kind=kind)
+        free = dict(proposal("頭暈時會不會覺得天旋地轉？", None, intent="dizziness_type"),
+                    information_needs=["頭暈型態"])
+        _, provider = plan(case, free)
+        assert "clue_mode" not in payload_of(provider)
 
 
 def test_safety_planning_never_enters_clue_mode():
@@ -322,6 +330,7 @@ def test_interpreter_prompt_lists_pending_clue_concepts():
 def test_first_miss_reasks_same_concepts_without_counting():
     case = pending_clue_case()
     reask = proposal("想再確認，您會不會耳鳴或覺得聽力變化？", ["耳鳴", "聽力變化"])
+    conversation_service.settle_unanswered_clue_question(case)
     suggestion, provider = plan(case, reask, user_sources=("昨天沒睡好",))
     assert payload_of(provider)["clue_reask"] is True
     assert case.conversation_state.clue_reask_count == 1
@@ -336,6 +345,7 @@ def test_second_miss_marks_uncertain_and_asks_a_new_question():
     case = pending_clue_case()
     case.conversation_state.clue_reask_count = 1
     second = clues.clue_intent(2)
+    conversation_service.settle_unanswered_clue_question(case)
     suggestion, provider = plan(case, proposal("請問您有沒有噁心或頭痛？", ["噁心", "頭痛"], intent=second),
                                 user_sources=("不知道你在問什麼",))
     assert payload_of(provider)["required_next_question_intent"] == second

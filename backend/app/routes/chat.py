@@ -16,6 +16,7 @@ from app.services.chat_perf import (
     record_chat_route_trace,
 )
 from app.services.conversation_service import (
+    FAMILY_MEDICINE_UNAVAILABLE_REPLY,
     UNRESOLVED_REPLY,
     SAFETY_UNRESOLVED_REPLY,
     SAFETY_ANSWER_CAP,
@@ -26,6 +27,7 @@ from app.services.conversation_service import (
     clear_answered_pending,
     request_clarification,
     safety_screen_resolved,
+    settle_unanswered_clue_question,
     validated_dialogue_act,
 )
 from app.services.department_reasoning_service import accepted_semantic_evidence, reason_about_departments
@@ -296,6 +298,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and (not safety_check_turn or safety_completed_this_turn)
                 )
                 if department_reasoning_allowed:
+                    settle_unanswered_clue_question(case)
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
                 clarification_planning_allowed = bool(
@@ -412,7 +415,12 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.reply_source = "URGENT_BACKEND"
         reply = case.triage.warning_message or URGENT_WARNING_FALLBACK
     elif case.conversation_state.clarification_status == "unresolved":
-        reply = SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else UNRESOLVED_REPLY
+        decision = case.conversation_state.clue_decision
+        reply = (
+            SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else
+            FAMILY_MEDICINE_UNAVAILABLE_REPLY if decision and decision.kind == "family_medicine_unavailable" else
+            UNRESOLVED_REPLY
+        )
     elif reply is None and case.conversation_state.awaiting_confirmation and case.department_result:
         case.conversation_state.reply_source = "CONFIRMATION"
         reply = build_department_confirmation_reply(case)
@@ -566,6 +574,16 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.department_next_information_needed = None
     case.conversation_state.department_next_question_intent = None
     case.conversation_state.semantic_official_links = []
+    # Clue questions restart from scratch; their duplicate check ignores pre-revision replies.
+    case.conversation_state.clue_questions_asked = 0
+    case.conversation_state.clue_concepts_asked = []
+    case.conversation_state.clue_tiebreak_used = False
+    case.conversation_state.department_clue_offer = []
+    case.conversation_state.department_clue_candidates = []
+    case.conversation_state.pending_clue_question_index = None
+    case.conversation_state.clue_reask_count = 0
+    case.conversation_state.clue_decision = None
+    case.conversation_state.revision_history_start = len(case.history_records)
     case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)
     case.conversation_state.clarification_reasons.pop("department", None)

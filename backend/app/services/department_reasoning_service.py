@@ -10,11 +10,13 @@ import re
 from app.config import get_settings
 from app.db import fetch_active_departments
 from app.schemas import (
-    CandidateDepartment, CandidateDepartmentEvidence, DepartmentResult, SemanticOfficialLink, TriageCase,
+    CandidateDepartment, CandidateDepartmentEvidence, ClueDecisionRecord, DepartmentResult, SemanticOfficialLink,
+    TriageCase,
 )
 from app.services import department_clues as clues
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
+from app.services.conversation_service import safety_screen_resolved
 from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
 )
@@ -296,8 +298,8 @@ def _contradicted_concepts(evidence: list[dict]) -> set[str]:
     }
 
 
-def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict]) -> None:
-    """Persist the Backend-ranked askable clues of all retrieved candidates for the planner."""
+def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict]) -> list[clues.ClueConcept]:
+    """Persist the Backend-ranked askable clues of all retrieved candidates; return every askable clue."""
     state = case.conversation_state
     settings = get_settings()
     candidates = clues.candidate_dept_ids(retrieved)
@@ -307,6 +309,79 @@ def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict
     state.department_clue_offer = clues.clue_offer(
         clues.rank_clue_concepts(askable, settings.clue_planner_concept_limit)
     )
+    return askable
+
+
+def _live_rows(active: list[dict], dept_id: int) -> list[dict]:
+    return [row for row in active if canonical_department_id(row.get("dept_id")) == dept_id]
+
+
+def _live_department(active: list[dict], dept_id: int | None, confidence: float, reason: str) -> DepartmentResult | None:
+    """Adopt a decided department only when exactly one live Department row has its id."""
+    rows = _live_rows(active, dept_id) if dept_id is not None else []
+    if len(rows) != 1:
+        logger.warning("clue decision department not adopted dept_id=%s live_rows=%s", dept_id, len(rows))
+        return None
+    row = rows[0]
+    return DepartmentResult(
+        dept_id=canonical_department_id(row["dept_id"]), parentDept=row["parent_dept"], childDept=row["child_dept"],
+        confidence=confidence, reason=[reason],
+    )
+
+
+def apply_clue_decision(
+    case: TriageCase, askable: list[clues.ClueConcept], retrieved: list[dict], active: list[dict],
+) -> None:
+    """Run decide() once safety is resolved; every adopted decision still waits for user confirmation.
+
+    Not run while a clue question awaits its answer or the patient asked for an explanation,
+    unless the convergence AI already resolved one candidate.
+    """
+    state = case.conversation_state
+    if not safety_screen_resolved(case):
+        return
+    ai_resolved = (case.department_result.dept_id
+                   if state.department_status == "resolved" and case.department_result else None)
+    if ai_resolved is None and (clues.pending_clue_index(state) is not None
+                                or state.last_dialogue_act == "request_explanation"):
+        return
+    settings = get_settings()
+    candidates = set(state.department_clue_candidates)
+    decision = clues.decide(
+        ai_resolved_dept_id=ai_resolved, candidates=candidates,
+        scores=clues.department_scores(retrieved, candidates, state.clue_concepts_asked),
+        askable=askable, questions_asked=state.clue_questions_asked, tiebreak_used=state.clue_tiebreak_used,
+        user_declined=False,
+        clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates),
+        question_limit=settings.clue_question_limit,
+    )
+    kind, dept_id, result = decision.kind, decision.dept_id, None
+    if kind == "tiebreak":
+        # Tiebreak clues come from every askable clue, never only the planner's top-ranked offer.
+        state.department_clue_offer = clues.clue_offer(clues.tiebreak_clues(askable, set(decision.tied_dept_ids)))
+    elif kind == "decide" and dept_id == ai_resolved:
+        result = case.department_result
+    elif kind == "decide":
+        confidence = next((item.confidence for item in state.candidate_departments if item.dept_id == dept_id), 0.0)
+        result = _live_department(active, dept_id, confidence, "依線索題回答與官方科別證據決定")
+    elif kind == "family_medicine":
+        result = _live_department(active, settings.family_medicine_dept_id, 0.0, "目前症狀無法明確區分科別")
+        if result is None:
+            kind = "family_medicine_unavailable"
+        dept_id = result.dept_id if result else None
+    state.clue_decision = ClueDecisionRecord(
+        kind=kind, reason=decision.reason, dept_id=dept_id, tied_dept_ids=list(decision.tied_dept_ids),
+    )
+    logger.info("clue decision case_id=%s kind=%s reason=%s dept_id=%s", case.case_id, kind, decision.reason, dept_id)
+    if result is not None:
+        case.department_result = result
+        state.department_status = "resolved"
+        state.department_next_question_intent = None
+        state.pending_clarification_intent = None
+        state.pending_clarification_question = None
+        state.pending_clue_question_index = None
+        state.clue_reask_count = 0
+        state.next_information_needed = []
 
 
 def _clue_answers(case: TriageCase) -> list[dict]:
@@ -428,6 +503,7 @@ async def reason_about_departments(case: TriageCase) -> None:
     state.department_next_question_intent = None
     state.department_clue_offer = []
     state.department_clue_candidates = []
+    state.clue_decision = None
     case.department_result = None
     try:
         active = fetch_active_departments()
@@ -453,8 +529,9 @@ async def reason_about_departments(case: TriageCase) -> None:
         ))
         if not retrieved:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
+            apply_clue_decision(case, [], [], active)
             return
-        store_clue_offer(case, records, retrieved)
+        askable = store_clue_offer(case, records, retrieved)
         payload = {
             "accepted_semantic_evidence": accepted_semantic_evidence(case),
             "retrieved_official_evidence": retrieved,
@@ -501,10 +578,12 @@ async def reason_about_departments(case: TriageCase) -> None:
             )
         else:
             state.department_status = "ambiguous"
+        apply_clue_decision(case, askable, retrieved, active)
     except Exception as exc:
         logger.warning("department convergence unavailable case_id=%s error=%s", case.case_id, type(exc).__name__)
         state.department_status = "unresolved"
         state.candidate_departments = []
         state.department_clue_offer = []
         state.department_clue_candidates = []
+        state.clue_decision = None
         state.department_uncertainty_reason = "科別證據比對暫時無法完成"

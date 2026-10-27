@@ -33,7 +33,8 @@ SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明�
 SAFETY_PENDING_INTENT = "safety_screen"
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
-DEPARTMENT_EVIDENCE_REPLY = "已記錄目前症狀，但正式科別資料仍不足以確認建議科別。您可以補充新的症狀資訊，或返回就診類型選擇「快速查詢」自行選科。"
+FAMILY_MEDICINE_UNAVAILABLE_REPLY = "資訊不足，無法判斷科別。請改用手動選科或洽醫院掛號服務。"
+DEPARTMENT_EVIDENCE_REPLY ="已記錄目前症狀，但正式科別資料仍不足以確認建議科別。您可以補充新的症狀資訊，或返回就診類型選擇「快速查詢」自行選科。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
 _UNSAFE_QUESTION = re.compile(r"確診|診斷為|你患有|你得了|科|醫師|醫生|掛號|哪天有空|看診日期|看診時段|什麼時段方便")
 _DURATION_QUESTION = re.compile(r"多久|幾天|幾週|幾個月|什麼時候開始")
@@ -94,9 +95,10 @@ class ClueQuestionSpec:
 
 
 def _clue_question_spec(case: TriageCase, safety_planning: bool) -> ClueQuestionSpec | None:
-    """Clue mode re-asks a pending clue question, or asks a new one while askable clues remain.
+    """Clue mode re-asks a pending clue question, or asks the next one the decision allows.
 
-    Until Commit 5 wires decide(), reaching clue_question_limit falls back to free planning.
+    Before decide() runs (safety screen unresolved) clues are asked up to clue_question_limit;
+    afterwards only ask_clue, or a tiebreak question that may exceed the limit, asks a new one.
     """
     if safety_planning:
         return None
@@ -107,22 +109,26 @@ def _clue_question_spec(case: TriageCase, safety_planning: bool) -> ClueQuestion
                          for record in state.clue_concepts_asked if record.question_index == index)
         return ClueQuestionSpec(clues.clue_intent(index), concepts, True, len(concepts)) if concepts else None
     settings = get_settings()
-    if (state.pending_clarification_intent is None and state.department_status != "resolved"
-            and state.department_clue_offer and state.clue_questions_asked < settings.clue_question_limit):
+    kind = state.clue_decision.kind if state.clue_decision else None
+    allowed = kind == "tiebreak" or (kind in {None, "ask_clue"}
+                                     and state.clue_questions_asked < settings.clue_question_limit)
+    if (allowed and state.pending_clarification_intent is None and state.department_status != "resolved"
+            and state.department_clue_offer):
         return ClueQuestionSpec(clues.clue_intent(state.clue_questions_asked + 1),
                                 tuple(state.department_clue_offer), False, settings.clue_concepts_per_question)
     return None
 
 
-def settle_unanswered_clue_question(case: TriageCase, user_sources: list[str], act: str | None) -> None:
+def settle_unanswered_clue_question(case: TriageCase) -> None:
     """Bound re-asking a clue question that got no accepted concept answer this turn.
 
-    The first miss re-asks the same concepts once; the second marks its unanswered concepts
-    uncertain and releases the pending question. Its question count is never changed.
+    Runs before department reasoning, only on turns the Turn Interpreter completed. The first
+    miss re-asks the same concepts once; the second marks its unanswered concepts uncertain and
+    releases the pending question. Its question count is never changed.
     """
     state = case.conversation_state
     index = clues.pending_clue_index(state)
-    if index is None or not user_sources or act == "request_explanation":
+    if index is None or state.last_dialogue_act == "request_explanation":
         return
     if state.clue_reask_count < 1:
         state.clue_reask_count += 1
@@ -171,8 +177,6 @@ async def request_clarification(
     state = case.conversation_state
     safety_planning = state.clarification_status == "safety_check" and not safety_screen_resolved(case)
     act = validated_dialogue_act(dialogue_act, user_sources)
-    if not safety_planning:
-        settle_unanswered_clue_question(case, user_sources, act)
     clue = _clue_question_spec(case, safety_planning)
     required_intent = (
         SAFETY_PENDING_INTENT if safety_planning else
@@ -401,13 +405,18 @@ def _valid_explanation(value: object) -> bool:
     )
 
 
-def _asked_before(case: TriageCase, question: str) -> bool:
+def _asked_before(case: TriageCase, question: str, since: int = 0) -> bool:
     """Displayed replies may prefix an explanation line; compare the question itself too."""
     question = question.strip()
     return any(
         item.role == "assistant" and (item.content == question or item.content.endswith("\n" + question))
-        for item in case.history_records
+        for item in case.history_records[since:]
     )
+
+
+def _duplicate_window(case: TriageCase, clue_question: bool) -> int:
+    """Clue questions restart after a revision cleared their records; other questions never do."""
+    return case.conversation_state.revision_history_start if clue_question else 0
 
 
 def _explained_question(case: TriageCase) -> str | None:
@@ -417,13 +426,13 @@ def _explained_question(case: TriageCase) -> str | None:
 
 
 def _repeated_question(case: TriageCase, question: str, *, dialogue_act: str | None,
-                       explanation: object, safety_planning: bool) -> str | None:
+                       explanation: object, safety_planning: bool, since: int = 0) -> str | None:
     """Shared duplicate rule: only a validly explained restatement of the explained question may repeat."""
     question = question.strip()
     if (dialogue_act == "request_explanation" and _valid_explanation(explanation)
             and question == _explained_question(case)):
         return None
-    if _asked_before(case, question):
+    if _asked_before(case, question, since):
         return "duplicate_question"
     if safety_planning and question == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
         return "repeated_safety_checklist"
@@ -492,7 +501,8 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
     if re.search(r"剛才問題|上一個追問", question):
         return "generic_retry"
     repeated = _repeated_question(case, question, dialogue_act=dialogue_act,
-                                  explanation=proposal.get("explanation"), safety_planning=safety_planning)
+                                  explanation=proposal.get("explanation"), safety_planning=safety_planning,
+                                  since=_duplicate_window(case, clue is not None))
     if repeated:
         return repeated
     if not safety_planning and _asks_filled_duration(case, intent, question):
@@ -665,6 +675,8 @@ def _record_clue_question(case: TriageCase, suggestion: ClarificationSuggestion)
     state.clue_questions_asked = index
     state.pending_clue_question_index = index
     state.clue_reask_count = 0
+    if state.clue_decision is not None and state.clue_decision.kind == "tiebreak":
+        state.clue_tiebreak_used = True
 
 
 def capture_safety_screen_answer(
@@ -830,8 +842,15 @@ def advance_conversation(
         _enter_safety_check(case)
         return
 
+    decision = state.clue_decision.kind if state.clue_decision else None
+    if decision == "family_medicine_unavailable":
+        _family_medicine_unavailable(case)
+        return
+    # A Backend clue decision counts as sufficient; the safety and grounding gates still apply.
+    backend_decided = decision in {"decide", "family_medicine"} and state.department_status == "resolved"
     sufficient = (
-        (state.clarification_status == "safety_check" or (suggestion is not None and suggestion.status == "sufficient"))
+        (state.clarification_status == "safety_check" or backend_decided
+         or (suggestion is not None and suggestion.status == "sufficient"))
         and safety_ready
         and state.pending_clarification_intent is None
     )
@@ -884,7 +903,8 @@ def advance_conversation(
                  or suggestion.intent == state.department_next_question_intent)
         ))
         and not _repeated_question(case, suggestion.question or "", dialogue_act=state.last_dialogue_act,
-                                   explanation=suggestion.explanation, safety_planning=False)
+                                   explanation=suggestion.explanation, safety_planning=False,
+                                   since=_duplicate_window(case, bool(suggestion.clue_concepts)))
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
     if valid_question:
@@ -988,6 +1008,15 @@ def _grounded_clarification_answer(
         and math.isfinite(confidence)
         and 0 <= confidence <= 1
     )
+
+
+def _family_medicine_unavailable(case: TriageCase) -> None:
+    """Terminal when the configured family medicine id is not exactly one live department."""
+    _unresolved(case)
+    state = case.conversation_state
+    state.reply_source = "FAMILY_MEDICINE_UNAVAILABLE"
+    state.uncertainty_reasons = ["family_medicine_department_unavailable"]
+    case.triage.reasons[-1] = "線索題無法區分科別，且設定的家醫科無法對應唯一正式科別；未虛構或改推其他科別。"
 
 
 def _unresolved(case: TriageCase) -> None:

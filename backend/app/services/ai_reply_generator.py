@@ -4,6 +4,7 @@ import logging
 from datetime import date
 from typing import Any
 
+from app.config import get_settings
 from app.schemas import TriageCase
 from app.services.chat_perf import record_ai_reply_outcome
 
@@ -64,6 +65,11 @@ def build_department_confirmation_reply(case: TriageCase) -> str:
         return f"{reply}\n{preference_summary}" if preference_summary else reply
     if not department:
         reply = f"{basis}，目前仍無法確認建議科別，請補充症狀資訊。"
+        return f"{reply}\n{preference_summary}" if preference_summary else reply
+    decision = case.conversation_state.clue_decision
+    if decision is not None and decision.kind == "family_medicine":
+        # The configured wording is used verbatim, never rewritten by AI.
+        reply = f"{get_settings().family_medicine_fallback_message}請確認後取得推薦掛號方案。"
         return f"{reply}\n{preference_summary}" if preference_summary else reply
     reply = (
         f"{basis}，這些情況較符合{department}的診療範圍，"

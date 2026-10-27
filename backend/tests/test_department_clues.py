@@ -209,5 +209,5 @@ def test_clue_settings_defaults():
     settings = Settings(_env_file=None)
     assert (settings.clue_question_limit, settings.clue_concepts_per_question,
             settings.clue_planner_concept_limit) == (5, 3, 10)
-    assert settings.family_medicine_department_name == "家庭醫學科(一般門診/戒菸)"
+    assert settings.family_medicine_dept_id == 1233
     assert settings.family_medicine_fallback_message == "目前的症狀無法明確區分科別，系統建議先由家庭醫學科初步評估。"
