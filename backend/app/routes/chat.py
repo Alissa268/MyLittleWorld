@@ -565,6 +565,7 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.department_uncertainty_reason = None
     case.conversation_state.department_next_information_needed = None
     case.conversation_state.department_next_question_intent = None
+    case.conversation_state.semantic_official_links = []
     case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)
     case.conversation_state.clarification_reasons.pop("department", None)

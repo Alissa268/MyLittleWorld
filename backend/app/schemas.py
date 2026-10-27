@@ -291,6 +291,12 @@ class CandidateDepartmentEvidence(BaseModel):
     knowledge_concept: str
 
 
+class SemanticOfficialLink(BaseModel):
+    # An audited semantic retrieval link; rebuilt into official evidence only while still grounded.
+    patient_source_text: str
+    knowledge_concept: str
+
+
 class CandidateDepartment(BaseModel):
     dept_id: int
     parentDept: str
@@ -334,6 +340,7 @@ class ConversationState(BaseModel):
     department_uncertainty_reason: Optional[str] = None
     department_next_information_needed: Optional[str] = None
     department_next_question_intent: Optional[str] = None
+    semantic_official_links: List[SemanticOfficialLink] = Field(default_factory=list)
 
 
 class UrgencyResult(BaseModel):

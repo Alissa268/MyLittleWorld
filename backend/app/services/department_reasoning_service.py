@@ -8,7 +8,9 @@ import math
 import re
 
 from app.db import fetch_active_departments
-from app.schemas import CandidateDepartment, CandidateDepartmentEvidence, DepartmentResult, TriageCase
+from app.schemas import (
+    CandidateDepartment, CandidateDepartmentEvidence, DepartmentResult, SemanticOfficialLink, TriageCase,
+)
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.department_knowledge import (
@@ -149,11 +151,7 @@ async def retrieve_semantic_official_evidence(
 ) -> list[dict]:
     """Bridge wording to the existing official catalog, never invent routing data."""
     evidence = accepted_semantic_evidence(case)
-    present_sources = {
-        item["source_text"] for item in evidence
-        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] == "present"
-        and item["semantic_status"] in {"available", "partial"}
-    }
+    present_sources = _present_sources(evidence)
     resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
     catalog = sorted({record["concept"] for record in records if record["canonical_dept_id"] in resolved})
     if not present_sources or not catalog:
@@ -240,6 +238,77 @@ async def retrieve_semantic_official_evidence(
     except Exception as exc:
         logger.warning("retrieval entailment unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
         return []
+
+
+_MAX_SEMANTIC_LINKS = 50
+
+
+def _present_sources(evidence: list[dict]) -> set[str]:
+    return {
+        item["source_text"] for item in evidence
+        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] == "present"
+        and item["semantic_status"] in {"available", "partial"}
+    }
+
+
+def retained_semantic_official_evidence(
+    case: TriageCase, records: list[dict], resolutions: list[dict],
+) -> list[dict]:
+    """Rebuild earlier audited links that current structured evidence still supports.
+
+    A link survives only while its source is current present evidence and no current
+    absent/uncertain evidence names the same official concept; stale links are pruned.
+    """
+    state = case.conversation_state
+    evidence = accepted_semantic_evidence(case)
+    present_sources = _present_sources(evidence)
+    contradicted = {
+        normalize_concept(str(item["normalized_value"])) for item in evidence
+        if item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] in {"absent", "uncertain"}
+    }
+    resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
+    kept, found = [], {}
+    for link in state.semantic_official_links:
+        if (link.patient_source_text not in present_sources
+                or normalize_concept(link.knowledge_concept) in contradicted):
+            continue
+        rows = [(record, resolved[record["canonical_dept_id"]])
+                for record in lookup_concept(link.knowledge_concept, records)
+                if record["canonical_dept_id"] in resolved]
+        if not rows:
+            continue
+        kept.append(link)
+        for record, row in rows:
+            key = (row["db_dept_id"], link.patient_source_text, record["source_id"], record["concept"])
+            found[key] = dict(
+                dept_id=row["db_dept_id"], parentDept=row["db_parent_dept"], childDept=row["db_child_dept"],
+                patient_source_text=link.patient_source_text, knowledge_source_id=record["source_id"],
+                knowledge_concept=record["concept"], knowledge_evidence_text=record["evidence_text"],
+                source_priority=record["source_priority"],
+            )
+    state.semantic_official_links = kept
+    return list(found.values())
+
+
+def remember_semantic_official_links(case: TriageCase, retrieved: list[dict]) -> None:
+    """Persist audited (source, concept) pairs so later lexical hits cannot drop them."""
+    state = case.conversation_state
+    known = {(link.patient_source_text, link.knowledge_concept) for link in state.semantic_official_links}
+    for item in retrieved:
+        pair = (item["patient_source_text"], item["knowledge_concept"])
+        if pair not in known:
+            known.add(pair)
+            state.semantic_official_links.append(SemanticOfficialLink(
+                patient_source_text=pair[0], knowledge_concept=pair[1],
+            ))
+    state.semantic_official_links = state.semantic_official_links[-_MAX_SEMANTIC_LINKS:]
+
+
+def _merge_official_evidence(primary: list[dict], extra: list[dict]) -> list[dict]:
+    def key(item: dict) -> tuple:
+        return (item["dept_id"], item["patient_source_text"], item["knowledge_source_id"], item["knowledge_concept"])
+    seen = {key(item) for item in primary}
+    return primary + [item for item in extra if key(item) not in seen]
 
 
 def validate_candidate_proposal(
@@ -344,9 +413,12 @@ async def reason_about_departments(case: TriageCase) -> None:
             return
         sources, records = load_department_knowledge()
         resolutions = resolve_department_names(records, active)
+        retained = retained_semantic_official_evidence(case, records, resolutions)
         retrieved = retrieve_official_evidence(case, records, resolutions)
         if not retrieved:
             retrieved = await retrieve_semantic_official_evidence(case, records, resolutions)
+            remember_semantic_official_links(case, retrieved)
+        retrieved = _merge_official_evidence(retrieved, retained)
         if not retrieved:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             return

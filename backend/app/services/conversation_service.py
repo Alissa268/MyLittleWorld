@@ -447,6 +447,7 @@ def invalidate_corrected_department_context(case: TriageCase) -> None:
     state.department_uncertainty_reason = None
     state.department_next_information_needed = None
     state.department_next_question_intent = None
+    state.semantic_official_links = []
     state.pending_clarification_intent = None
     state.pending_clarification_question = None
     state.next_information_needed = []
