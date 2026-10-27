@@ -32,7 +32,6 @@ from app.services.department_preference_service import resolve_requested_departm
 from app.services.rag_triage_adapter import refine_case_with_ai
 from app.services.rule_engine import (
     QUESTION_TEXTS,
-    RED_FLAG_QUESTION_KEY,
     apply_user_message,
 )
 from app.services.ttas_evaluator import apply_ttas_evaluation, ttas_requires_immediate_action
@@ -90,7 +89,7 @@ async def chat(req: ChatRequest) -> TriageResult:
     # Keyed batch answers are no longer accepted; keep the existing 400 response.
     if req.answers:
         finish_chat_perf(perf, perf_token)
-        raise HTTPException(status_code=400, detail="batch triage 尚未啟用。")
+        raise HTTPException(status_code=400, detail="已不支援固定問卷作答，請直接以文字描述症狀。")
 
     if case.visit_type == VisitType.RETURN_VISIT:
         with perf.measure("case_store"):

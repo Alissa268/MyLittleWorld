@@ -26,10 +26,6 @@ class Settings(BaseSettings):
     ai_provider: Literal["gemini", "cerebras"] = Field(default="cerebras", alias="AI_PROVIDER")
     cerebras_api_key: str = Field(default="", alias="CEREBRAS_API_KEY")
     cerebras_model: Literal["gpt-oss-120b"] = Field(default="gpt-oss-120b", alias="CEREBRAS_MODEL")
-    batch_extraction_provider: Literal["gemini", "cerebras"] = Field(
-        default="cerebras",
-        alias="BATCH_EXTRACTION_PROVIDER",
-    )
     ai_timeout_seconds: float = Field(default=8.0, alias="AI_TIMEOUT_SECONDS")
     ai_reply_generation_enabled: bool = Field(default=False, alias="AI_REPLY_GENERATION_ENABLED")
     ai_reply_timeout_seconds: float = Field(default=20.0, alias="AI_REPLY_TIMEOUT_SECONDS")

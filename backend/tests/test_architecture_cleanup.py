@@ -325,7 +325,7 @@ def test_keyed_answers_are_rejected_without_entering_any_triage_path(extra):
     ), patch.object(route, "reason_about_departments", department):
         response = TestClient(app).post("/chat", json={**extra, "answers": [{"key": "symptom", "answer": "頭痛"}]})
     assert response.status_code == 400
-    assert response.json() == {"detail": "batch triage 尚未啟用。"}
+    assert response.json() == {"detail": "已不支援固定問卷作答，請直接以文字描述症狀。"}
     interpreter.assert_not_awaited()
     planner.assert_not_awaited()
     department.assert_not_awaited()

@@ -1,5 +1,12 @@
 # Phase 7 Natural Chat and Bounded Safety Clarification
 
+> **2026-10-27 更新**
+>
+> legacy batch 路徑、`BATCH_TRIAGE_ENABLED`、`BATCH_EXTRACTION_PROVIDER` 已在 commit
+> `8656314` 移除。`legacy_batch`（request）與 `question_batch`（response）只保留為
+> 相容欄位；`POST /chat` 只要帶 `answers` 一律回 HTTP 400。以下為當時的歷史紀錄，
+> 其中提到上述設定與相容路徑的段落已不再適用。
+
 ## Scope and Authority
 
 This repair follows `修改計畫.md` Phase 1/2/5/7 and the Phase 7 live-blocker task.
@@ -92,7 +99,6 @@ retained. No 310 file has been accessed or modified.
 | `AI_PROVIDER` / `CEREBRAS_MODEL` | Runtime JSON calls use the existing Cerebras `gpt-oss-120b` path. These do not turn SDK initialization/network failures into success. |
 | `CEREBRAS_API_KEY` | Required secret; only presence/readiness is checked or reported. |
 | `AI_TIMEOUT_SECONDS` | Existing per-provider call timeout, retained locally. |
-| `BATCH_TRIAGE_ENABLED` | Explicit legacy batch compatibility only; false for normal deployment. |
 | `AI_REPLY_GENERATION_ENABLED` | Deprecated compatibility setting; neither value disables the natural clarification planner or enables a separate model call. |
 | `AI_DOCTOR_SCORING_ENABLED` | Existing Phase 6 specialty scorer switch, unchanged. |
 
@@ -105,7 +111,6 @@ settings for this terminal; it does not overwrite `.env`:
 
 ```powershell
 cd C:\Users\10650\Downloads\Total\New_Android_Backend
-$env:BATCH_TRIAGE_ENABLED='false'
 $env:AI_PROVIDER='cerebras'
 $env:CEREBRAS_MODEL='gpt-oss-120b'
 $port = [int](Read-Host 'Enter the existing Backend port (unchanged)')

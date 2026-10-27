@@ -11,7 +11,6 @@ from app.services import ai_service
 def _settings(*, key: str = "cerebras-test-key") -> SimpleNamespace:
     return SimpleNamespace(
         ai_provider="gemini",  # A stale environment value must not switch runtime.
-        batch_extraction_provider="gemini",
         cerebras_api_key=key,
         cerebras_model="gpt-oss-120b",
         google_api_key="",
