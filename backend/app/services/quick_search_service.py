@@ -6,6 +6,7 @@ from typing import Any
 
 from app.db import QUICK_SEARCH_VISIT_TYPE, fetch_quick_search_slot_by_id, fetch_quick_search_slots
 from app.schemas import QuickSearchPeriod, RecommendationItem
+from app.services.appointment_service import _schedule_visit_type_tokens
 from app.services.schedule_filter import normalize_session, row_is_available, session_is_open, session_range
 
 
@@ -90,8 +91,13 @@ def revalidate_schedule(
     recommendation: RecommendationItem,
     *,
     require_followup_evidence: bool = False,
+    expected_visit_type: str | None = None,
 ) -> RecommendationItem:
-    """Reload any selected schedule and return only DB-authoritative identity fields."""
+    """Reload any selected schedule and return only DB-authoritative identity fields.
+
+    ``expected_visit_type`` (a Schedule visit-type label such as 初診) is checked only
+    when a caller passes it; /schedules/search never does.
+    """
     if not recommendation.schedule_id or not recommendation.doctor_id or recommendation.dept_id is None:
         raise ValueError("班表缺少 schedule_id、doctor_id 或 dept_id。")
     try:
@@ -116,6 +122,8 @@ def revalidate_schedule(
         raise ValueError("班表時段資料已變更。")
     if not row_is_available(row) or not session_is_open(row):
         raise ValueError("指定班表目前不可掛號。")
+    if expected_visit_type is not None and expected_visit_type not in _schedule_visit_type_tokens(row.get("visit_type")):
+        raise ValueError("指定班表的掛號別與問診案件不一致。")
 
     session = normalize_session(row.get("session")) or str(row.get("session") or "").strip()
     room = str(row.get("room") or row.get("slot") or "").strip()

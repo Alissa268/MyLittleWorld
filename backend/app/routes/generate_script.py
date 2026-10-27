@@ -1,12 +1,34 @@
 from fastapi import APIRouter, HTTPException
 
 from app.db import DatabaseUnavailableError
-from app.schemas import ConversationStage, ScriptRequest, ScriptResponse
-from app.services.case_store import find_recommendation, get_case, get_recommendation, save_case
+from app.schemas import ConversationStage, ScriptRequest, ScriptResponse, TriageCase, VisitType
+from app.services.appointment_service import schedule_visit_type_for
+from app.services.case_store import (
+    case_is_urgent, find_recommendation, find_recommendation_case_id, get_case, get_recommendation, save_case,
+)
+from app.services.conversation_service import safety_screen_resolved
 from app.services.quick_search_service import revalidate_schedule
 from app.services.script_service import SCRIPT_ID, build_navigation_script
 
 router = APIRouter(prefix="/generate_script", tags=["generate_script"])
+
+# Recommendations produced by /recommend; Quick Search and return visits keep their own paths.
+_TRIAGE_VISIT_TYPES = {VisitType.INITIAL, VisitType.FOLLOWUP}
+
+
+def _require_recommendable(case: TriageCase) -> None:
+    """The /recommend workflow conditions, in its order, status code and wording."""
+    if case_is_urgent(case):
+        raise HTTPException(
+            status_code=400,
+            detail="目前急迫性篩檢結果不適合繼續一般掛號推薦，請優先尋求醫療評估。",
+        )
+    if case.conversation_state.is_complete is not True or case.triage.need_more_info is True:
+        raise HTTPException(status_code=400, detail="triage_case 尚未完成，請先完成 /chat 多輪問答。")
+    if not safety_screen_resolved(case):
+        raise HTTPException(status_code=400, detail="急迫症狀篩檢尚未完成，請先返回 /chat 確認安全狀況。")
+    if not (case.confirmed or case.conversation_state.confirmed):
+        raise HTTPException(status_code=400, detail="triage_case 尚未確認，請先以 /chat 傳入 confirmed=true。")
 
 
 @router.post("", response_model=ScriptResponse)
@@ -33,6 +55,13 @@ def generate_script(req: ScriptRequest) -> ScriptResponse:
     ):
         raise HTTPException(status_code=422, detail="班表缺少 schedule_id、doctor_id、dept_id、date 或 session。")
     is_quick_search = stored_recommendation is None
+    expected_visit_type = None
+    if not is_quick_search:
+        owner_id = req.case_id or find_recommendation_case_id(req.recommendation_id)
+        owner = get_case(owner_id) if owner_id else None
+        if owner is not None and owner.visit_type in _TRIAGE_VISIT_TYPES:
+            _require_recommendable(owner)
+            expected_visit_type = schedule_visit_type_for(owner.visit_type)
     if is_quick_search:
         if not req.case_id or not req.case_id.startswith("quick_"):
             raise HTTPException(status_code=404, detail="找不到已儲存的 recommendation。")
@@ -42,6 +71,7 @@ def generate_script(req: ScriptRequest) -> ScriptResponse:
         recommendation = revalidate_schedule(
             recommendation,
             require_followup_evidence=is_quick_search,
+            expected_visit_type=expected_visit_type,
         )
     except ValueError as exc:
         raise HTTPException(status_code=409, detail=str(exc)) from exc

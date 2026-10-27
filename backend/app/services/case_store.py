@@ -159,3 +159,29 @@ def find_recommendation(recommendation_id: str) -> RecommendationItem | None:
         if recommendation_id in recommendations:
             return recommendations[recommendation_id]
     return None
+
+
+def find_recommendation_case_id(recommendation_id: str) -> str | None:
+    """The case owning a stored recommendation, for the legacy lookup without case_id."""
+    _prune_expired()
+    for case_id, recommendations in _RECOMMENDATIONS_BY_CASE.items():
+        if recommendation_id in recommendations:
+            return case_id
+    return None
+
+
+def clear_recommendations(case_id: str) -> None:
+    """Drop a case's stored recommendations once they no longer match its workflow state."""
+    if _RECOMMENDATIONS_BY_CASE.pop(case_id, None) is not None:
+        logger.info("case_store recommendations cleared case_id=%s", case_id)
+
+
+def case_is_urgent(case: TriageCase) -> bool:
+    """The /recommend urgency condition: urgent workflow or matched TTAS level 1/2."""
+    return (
+        case.conversation_state.clarification_status == "urgent"
+        or (
+            case.ttas_result.status == "matched"
+            and case.ttas_result.level_candidate in {1, 2}
+        )
+    )

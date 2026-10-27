@@ -6,7 +6,9 @@ from fastapi import APIRouter, HTTPException, Response
 from app.config import get_settings
 from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, TriageCase, TriageResult, VisitType
 from app.services.ai_reply_generator import build_department_confirmation_reply, generate_triage_reply
-from app.services.case_store import create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case
+from app.services.case_store import (
+    case_is_urgent, clear_recommendations, create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case,
+)
 from app.services.case_resume_service import build_case_resume
 from app.services.chat_perf import (
     ai_phase,
@@ -67,6 +69,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         clarification_before = case.conversation_state.clarification_status
         pending_before = case.conversation_state.pending_clarification_intent
         department_before = case.conversation_state.department_status
+        department_id_before = case.department_result.dept_id if case.department_result else None
         prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
         prior_medical_facts = _clinical_progress_facts(case)
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
@@ -382,6 +385,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             case.conversation_state.awaiting_confirmation = True
             case.conversation_state.confirmed = False
 
+    # Stored recommendations must not outlive an urgent result or a department change.
+    if case_is_urgent(case) or (case.department_result.dept_id if case.department_result else None) != department_id_before:
+        clear_recommendations(case.case_id)
     with perf.measure("case_store"):
         save_case(case)
     logger.info(
@@ -549,6 +555,7 @@ def _clinical_progress_facts(case: TriageCase) -> set[tuple[str, ...]]:
 
 
 def _begin_revision(case: TriageCase) -> None:
+    clear_recommendations(case.case_id)
     case.confirmed = False
     case.recommendation_generated = False
     case.script_generated = False
