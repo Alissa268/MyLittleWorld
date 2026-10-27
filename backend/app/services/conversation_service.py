@@ -43,6 +43,8 @@ _INTERNAL_STATE_TEXT = re.compile(
     r"科別仍不確定|科別.*(?:不確定|未收斂)|workflow|工作流程|"
     r"本輪症狀抽取|尚無\s*grounded|目前仍缺少可區分症狀|安全篩檢所列|確認是否有目前安全"
 )
+# Output-only guard for planner text: simplified-only characters absent from Taiwan Big5 (cp950).
+_SIMPLIFIED_ONLY = re.compile(r"[这们说时为应发头无处认现过关门诊医难识边严态续疗该样实觉总给对还]")
 _MEDICAL_FIELDS = {"symptom", "body_part", "duration", "severity", "onset", "accompanying_symptoms"}
 _DETAIL_FIELDS = _MEDICAL_FIELDS - {"symptom"}
 # Output-only guards for empty conversational filler, not patient medical NLP.
@@ -142,6 +144,7 @@ async def request_clarification(
          "不要重貼整份安全清單，不要把不知道、離題或部分否認當成整份陰性；不得新增醫療判級規則。"
          "intent 必須為 safety_screen；即使你認為已足夠，Backend 仍決定安全狀態。" if safety_planning else "") +
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
+        "question 與 explanation 必須使用台灣繁體中文，不得使用簡體字。"
         "不要按固定欄位順序詢問，也不要要求補滿看診日期或時段。"
         "已經有可靠回答的資訊不要重問。每個 intent 只對應一個資訊面向、一個聚焦問句、一次詢問要求；"
         "不得用連接詞在同一問句追加第二個臨床面向，即使整句只有一個問號也不可以；"
@@ -202,10 +205,15 @@ async def request_clarification(
             else:
                 # A restated explained question without a valid explanation stays a duplicate, so it never degrades.
                 rejection = _question_rejection(case, proposal, required_intent, safety_planning, act)
+                explanation = proposal.get("explanation") if isinstance(proposal, dict) else None
                 if (rejection is None and explanation_required
                         and proposal["status"] == "clarification_needed"
-                        and not _valid_explanation(proposal.get("explanation"))):
-                    rejection = "missing_or_invalid_explanation"
+                        and not _valid_explanation(explanation)):
+                    rejection = (
+                        "simplified_chinese_output"
+                        if isinstance(explanation, str) and _SIMPLIFIED_ONLY.search(explanation)
+                        else "missing_or_invalid_explanation"
+                    )
                     degraded = (proposal, attempt)
         logger.info(
             "clarification proposal case_id=%s accepted=%s rejection_reason=%s repair_attempted=%s",
@@ -220,6 +228,8 @@ async def request_clarification(
             prompt = (
                 prompt + "\n這是唯一一次修復：依下列 validator rejection_reason 修正 proposal，"
                 "只產生目前 required intent 的一個具體問句，不得新增患者事實或控制 state；"
+                "question 與 explanation 必須使用台灣繁體中文，不得使用簡體字"
+                "（rejection_reason=simplified_chinese_output 即表示含簡體字）；"
                 "若 rejection_reason=missing_or_invalid_explanation，保留合格 question 並補上合格 explanation。"
                 "若 rejection_reason=duplicate_question 或 repeated_safety_checklist：只有 dialogue_act.act="
                 "request_explanation 且附上合格 explanation 時，才可原樣重問上一題；否則改問同一面向、"
@@ -260,7 +270,7 @@ def _valid_explanation(value: object) -> bool:
     return (
         isinstance(value, str) and 4 <= len(value.strip()) <= 150
         and not _UNSAFE_QUESTION.search(value) and not _INTERNAL_STATE_TEXT.search(value)
-        and not _EXPLANATION_PUNCTUATION.search(value)
+        and not _EXPLANATION_PUNCTUATION.search(value) and not _SIMPLIFIED_ONLY.search(value)
     )
 
 
@@ -328,6 +338,8 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
         return "intent_has_no_current_owner"
     if required_intent and intent != required_intent:
         return "required_intent_mismatch"
+    if _SIMPLIFIED_ONLY.search(question):
+        return "simplified_chinese_output"
     if _UNSAFE_QUESTION.search(question) or _INTERNAL_STATE_TEXT.search(question):
         return "unsafe_or_internal_question"
     if _MULTI_QUESTION.search(question) or _MULTI_DIMENSION_QUESTION.search(question):

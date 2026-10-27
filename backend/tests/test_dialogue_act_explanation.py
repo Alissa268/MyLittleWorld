@@ -1,11 +1,13 @@
 """Validated dialogue act diagnostics and planner explanations; all AI responses are mocked."""
+import ast
 import asyncio
 import json
+import pathlib
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from app.schemas import DialogueActInterpretation, Message
+from app.schemas import DialogueActInterpretation, Message, TriageCase
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
@@ -328,3 +330,74 @@ def test_repeated_safety_explanations_still_stop_at_hard_turn_cap(runtime):
     assert state["clarification_status"] == "unresolved"
     assert state["reply_source"] == "SAFETY_CONTROLLED_FALLBACK"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
+
+
+SIMPLIFIED_EXPLANATION = "这些症状指的是突然出现的胸部疼痛、呼吸困难、意识改变，确认是否有这些情况可以帮助我们判断是否需要紧急处理。"
+SIMPLIFIED_QUESTION = "我想确认头晕时是周围在旋转，还是快要昏倒？"
+# Characters a simplified sample may share with Taiwan Big5 and so must never be in the guard.
+BIG5_LOOKALIKES = "么确体种异"
+
+
+def test_simplified_guard_only_holds_characters_outside_taiwan_big5():
+    characters = cs._SIMPLIFIED_ONLY.pattern.strip("[]")
+    assert characters
+    for character in characters:
+        with pytest.raises(UnicodeEncodeError):
+            character.encode("cp950")
+    for character in BIG5_LOOKALIKES:
+        character.encode("cp950")
+        assert character not in characters
+
+
+def test_existing_traditional_samples_are_not_flagged():
+    samples = [FOCUSED, EXPLANATION, MULTI_SYMPTOM_EXPLANATION, SAFETY_EXPLANATION, SAFETY_EXPLANATION_QUESTION,
+               CHECKLIST, EARLIER, *QUESTION_TEXTS.values()]
+    for path in pathlib.Path(__file__).parent.glob("test_*.py"):
+        if path.name == pathlib.Path(__file__).name:
+            continue
+        tree = ast.parse(path.read_text(encoding="utf-8"))
+        samples += [node.value for node in ast.walk(tree)
+                    if isinstance(node, ast.Constant) and isinstance(node.value, str)]
+    assert len(samples) > 500
+    assert [text for text in samples if cs._SIMPLIFIED_ONLY.search(text)] == []
+    for explanation in (EXPLANATION, MULTI_SYMPTOM_EXPLANATION, SAFETY_EXPLANATION):
+        assert cs._valid_explanation(explanation)
+    for question in (FOCUSED, SAFETY_EXPLANATION_QUESTION, CHECKLIST, EARLIER):
+        assert cs._question_rejection(
+            TriageCase(case_id="traditional"), json.loads(explained(question=question)), INTENT, False,
+        ) is None
+
+
+def test_simplified_explanation_is_repaired_into_traditional(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.side_effect = [explained(SIMPLIFIED_EXPLANATION), explained()]
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert "simplified_chinese_output" in planner.await_args_list[1].args[0]
+    assert result["reply"] == f"{EXPLANATION}\n{FOCUSED}"
+    assert state["question_rejection_reason"] == "simplified_chinese_output"
+    assert state["reply_source"] == "AI_REPAIR"
+
+
+def test_simplified_explanation_after_repair_degrades_to_traditional_question(runtime):
+    client, interpreter, planner, _ = runtime
+    planner.return_value = explained(SIMPLIFIED_EXPLANATION)
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert result["reply"] == FOCUSED
+    assert state["question_rejection_reason"] == "explanation_degraded"
+    assert not cs._SIMPLIFIED_ONLY.search(json.dumps(result, ensure_ascii=False))
+
+
+def test_simplified_question_is_rejected(runtime):
+    client, interpreter, planner, _ = runtime
+    proposal = json.loads(explained(question=SIMPLIFIED_QUESTION))
+    assert cs._question_rejection(clinical_case(), proposal, INTENT, False) == "simplified_chinese_output"
+    planner.return_value = explained(question=SIMPLIFIED_QUESTION)
+    result = ask_explanation(client, interpreter, clinical_case())
+    state = result["conversation_state"]
+    assert planner.await_count == 2
+    assert state["question_rejection_reason"] == "simplified_chinese_output"
+    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
