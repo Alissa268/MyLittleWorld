@@ -254,7 +254,8 @@ async def request_clarification(
         "answered_intent, answer_source_text, answer_status, answer_confidence, information_needs。"
         "information_needs 是僅含一個患者能回答的具體資訊需求的字串陣列；不能寫安全狀態或工作流程。"
         "intent 用簡短英文 snake_case；沒有 pending 回答時，四個 answer 欄位用 null。\n"
-        + (_clue_prompt(clue) if clue is not None else "") +
+        + (_clue_prompt(clue) if clue is not None else "")
+        + (NO_CANDIDATE_PROMPT if _no_department_candidates(case, clue, safety_planning) else "") +
         f"資料：{json.dumps(payload, ensure_ascii=False)}"
     )
     explanation_required = act == "request_explanation"
@@ -328,6 +329,20 @@ async def request_clarification(
         "clarification_needed", None, None, "clarification_generation_failed",
         rejection_reason=rejection, repair_attempted=bool(attempt), reply_source="TECHNICAL_FALLBACK",
     )
+
+
+NO_CANDIDATE_PROMPT = (
+    "目前沒有任何候選科別：已接受的症狀還對不上官方症狀概念。請優先請患者把模糊的不適說得更具體，"
+    "例如「頭腦昏沉」是比較像頭暈、天旋地轉，還是想睡、沒精神；或詢問還有沒有其他不舒服。"
+    "不要用持續多久、嚴重程度、部位這類問題填補，它們不是必填。\n"
+)
+
+
+def _no_department_candidates(case: TriageCase, clue: ClueQuestionSpec | None, safety_planning: bool) -> bool:
+    """True when department reasoning retrieved no official evidence and no clue question is due."""
+    state = case.conversation_state
+    return (not safety_planning and clue is None and state.department_status != "resolved"
+            and not state.department_clue_candidates and not state.candidate_departments)
 
 
 def _clue_prompt(clue: ClueQuestionSpec) -> str:
