@@ -70,8 +70,10 @@ def test_split_compound_phrase_reaches_department_convergence_payload():
     with patch.object(service, "fetch_active_departments", return_value=ACTIVE), \
             patch.object(service, "complete_runtime_json", new=provider):
         asyncio.run(service.reason_about_departments(case))
-    assert [purpose for purpose, _ in payloads] == ["department_convergence"]
-    data = json.loads(payloads[0][1].split("\n資料：", 1)[1])
+    # 2026-10-28: semantic retrieval also runs when literal matching hits; this provider's reply
+    # is not a valid retrieval, so only the literal evidence reaches convergence.
+    assert [purpose for purpose, _ in payloads] == ["department_semantic_retrieval", "department_convergence"]
+    data = json.loads(payloads[-1][1].split("\n資料：", 1)[1])
     assert {row["childDept"] for row in data["retrieved_official_evidence"]} >= {
         "一般骨科", "神經內科", "神經外科", "復健醫學", "疼痛控制科"}
 

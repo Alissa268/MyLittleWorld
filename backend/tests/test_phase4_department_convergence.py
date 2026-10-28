@@ -163,9 +163,13 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
             {"status": "resolved", "candidates": [candidate(101, 0.9)], "stage": "confirmed", "is_complete": True},
         ]
         provider = AsyncMock(side_effect=[json.dumps(item, ensure_ascii=False) for item in proposals])
+        # 2026-10-28: semantic retrieval now runs alongside literal hits; it is stubbed empty so the
+        # ordered provider replies stay convergence proposals.
         with patch.object(reasoning, "fetch_active_departments", return_value=self.active), patch.object(
             reasoning, "load_department_knowledge", return_value=(self.sources, self.records),
-        ), patch.object(reasoning, "complete_runtime_json", new=provider):
+        ), patch.object(reasoning, "complete_runtime_json", new=provider), patch.object(
+            reasoning, "retrieve_semantic_official_evidence", new=AsyncMock(return_value=[]),
+        ):
             await reasoning.reason_about_departments(self.case)
             self.assertEqual(self.case.conversation_state.department_status, "ambiguous")
             self.assertEqual(len(self.case.conversation_state.candidate_departments), 2)
@@ -328,9 +332,12 @@ class Phase4ValidationTest(unittest.IsolatedAsyncioTestCase):
         first = {"status": "ambiguous", "candidates": [candidate(101, 0.8), candidate(102, 0.77)], "next_question_intent": "differentiate_signal"}
         second = {"status": "resolved", "candidates": [candidate(102, 0.91, [support(102, "線索乙", text="線索乙")])]}
         provider = AsyncMock(side_effect=[json.dumps(first, ensure_ascii=False), json.dumps(second, ensure_ascii=False)])
+        # 2026-10-28: semantic retrieval is stubbed empty, as in test_backend_owns_ambiguous_and_resolved_gate.
         with patch.object(reasoning, "fetch_active_departments", return_value=self.active), patch.object(
             reasoning, "load_department_knowledge", return_value=(self.sources, self.records),
-        ), patch.object(reasoning, "complete_runtime_json", new=provider):
+        ), patch.object(reasoning, "complete_runtime_json", new=provider), patch.object(
+            reasoning, "retrieve_semantic_official_evidence", new=AsyncMock(return_value=[]),
+        ):
             await reasoning.reason_about_departments(self.case)
             self.case.history_records.append(Message(role="user", content="還有線索乙"))
             self.case.conversation_state.clarification_evidence["differentiate_signal"] = "線索乙"

@@ -506,6 +506,12 @@ def remember_semantic_official_links(case: TriageCase, retrieved: list[dict]) ->
     state.semantic_official_links = state.semantic_official_links[-_MAX_SEMANTIC_LINKS:]
 
 
+def _new_concept_rows(literal: list[dict], semantic: list[dict]) -> list[dict]:
+    """Semantic rows whose official concept the literal match has not already found for that department."""
+    found = {(item["dept_id"], normalize_concept(item["knowledge_concept"])) for item in literal}
+    return [item for item in semantic if (item["dept_id"], normalize_concept(item["knowledge_concept"])) not in found]
+
+
 def _merge_official_evidence(primary: list[dict], extra: list[dict]) -> list[dict]:
     def key(item: dict) -> tuple:
         return (item["dept_id"], item["patient_source_text"], item["knowledge_source_id"], item["knowledge_concept"])
@@ -620,9 +626,13 @@ async def reason_about_departments(case: TriageCase) -> None:
         resolutions = resolve_department_names(records, active)
         retained = retained_semantic_official_evidence(case, records, resolutions)
         retrieved = retrieve_official_evidence(case, records, resolutions)
-        if not retrieved:
-            retrieved = await retrieve_semantic_official_evidence(case, records, resolutions)
-            remember_semantic_official_links(case, retrieved)
+        # Semantic retrieval runs even with literal hits, so a literal match on one word
+        # cannot hide a closer official concept; literal concepts are not counted twice.
+        semantic = _new_concept_rows(
+            retrieved, await retrieve_semantic_official_evidence(case, records, resolutions),
+        )
+        remember_semantic_official_links(case, semantic)
+        retrieved = _merge_official_evidence(retrieved, semantic)
         retrieved = _merge_official_evidence(retrieved, retained)
         retrieved = _merge_official_evidence(retrieved, clues.clue_answer_evidence(
             state.clue_concepts_asked, records, resolutions,

@@ -97,7 +97,9 @@ def test_lexical_only_payload_is_unchanged_and_stores_no_link():
     reason(case, provider)
     expected = reasoning.retrieve_official_evidence(case, RECORDS, resolve_department_names(RECORDS, ACTIVE))
     assert provider.convergence_payloads[0]["retrieved_official_evidence"] == expected
-    assert provider.purposes == ["department_convergence"]
+    # 2026-10-28: semantic retrieval runs alongside literal hits; its match is not grounded in this
+    # case's evidence, so nothing is audited, merged or stored.
+    assert provider.purposes == ["department_semantic_retrieval", "department_convergence"]
     assert case.conversation_state.semantic_official_links == []
 
 
@@ -111,8 +113,8 @@ def test_later_lexical_hit_keeps_earlier_semantic_evidence():
     reason(case, provider)
     assert payload_depts(provider, "頭暈") == DIZZY_DEPTS
     assert payload_depts(provider, "耳鳴") == EAR_DEPTS
-    # Semantic retrieval is still only invoked when lexical retrieval is empty, as before.
-    assert provider.purposes.count("department_semantic_retrieval") == 1
+    # 2026-10-28: semantic retrieval now also runs on the turn with a lexical hit.
+    assert provider.purposes.count("department_semantic_retrieval") == 2
 
 
 def test_semantic_retrieval_call_pattern_is_unchanged_when_lexical_stays_empty():
