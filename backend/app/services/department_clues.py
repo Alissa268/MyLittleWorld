@@ -9,6 +9,8 @@ distinct ``patient_source_text`` in retrieved official evidence plus distinct cl
 ``question_index`` answered present for that department. Commit 3 把 concept_answers 轉成
 語意證據時，必須標記來源是線索題回答，計分時從 retrieved 的文字計數中排除，避免和題號計數重複加分。
 Such items carry ``evidence_origin == CLUE_ANSWER_ORIGIN`` and are skipped by the text count.
+An item anchored on a joined fragment of touching spans lists them in ``patient_source_parts``;
+it scores only when none of those parts is already counted for that department.
 A concept held by several candidates credits every department in its ``dept_ids``.
 
 ``ConversationState.department_clue_offer`` holds only the top ``clue_planner_concept_limit``
@@ -270,9 +272,20 @@ def department_scores(
     """
     texts: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
     questions: dict[int, set[int]] = {dept_id: set() for dept_id in candidates}
+    joined: list[dict] = []
     for item in retrieved:
         if item["dept_id"] in texts and item.get("evidence_origin") != CLUE_ANSWER_ORIGIN:
+            if item.get("patient_source_parts"):
+                joined.append(item)
+            else:
+                texts[item["dept_id"]].add(item["patient_source_text"])
+    # A joined fragment never adds a point beyond the text pieces it is made of.
+    covered = {dept_id: set(found) for dept_id, found in texts.items()}
+    for item in sorted(joined, key=lambda row: row["patient_source_text"]):
+        pieces = {item["patient_source_text"], *item["patient_source_parts"]}
+        if not pieces & covered[item["dept_id"]]:
             texts[item["dept_id"]].add(item["patient_source_text"])
+        covered[item["dept_id"]] |= pieces
     for record in asked:
         if record.answer != "present":
             continue

@@ -108,6 +108,63 @@ def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
     return effective_semantic_evidence(case)
 
 
+def adjacent_present_spans(user_texts: list[str], evidence: list[dict]) -> list[tuple[str, tuple[str, ...]]]:
+    """Join validated spans that touch in one message, using only AI-grounded source_text.
+
+    Parts are present symptom spans and body_part spans; absent/uncertain spans never take
+    part. A span found more than once in a message has no certain position there, so it is
+    skipped for that message. Each result is ``(verbatim fragment, part sources)`` and
+    contains at least one present symptom span.
+    """
+    symptom_sources = _present_sources(evidence)
+    part_sources = symptom_sources | {
+        item["source_text"] for item in evidence
+        if item["field"] == "body_part" and item["semantic_status"] in {"available", "partial"}
+    }
+    merged: dict[str, tuple[str, ...]] = {}
+    for text in user_texts:
+        starts: dict[int, list[str]] = {}
+        for source in part_sources:
+            if text.count(source) == 1:
+                starts.setdefault(text.index(source), []).append(source)
+
+        def extend(end: int, chain: tuple[str, ...]) -> None:
+            for source in sorted(starts.get(end, [])):
+                longer = chain + (source,)
+                if any(part in symptom_sources for part in longer):
+                    merged.setdefault(text[end - sum(map(len, chain)):end + len(source)], longer)
+                extend(end + len(source), longer)
+
+        for start, sources in sorted(starts.items()):
+            for source in sorted(sources):
+                extend(start + len(source), (source,))
+    return list(merged.items())
+
+
+def _official_row(resolution: dict, source: str, record: dict) -> dict:
+    return {
+        "dept_id": resolution["db_dept_id"],
+        "parentDept": resolution["db_parent_dept"],
+        "childDept": resolution["db_child_dept"],
+        "patient_source_text": source,
+        "knowledge_source_id": record["source_id"],
+        "knowledge_concept": record["concept"],
+        "knowledge_evidence_text": record["evidence_text"],
+        "source_priority": record["source_priority"],
+    }
+
+
+def _mark_span_parts(rows: list[dict], evidence: list[dict], case: TriageCase) -> list[dict]:
+    """Tag rows anchored on a joined fragment with its parts so scoring counts it once."""
+    plain = _present_sources(evidence)
+    spans = {fragment: parts for fragment, parts in adjacent_present_spans(_user_texts(case), evidence)
+             if fragment not in plain}
+    for row in rows:
+        if row["patient_source_text"] in spans:
+            row["patient_source_parts"] = list(spans[row["patient_source_text"]])
+    return rows
+
+
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
     """Match official concepts only against validated present semantic evidence."""
     resolved = {
@@ -116,7 +173,9 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     }
     concepts = {record["concept"] for record in records}
     found: dict[tuple[int, str, str, str], dict] = {}
-    for evidence in accepted_semantic_evidence(case):
+    evidence_items = accepted_semantic_evidence(case)
+    surfaces_by_source: dict[str, set[str]] = {}
+    for evidence in evidence_items:
         if (
             evidence["assertion"] != "present"
             or evidence["semantic_status"] not in {"available", "partial"}
@@ -128,6 +187,7 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
             for value in (evidence["normalized_value"], source)
             if isinstance(value, str) and value.strip()
         }
+        surfaces_by_source.setdefault(source, set()).update(retrieval_surfaces)
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
             if not any(normalized_concept in surface for surface in retrieval_surfaces):
@@ -137,17 +197,28 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
                 if resolution is None:
                     continue
                 key = (resolution["db_dept_id"], source, record["source_id"], record["concept"])
-                found[key] = {
-                    "dept_id": resolution["db_dept_id"],
-                    "parentDept": resolution["db_parent_dept"],
-                    "childDept": resolution["db_child_dept"],
-                    "patient_source_text": source,
-                    "knowledge_source_id": record["source_id"],
-                    "knowledge_concept": record["concept"],
-                    "knowledge_evidence_text": record["evidence_text"],
-                    "source_priority": record["source_priority"],
-                }
-    return list(found.values())
+                found[key] = _official_row(resolution, source, record)
+    # A concept spanning touching present spans (e.g. two halves of one compound phrase)
+    # is matched against the verbatim joined fragment. It must need every part: a concept
+    # that a shorter chain or a single part already covers is not re-anchored, so one
+    # patient phrase never counts twice.
+    contradicted = _contradicted_concepts(evidence_items)
+    for fragment, parts in adjacent_present_spans(_user_texts(case), evidence_items):
+        surface = normalize_concept(fragment)
+        shorter = {normalize_concept(fragment[len(parts[0]):]), normalize_concept(fragment[:-len(parts[-1])])}
+        shorter |= {value for part in parts for value in surfaces_by_source.get(part, set())}
+        for concept in concepts:
+            normalized_concept = normalize_concept(concept)
+            if (normalized_concept not in surface or normalized_concept in contradicted
+                    or any(normalized_concept in value for value in shorter)):
+                continue
+            for record in lookup_concept(concept, records):
+                resolution = resolved.get(record["canonical_dept_id"])
+                if resolution is None:
+                    continue
+                key = (resolution["db_dept_id"], fragment, record["source_id"], record["concept"])
+                found[key] = _official_row(resolution, fragment, record)
+    return _mark_span_parts(list(found.values()), evidence_items, case)
 
 
 async def retrieve_semantic_official_evidence(
@@ -155,7 +226,11 @@ async def retrieve_semantic_official_evidence(
 ) -> list[dict]:
     """Bridge wording to the existing official catalog, never invent routing data."""
     evidence = accepted_semantic_evidence(case)
-    present_sources = _present_sources(evidence)
+    combined = [fragment for fragment, _ in adjacent_present_spans(_user_texts(case), evidence)]
+    present_sources = _present_sources(evidence) | set(combined)
+    # Only sent when present, so prompts for single-span evidence stay unchanged.
+    combined_payload = dict(combined_present_source_texts=combined) if combined else {}
+    contradicted = _contradicted_concepts(evidence)
     resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
     catalog = sorted({record["concept"] for record in records if record["canonical_dept_id"] in resolved})
     if not present_sources or not catalog:
@@ -171,10 +246,13 @@ async def retrieve_semantic_official_evidence(
         "不得將 absent、uncertain 或只有部位的資訊當成陽性症狀。"
         "無可靠對應就回空 matches。最多 5 筆，不能自創 concept。"
         "patient_source_text 必須逐字取自 present 症狀 evidence 的 source_text，"
+        + ("或取自 combined_present_source_texts（多段在原文中完全相接的 present evidence 合成的整段原文），"
+           "原話本來就連在一起時應以整段當錨點；" if combined else "") +
         "knowledge_concept 必須逐字取自 official_concepts，confidence 為 0 到 1。"
         "只回 JSON：{\"matches\":[{\"patient_source_text\":\"...\","
         "\"knowledge_concept\":\"...\",\"confidence\":0.9}]}\n"
-        + json.dumps(dict(accepted_semantic_evidence=evidence, official_concepts=catalog), ensure_ascii=False)
+        + json.dumps(dict(accepted_semantic_evidence=evidence, official_concepts=catalog, **combined_payload),
+                     ensure_ascii=False)
     )
     try:
         proposal = json.loads((await complete_runtime_json(prompt, purpose="department_semantic_retrieval")).strip())
@@ -193,7 +271,8 @@ async def retrieve_semantic_official_evidence(
         if (not isinstance(source, str) or source not in present_sources
                 or not isinstance(concept, str) or concept not in catalog
                 or type(confidence) not in {int, float} or not math.isfinite(confidence)
-                or not ACCEPT_THRESHOLD <= confidence <= 1):
+                or not ACCEPT_THRESHOLD <= confidence <= 1
+                or (source in combined and normalize_concept(concept) in contradicted)):
             continue
         for record in lookup_concept(concept, records):
             row = resolved.get(record["canonical_dept_id"])
@@ -217,12 +296,15 @@ async def retrieve_semantic_official_evidence(
         "審核語意檢索是否忠於患者已接受的 evidence。只保留與原文相同含義的 proposed_matches。"
         "可以合併症狀與解剖部位，但不得加入原文沒有的性質、病因或診斷；"
         "patient_source_text 是症狀的原文錨點，不要求這個片段單獨包含部位；"
+        + ("錨點若列在 combined_present_source_texts，是多段相接 present evidence 合成的整段原文，"
+           "應以整段原話判斷，而非只看其中一段；" if combined else "") +
         "必須一起參考 evidence 的 body_part，不能因為錨點只有『疼痛』而忽略已提供的疼痛部位。"
         "尤其『腫脹』不能自行當成已確認的『水腫』，『疼痛』不能自行加上『酸』或『麻』。"
         "不得因為概念可能與症狀有醫學關聯就保留，必須是這段原話實際表達的症狀。"
         "請逐筆判斷並解釋，不確定則 supported=false。不可新增或改寫連結。只回 JSON {\"judgments\":["
         "{\"patient_source_text\":\"...\",\"knowledge_concept\":\"...\",\"supported\":true,\"reason\":\"依據\"}]}。\n"
-        + json.dumps(dict(accepted_semantic_evidence=evidence, proposed_matches=links), ensure_ascii=False)
+        + json.dumps(dict(accepted_semantic_evidence=evidence, proposed_matches=links, **combined_payload),
+                     ensure_ascii=False)
     )
     try:
         audit = json.loads((await complete_runtime_json(audit_prompt, purpose="department_retrieval_entailment")).strip())
@@ -238,7 +320,10 @@ async def retrieve_semantic_official_evidence(
                     and item.get("supported") is True and isinstance(item.get("reason"), str)
                     and item["reason"].strip()):
                 retained.add((source, concept))
-        return [item for item in found.values() if (item["patient_source_text"], item["knowledge_concept"]) in retained]
+        return _mark_span_parts(
+            [item for item in found.values() if (item["patient_source_text"], item["knowledge_concept"]) in retained],
+            evidence, case,
+        )
     except Exception as exc:
         logger.warning("retrieval entailment unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
         return []
@@ -265,7 +350,9 @@ def retained_semantic_official_evidence(
     """
     state = case.conversation_state
     evidence = accepted_semantic_evidence(case)
-    present_sources = _present_sources(evidence)
+    present_sources = _present_sources(evidence) | {
+        fragment for fragment, _ in adjacent_present_spans(_user_texts(case), evidence)
+    }
     contradicted = _contradicted_concepts(evidence)
     resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
     kept, found = [], {}
@@ -288,7 +375,7 @@ def retained_semantic_official_evidence(
                 source_priority=record["source_priority"],
             )
     state.semantic_official_links = kept
-    return list(found.values())
+    return _mark_span_parts(list(found.values()), evidence, case)
 
 
 def _contradicted_concepts(evidence: list[dict]) -> set[str]:
