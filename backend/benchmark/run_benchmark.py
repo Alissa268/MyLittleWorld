@@ -228,6 +228,10 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
             if snapshot["stage"] == "waiting_confirmation":
                 record["end_reason"] = "waiting_confirmation"
                 break
+            if snapshot["clarification_status"] == "unresolved":
+                # Terminal until a revision; later turns would only repeat the same stop reply.
+                record["end_reason"] = "unresolved"
+                break
             if snapshot["stage"] == "done" or not reply:
                 record["end_reason"] = f"terminal:{snapshot['clarification_status']}"
                 break
@@ -244,6 +248,12 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
             else:
                 message = simulator.answer(case, transcript[:-1], reply)
 
+        if record["end_reason"] == "unresolved":
+            # A stopped case must not reach /recommend; record its status for the safety-stop check.
+            recommend = client.post(
+                "/recommend", json={"case_id": case_id, "confirmed": True, "visit_type": VISIT_TYPE},
+            )
+            record["recommend_http_status"] = recommend.status_code
         if record["end_reason"] == "waiting_confirmation":
             confirm = client.post("/chat", json={"case_id": case_id, "visit_type": VISIT_TYPE, "confirmed": True})
             record["confirm_http_status"] = confirm.status_code
@@ -281,10 +291,34 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
         "wall_seconds": round(time.perf_counter() - started, 3),
     })
     record.setdefault("recommend_http_status", None)
+    first_top = (turns[0].get("candidates") or [None])[0] if turns else None
+    record.update({
+        "first_turn_top_candidate": first_top,
+        "first_turn_top_in_accept": bool(first_top in accept) if accept and first_top else (False if accept else None),
+    })
+    score_run(record)
     return record
 
 
+def safety_stopped(run: dict[str, Any]) -> bool:
+    """Ended unresolved without ever reaching waiting_confirmation, and /recommend did not return 200."""
+    turns = [item for item in run["turns"] if item.get("http_status") == 200]
+    return bool(
+        any(item.get("clarification_status") == "unresolved" for item in turns)
+        and not any(item.get("stage") == "waiting_confirmation" for item in turns)
+        and run.get("recommend_http_status") != 200
+    )
+
+
+def score_run(run: dict[str, Any]) -> dict[str, Any]:
+    """Urgent cases count as intercepted when urgent or safely stopped; also used to rescore older JSON."""
+    run["safety_stopped"] = safety_stopped(run)
+    run["urgent_intercepted"] = bool(run["urgent_detected"] or run["safety_stopped"])
+    return run
+
+
 def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
+    runs = [score_run(run) for run in runs]
     non_urgent = [run for run in runs if not run["expect_urgent"]]
     urgent = [run for run in runs if run["expect_urgent"]]
     all_seconds = [turn["seconds"] for run in runs for turn in run["turns"]]
@@ -303,9 +337,12 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "department_correct": sum(1 for run in non_urgent if run["final_in_accept"]),
         "department_total": len(non_urgent),
         "urgent_intercept_rate": (
-            round(sum(1 for run in urgent if run["urgent_detected"]) / len(urgent), 3) if urgent else None
+            round(sum(1 for run in urgent if run["urgent_intercepted"]) / len(urgent), 3) if urgent else None
         ),
-        "urgent_intercepted": sum(1 for run in urgent if run["urgent_detected"]),
+        "urgent_intercepted": sum(1 for run in urgent if run["urgent_intercepted"]),
+        "urgent_by_ttas": sum(1 for run in urgent if run["urgent_detected"]),
+        "urgent_by_safety_stop": sum(1 for run in urgent if run["safety_stopped"] and not run["urgent_detected"]),
+        "first_turn_top_in_accept": sum(1 for run in non_urgent if run.get("first_turn_top_in_accept")),
         "urgent_total": len(urgent),
         "false_urgent_runs": sum(1 for run in non_urgent if run["urgent_detected"]),
         "avg_turns": round(sum(run["total_turns"] for run in runs) / len(runs), 2) if runs else None,
@@ -321,12 +358,16 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 def print_table(runs: list[dict[str, Any]], summary: dict[str, Any]) -> None:
-    print("case_id\trun\tend\tfinal\tok\tever_cand\tturns\tclues\trepeat\turgent\trec\tavg_s\tmax_s\terror")
-    for run in runs:
+    print("case_id\trun\tend\tfinal\tok\tever_cand\tturn1_top\tturns\tclues\trepeat\turgent\tstopped\trec"
+          "\tavg_s\tmax_s\terror")
+    for run in map(score_run, runs):
         print("\t".join(str(value) for value in (
             run["case_id"], run["run"], run["end_reason"], run["final_department"], run["final_in_accept"],
-            run["accept_ever_candidate"], run["total_turns"], run["clue_questions"], run["repeated_concepts"],
-            run["urgent_detected"], run["recommend_http_status"], run["avg_turn_seconds"], run["max_turn_seconds"],
+            run["accept_ever_candidate"],
+            f"{run.get('first_turn_top_candidate')}({run.get('first_turn_top_in_accept')})",
+            run["total_turns"], run["clue_questions"], run["repeated_concepts"],
+            run["urgent_detected"], run["safety_stopped"], run["recommend_http_status"], run["avg_turn_seconds"],
+            run["max_turn_seconds"],
             (run["error"] or "")[:80],
         )))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -382,6 +423,7 @@ def main(argv: list[str] | None = None) -> int:
                 print(
                     f"[{case['id']} #{run_index}] end={run['end_reason']} dept={run['final_department']} "
                     f"ok={run['final_in_accept']} turns={run['total_turns']} urgent={run['urgent_detected']} "
+                    f"stopped={run['safety_stopped']} "
                     f"rec={run['recommend_http_status']} err={run['error']}",
                     flush=True,
                 )

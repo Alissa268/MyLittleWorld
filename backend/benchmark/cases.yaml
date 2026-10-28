@@ -94,7 +94,8 @@ cases:
     opening: 皮膚很癢起紅疹
     present: [持續一週, 手臂和肚子]
     absent: []
-    accept_departments: [皮膚科]
+    # 知識庫中「癢」只屬家醫科、「皮膚紅疹」只屬過敏免疫風濕，皮膚科沒有這兩個概念。
+    accept_departments: [皮膚科, 家庭醫學科(一般門診/戒菸), 過敏免疫風濕]
     expect_urgent: false
 
   - id: c14_red_itchy_eyes
