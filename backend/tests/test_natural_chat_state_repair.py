@@ -6,6 +6,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.config import get_settings
 from app.schemas import DepartmentResult, Message, PendingAnswerInterpretation, SemanticExtraction, TriageCase
 from app.services import conversation_service as cs, rag_triage_adapter as adapter
 from app.services.case_store import save_case
@@ -876,7 +877,7 @@ def test_control_invalid_explanation_act_does_not_get_attempt_exemption(runtime,
 def test_control_safety_explanations_remain_bounded_by_existing_turn_cap(runtime):
     client, interpreter, planner, department = runtime
     case = active_safety_case()
-    case.conversation_state.turn_count = cs.HARD_TURN_CAP - 1
+    case.conversation_state.turn_count = get_settings().hard_turn_cap - 1
     save_case(case)
     interpreter.return_value = json.dumps(dict(time_preferences=[], prior_answer_reference=None, department_preference=None, semantic_extractions=[], ttas_evidence=[], pending_answer=None,
         dialogue_act=act("我聽不懂", "request_explanation")))

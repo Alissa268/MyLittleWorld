@@ -200,7 +200,8 @@ class Phase2ConversationTest(unittest.TestCase):
         self.assertEqual(completed["conversation_state"]["turn_count"], 9)
         self.assertEqual(completed["conversation_state"]["clarification_status"], "clarifying")
         self.assertEqual(completed["conversation_state"]["consecutive_no_progress_turns"], 0)
-        self.assertEqual(completed["next_question"], conversation_service.TECHNICAL_CLARIFICATION_REPLY)
+        # Turn 9 is the first turn after turn 8 with the safety screen complete.
+        self.assertEqual(completed["next_question"], conversation_service.SAFETY_NET_QUESTION)
         self.assertFalse(completed["conversation_state"]["is_complete"])
         self.assertTrue(completed["triage_case"]["patient_input"]["red_flags_checked"])
         self.assertEqual(completed["triage_case"]["patient_input"]["red_flags"], [])
@@ -485,14 +486,14 @@ class Phase2ConversationTest(unittest.TestCase):
 
     def test_hard_cap_is_unresolved_without_guessing(self):
         case = None
-        for turn in range(8):
+        for turn in range(20):
             result, _, _, department = self.post(
                 f"還不清楚{turn}", [], TimeoutError(), triage_case=case,
             )
             case = result["triage_case"]
             self.assertFalse(hasattr(chat_route, "detect_department_result"))
         state = result["conversation_state"]
-        self.assertEqual(state["turn_count"], 8)
+        self.assertEqual(state["turn_count"], 20)
         self.assertEqual(state["clarification_status"], "unresolved")
         self.assertFalse(state["is_complete"])
         self.assertIsNone(result["next_question"])
@@ -505,7 +506,7 @@ class Phase2ConversationTest(unittest.TestCase):
         semantic.assert_not_awaited()
         clarification.assert_not_awaited()
         self.assertFalse(hasattr(chat_route, "detect_department_result"))
-        self.assertEqual(repeated["conversation_state"]["turn_count"], 8)
+        self.assertEqual(repeated["conversation_state"]["turn_count"], 20)
 
 
 if __name__ == "__main__":

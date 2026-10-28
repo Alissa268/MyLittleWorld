@@ -111,6 +111,8 @@ class PendingAnswerInterpretation(BaseModel):
     answer_confidence: float
     answer_assertion: Optional[EvidenceAssertion] = None
     concept_answers: List[ConceptAnswer] = Field(default_factory=list)
+    # Only for the safety-net question: the patient's choice as judged by the Turn Interpreter.
+    answer_choice: Optional[Literal["family_medicine", "continue"]] = None
 
 
 class DepartmentPreferenceInterpretation(BaseModel):
@@ -396,6 +398,9 @@ class ConversationState(BaseModel):
     clue_decision: Optional[ClueDecisionRecord] = None
     # history_records length at the latest revision; clue duplicate checks start here.
     revision_history_start: int = Field(default=0, ge=0)
+    # Safety net: the one-time turn-8 question and the patient's answer; revision resets both.
+    safety_net_asked: bool = False
+    safety_net_choice: Optional[Literal["family_medicine", "continue"]] = None
     # Appointment availability asked once the department converged; revision keeps it.
     availability_status: Literal["not_asked", "asked", "answered", "unspecified"] = "not_asked"
     availability_question_attempts: int = Field(default=0, ge=0)

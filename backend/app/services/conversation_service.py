@@ -10,8 +10,8 @@ from dataclasses import dataclass
 
 from app.config import get_settings
 from app.schemas import (
-    ClueOffer, DialogueActInterpretation, PendingAnswerInterpretation, PriorAnswerReference, SemanticExtraction,
-    TriageCase,
+    ClueDecisionRecord, ClueOffer, DialogueActInterpretation, PendingAnswerInterpretation, PriorAnswerReference,
+    SemanticExtraction, TriageCase,
 )
 from app.services import department_clues as clues
 from app.services.ai_service import complete_runtime_json
@@ -20,11 +20,11 @@ from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY, mark_questions_asked
 
 logger = logging.getLogger(__name__)
-HARD_TURN_CAP = 8
-# Eight stalled replies remain bounded; accepted clinical progress may continue
-# within a separate absolute limit. Neither limit establishes completion.
-ABSOLUTE_TURN_CAP = 24
+# Turn limits (safety_net_ask_turn, hard_turn_cap) live in config; neither establishes completion.
 SAFETY_ANSWER_CAP = 3
+SAFETY_NET_PENDING_INTENT = "safety_net_choice"
+SAFETY_NET_QUESTION = "目前還沒辦法確定要看哪一科，要繼續描述，還是先掛家庭醫學科？"
+SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap"})
 SAFETY_UNRESOLVED_REPLY = (
     "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
     "若情況緊急，請立即尋求緊急醫療協助。"
@@ -551,7 +551,7 @@ def validate_prior_answer_reference(
     """Only the AI relates intent to meaning; Backend verifies a prior accepted source."""
     if (dialogue_act is None or dialogue_act.act != "claims_already_answered"
             or dialogue_act.confidence < ACCEPT_THRESHOLD
-            or not pending_intent or pending_intent == SAFETY_PENDING_INTENT):
+            or not pending_intent or pending_intent in {SAFETY_PENDING_INTENT, SAFETY_NET_PENDING_INTENT}):
         return None
     try:
         reference = PriorAnswerReference.model_validate(value)
@@ -632,6 +632,8 @@ def capture_pending_answer(
     user_sources: list[str],
 ) -> bool:
     """Persist only a grounded, confident answer before candidate recomputation."""
+    if case.conversation_state.pending_clarification_intent == SAFETY_NET_PENDING_INTENT:
+        return _capture_safety_net_choice(case, suggestion, user_sources)
     clue_index = clues.pending_clue_index(case.conversation_state)
     if clue_index is not None:
         return _capture_clue_answers(case, suggestion, user_sources, clue_index)
@@ -648,6 +650,79 @@ def capture_pending_answer(
     state.pending_clarification_question = None
     state.next_information_needed = []
     return True
+
+
+def _capture_safety_net_choice(
+    case: TriageCase, suggestion: ClarificationSuggestion | PendingAnswerInterpretation | None,
+    user_sources: list[str],
+) -> bool:
+    """Release the one-time safety-net question on any reply; only a grounded, confident
+    Turn Interpreter choice selects family medicine, anything else continues clarifying."""
+    state = case.conversation_state
+    if not user_sources:
+        return False
+    chose = bool(
+        suggestion is not None
+        and getattr(suggestion, "answer_choice", None) == "family_medicine"
+        and suggestion.answer_status == "answered"
+        and suggestion.answer_confidence is not None
+        and _grounded_clarification_answer(
+            suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
+            suggestion.answer_confidence, SAFETY_NET_PENDING_INTENT, user_sources,
+        )
+        and suggestion.answer_confidence >= ACCEPT_THRESHOLD
+    )
+    state.safety_net_choice = "family_medicine" if chose else "continue"
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.next_information_needed = []
+    logger.info("safety net case_id=%s choice=%s", case.case_id, state.safety_net_choice)
+    return chose
+
+
+def safety_net_family_medicine_reason(case: TriageCase, user_sources: list[str]) -> str | None:
+    """Why this turn routes to family medicine: the patient's safety-net choice or the hard turn cap.
+
+    Only once the safety screen is complete and the department is still undecided; TTAS urgency
+    is handled before this is reached.
+    """
+    state = case.conversation_state
+    if (not user_sources or not safety_screen_resolved(case) or state.department_status == "resolved"
+            or state.clarification_status == "unresolved"):
+        return None
+    if state.safety_net_choice == "family_medicine":
+        return "safety_net_choice"
+    # advance_conversation adds this turn's messages afterwards.
+    if state.turn_count + len(user_sources) >= get_settings().hard_turn_cap:
+        return "safety_net_turn_cap"
+    return None
+
+
+def adopt_safety_net_family_medicine(case: TriageCase, reason: str) -> None:
+    """Existing family medicine path: configured dept_id with exactly one live Department row, else unavailable."""
+    # Deferred: department_reasoning_service imports this module.
+    from app.services import department_reasoning_service as reasoning
+    state = case.conversation_state
+    try:
+        active = reasoning.fetch_active_departments()
+    except Exception as exc:
+        logger.warning("safety net departments unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
+        active = []
+    result = reasoning._live_department(active, get_settings().family_medicine_dept_id, 0.0, "目前症狀無法明確區分科別")
+    state.clue_decision = ClueDecisionRecord(
+        kind="family_medicine" if result else "family_medicine_unavailable", reason=reason,
+        dept_id=result.dept_id if result else None,
+    )
+    logger.info("safety net case_id=%s reason=%s kind=%s", case.case_id, reason, state.clue_decision.kind)
+    if result is not None:
+        case.department_result = result
+        state.department_status = "resolved"
+        state.department_next_question_intent = None
+        state.pending_clarification_intent = None
+        state.pending_clarification_question = None
+        state.pending_clue_question_index = None
+        state.clue_reask_count = 0
+        state.next_information_needed = []
 
 
 def _capture_clue_answers(
@@ -814,9 +889,8 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
     state.pending_clarification_intent = None
     state.pending_clarification_question = None
     state.next_information_needed = []
-    if state.turn_count >= ABSOLUTE_TURN_CAP or state.safety_answer_attempts >= SAFETY_ANSWER_CAP or (
-        state.safety_answer_validation == "request_explanation" and state.turn_count >= HARD_TURN_CAP
-    ):
+    # Explanation requests do not count as attempts, so they stop only at the hard turn cap.
+    if state.turn_count >= get_settings().hard_turn_cap or state.safety_answer_attempts >= SAFETY_ANSWER_CAP:
         _safety_unresolved(case)
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
@@ -894,7 +968,7 @@ def advance_conversation(
     )
     safety_ready = grounded_symptom and grounded_detail and not low_confidence
     if safety_ready and not safety_screen_resolved(case):
-        if state.turn_count >= ABSOLUTE_TURN_CAP:
+        if state.turn_count >= get_settings().hard_turn_cap:
             _unresolved(case)
             return
         _enter_safety_check(case)
@@ -906,12 +980,14 @@ def advance_conversation(
         return
     # A Backend clue decision counts as sufficient; the safety and grounding gates still apply.
     backend_decided = decision in {"decide", "family_medicine"} and state.department_status == "resolved"
+    # The safety-net route needs the completed safety screen (checked when adopted), not this turn's grounding.
+    safety_net_routed = backend_decided and state.clue_decision.reason in SAFETY_NET_REASONS
     # An availability turn follows a medically sufficient turn; the gates below still apply.
     availability_turn = state.availability_status == "asked"
     sufficient = (
         (state.clarification_status == "safety_check" or backend_decided or availability_turn
          or (suggestion is not None and suggestion.status == "sufficient"))
-        and safety_ready
+        and (safety_ready or safety_net_routed)
         and state.pending_clarification_intent in {None, AVAILABILITY_PENDING_INTENT}
     )
     if sufficient:
@@ -934,9 +1010,17 @@ def advance_conversation(
 
     # A changed department or safety state takes the turn back from the availability question.
     _release_availability_pending(case)
-    if (state.turn_count >= ABSOLUTE_TURN_CAP
-            or state.consecutive_no_progress_turns >= HARD_TURN_CAP):
+    settings = get_settings()
+    # Reached only when the safety-net family medicine route could not apply (e.g. safety screen open).
+    if state.turn_count >= settings.hard_turn_cap:
         _unresolved(case)
+        return
+    # Stalled replies no longer end the case: consecutive_no_progress_turns never exceeds
+    # turn_count, so a stalled case reaches this one-time question at the same turn.
+    if (not state.safety_net_asked and state.turn_count >= settings.safety_net_ask_turn
+            and state.department_status != "resolved" and safety_screen_resolved(case)
+            and state.pending_clue_question_index is None):
+        _ask_safety_net_question(case)
         return
 
     if (suggestion is not None and suggestion.status == "sufficient"
@@ -1109,6 +1193,26 @@ def _ask_availability(case: TriageCase) -> None:
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append("症狀資訊已完成，確認前詢問看診時間；時間不是醫療完成門檻。")
+
+
+def _ask_safety_net_question(case: TriageCase) -> None:
+    """Backend-owned fixed question, asked once; the Turn Interpreter judges the reply."""
+    state = case.conversation_state
+    state.safety_net_asked = True
+    state.pending_clarification_intent = SAFETY_NET_PENDING_INTENT
+    state.pending_clarification_question = SAFETY_NET_QUESTION
+    if SAFETY_NET_PENDING_INTENT not in state.asked_clarification_intents:
+        state.asked_clarification_intents.append(SAFETY_NET_PENDING_INTENT)
+    state.next_information_needed = []
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = [state.department_uncertainty_reason or "正式科別證據不足"]
+    state.last_question_key = None
+    state.reply_source = "SAFETY_NET_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = SAFETY_NET_QUESTION
+    case.triage.is_final = False
+    case.triage.reasons.append("多輪後仍無法區分科別，詢問一次要繼續描述或先掛家庭醫學科。")
 
 
 def _enter_safety_check(case: TriageCase) -> None:

@@ -22,6 +22,7 @@ from app.services.conversation_service import (
     UNRESOLVED_REPLY,
     SAFETY_UNRESOLVED_REPLY,
     SAFETY_ANSWER_CAP,
+    adopt_safety_net_family_medicine,
     advance_conversation,
     awaiting_availability_answer,
     capture_pending_answer,
@@ -29,6 +30,7 @@ from app.services.conversation_service import (
     capture_safety_screen_answer,
     clear_answered_pending,
     request_clarification,
+    safety_net_family_medicine_reason,
     safety_screen_resolved,
     settle_unanswered_clue_question,
     validated_dialogue_act,
@@ -306,6 +308,10 @@ async def chat(req: ChatRequest) -> TriageResult:
                     settle_unanswered_clue_question(case)
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
+                # After department recomputation, so a decision this turn is not overwritten.
+                safety_net_reason = safety_net_family_medicine_reason(case, user_text_parts)
+                if safety_net_reason:
+                    adopt_safety_net_family_medicine(case, safety_net_reason)
                 clarification_planning_allowed = bool(
                     has_user_input
                     and turn_interpretation_complete
@@ -604,6 +610,8 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.pending_clue_question_index = None
     case.conversation_state.clue_reask_count = 0
     case.conversation_state.clue_decision = None
+    case.conversation_state.safety_net_asked = False
+    case.conversation_state.safety_net_choice = None
     case.conversation_state.revision_history_start = len(case.history_records)
     case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)

@@ -8,6 +8,7 @@ import pytest
 
 from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.conversation_service import (
+    SAFETY_NET_QUESTION,
     ClarificationSuggestion,
     advance_conversation,
     capture_pending_answer,
@@ -203,7 +204,7 @@ def test_internal_workflow_reasons_never_enter_patient_information_need(internal
     assert internal_reason not in (case.triage.next_question or "")
 
 
-def test_consecutive_no_progress_cap_still_stops_without_selecting_candidate():
+def test_consecutive_no_progress_asks_safety_net_without_selecting_candidate():
     case = ambiguous_flank_case()
     case.conversation_state.turn_count = 7
     case.conversation_state.consecutive_no_progress_turns = 7
@@ -211,7 +212,8 @@ def test_consecutive_no_progress_cap_still_stops_without_selecting_candidate():
     advance_conversation(case, None, user_sources=["還是不太確定"], current_extractions=[])
 
     assert case.conversation_state.turn_count == 8
-    assert case.conversation_state.clarification_status == "unresolved"
+    assert case.conversation_state.clarification_status == "clarifying"
+    assert case.conversation_state.reply_source == "SAFETY_NET_QUESTION"
     assert case.conversation_state.department_status == "ambiguous"
     assert case.department_result is None
-    assert case.triage.next_question is None
+    assert case.triage.next_question == SAFETY_NET_QUESTION

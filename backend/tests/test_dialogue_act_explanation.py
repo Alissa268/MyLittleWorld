@@ -7,6 +7,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
+from app.config import get_settings
 from app.schemas import DialogueActInterpretation, Message, TriageCase
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
@@ -320,11 +321,12 @@ def test_repeated_safety_explanations_still_stop_at_hard_turn_cap(runtime):
     case = active_safety_case()
     save_case(case)
     interpret(interpreter, act("我聽不懂", "request_explanation"))
-    for turn in range(1, cs.HARD_TURN_CAP + 1):
+    cap = get_settings().hard_turn_cap
+    for turn in range(1, cap + 1):
         result = client.post("/chat", json=dict(case_id=case.case_id, message="我聽不懂，這是什麼意思？")).json()
         state = result["conversation_state"]
         assert state["safety_answer_attempts"] == 1
-        if turn < cs.HARD_TURN_CAP:
+        if turn < cap:
             assert state["clarification_status"] == "safety_check"
             assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
     assert state["clarification_status"] == "unresolved"

@@ -885,7 +885,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
     async def test_hard_cap_with_ambiguous_candidates_stays_unresolved(self):
         case = case_with_symptom()
         case.patient_input.red_flags_checked = True
-        case.conversation_state.turn_count = 7
+        case.conversation_state.turn_count = 19
         case.conversation_state.consecutive_no_progress_turns = 7
         case.conversation_state.department_status = "ambiguous"
         case.semantic_extractions = [SemanticExtraction(
@@ -896,7 +896,7 @@ class Phase4ChatGateTest(unittest.IsolatedAsyncioTestCase):
             case, ClarificationSuggestion("sufficient", None, None, "症狀足夠"),
             user_sources=["我有症狀甲"], current_extractions=[],
         )
-        self.assertEqual(case.conversation_state.turn_count, 8)
+        self.assertEqual(case.conversation_state.turn_count, 20)
         self.assertEqual(case.conversation_state.clarification_status, "unresolved")
         self.assertIsNone(case.department_result)
 

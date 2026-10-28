@@ -3,11 +3,13 @@ import json
 
 import pytest
 
+from app.config import get_settings
 from app.schemas import DepartmentResult, Message, PendingAnswerInterpretation, TriageCase
 from app.services import conversation_service as cs
 from app.services.case_store import save_case
 from test_phase7_natural_safety import runtime, respond, evidence, route
 
+HARD_TURN_CAP = get_settings().hard_turn_cap
 
 def clinical_case(turns=7, stalls=0):
     case = TriageCase(case_id="progress-limit-test")
@@ -38,6 +40,8 @@ def next_plan():
 def test_accepted_pending_answer_continues_past_eighth_turn(runtime, turns, text):
     client, interpreter, planner, _ = runtime
     case = clinical_case(turns, stalls=6)
+    # The one-time safety-net question was already answered with "continue".
+    case.conversation_state.safety_net_asked = True
     save_case(case)
     respond(interpreter, answer=dict(answered_intent="nausea_presence", answer_status="answered",
                                     answer_source_text=text, answer_confidence=0.99))
@@ -87,28 +91,38 @@ def test_low_confidence_proposal_does_not_count_as_progress(runtime):
     respond(interpreter, [proposal])
     result = client.post("/chat", json=dict(case_id=case.case_id, message="gradual")).json()
     assert result["conversation_state"]["consecutive_no_progress_turns"] == 8
-    assert result["conversation_state"]["clarification_status"] == "unresolved"
+    # Stalled replies no longer end the case; they reach the turn-8 safety-net question.
+    assert result["conversation_state"]["clarification_status"] == "clarifying"
+    assert result["next_question"] == cs.SAFETY_NET_QUESTION
 
 
-def test_eight_consecutive_stalled_replies_still_terminate():
+def test_stalled_replies_never_end_before_the_hard_cap():
     case = clinical_case(turns=0)
-    for index in range(cs.HARD_TURN_CAP):
+    for index in range(1, HARD_TURN_CAP):
         cs.advance_conversation(case, None, user_sources=["不知道"], current_extractions=[])
-        if index < cs.HARD_TURN_CAP - 1:
-            assert case.conversation_state.clarification_status != "unresolved"
+        assert case.conversation_state.clarification_status != "unresolved"
+        if index == get_settings().safety_net_ask_turn:
+            assert case.triage.next_question == cs.SAFETY_NET_QUESTION
+            cs.capture_pending_answer(case, None, ["不知道"])
+    assert case.conversation_state.consecutive_no_progress_turns == HARD_TURN_CAP - 1
+    # advance_conversation alone cannot route to family medicine (the chat route does), so it stops.
+    cs.advance_conversation(case, None, user_sources=["不知道"], current_extractions=[])
     assert case.conversation_state.clarification_status == "unresolved"
     assert case.triage.next_question is None
 
 
-def test_absolute_cap_stops_even_with_valid_progress(runtime):
+def test_hard_cap_without_live_family_medicine_stops_even_with_valid_progress(runtime):
     client, interpreter, planner, _ = runtime
-    case = clinical_case(turns=cs.ABSOLUTE_TURN_CAP - 1)
+    # Offline SQL: the configured family medicine id has no live row.
+    case = clinical_case(turns=HARD_TURN_CAP - 1)
     save_case(case)
     respond(interpreter, answer=dict(answered_intent="nausea_presence", answer_status="answered",
                                     answer_source_text="no", answer_confidence=0.99))
     planner.return_value = json.dumps(next_plan())
     result = client.post("/chat", json=dict(case_id=case.case_id, message="no")).json()
     assert result["conversation_state"]["clarification_status"] == "unresolved"
+    assert result["conversation_state"]["clue_decision"]["kind"] == "family_medicine_unavailable"
+    assert result["reply"] == cs.FAMILY_MEDICINE_UNAVAILABLE_REPLY
     assert result["conversation_state"]["confirmed"] is False
 
 
@@ -121,7 +135,7 @@ def test_revision_resets_both_counters():
 
 def test_completed_case_at_absolute_cap_still_uses_existing_confirmation_gate(runtime):
     client, interpreter, planner, department = runtime
-    case = clinical_case(turns=cs.ABSOLUTE_TURN_CAP - 1)
+    case = clinical_case(turns=HARD_TURN_CAP - 1)
     save_case(case)
     respond(interpreter, answer=dict(answered_intent="nausea_presence", answer_status="answered",
                                     answer_source_text="沒有", answer_confidence=0.99))
@@ -133,7 +147,7 @@ def test_completed_case_at_absolute_cap_still_uses_existing_confirmation_gate(ru
 
     department.side_effect = resolved
     result = client.post("/chat", json=dict(case_id=case.case_id, message="沒有")).json()
-    assert result["conversation_state"]["turn_count"] == cs.ABSOLUTE_TURN_CAP
+    assert result["conversation_state"]["turn_count"] == HARD_TURN_CAP
     assert result["conversation_state"]["is_complete"] is True
     assert result["conversation_state"]["awaiting_confirmation"] is True
     assert result["conversation_state"]["confirmed"] is False

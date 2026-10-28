@@ -23,7 +23,7 @@ from app.schemas import (
 from app.services.ai_service import complete_runtime_json as _complete_runtime_json, runtime_ai_available
 from app.services.confidence_scoring import ACCEPT_THRESHOLD, accepted
 from app.services.conversation_service import (
-    AVAILABILITY_PENDING_INTENT, SAFETY_PENDING_INTENT, accepted_prior_answer_evidence,
+    AVAILABILITY_PENDING_INTENT, SAFETY_NET_PENDING_INTENT, SAFETY_PENDING_INTENT, accepted_prior_answer_evidence,
     invalidate_corrected_department_context,
     validate_prior_answer_reference,
 )
@@ -38,6 +38,7 @@ from app.services.time_preference_service import apply_time_preferences, validat
 
 logger = logging.getLogger(__name__)
 _EVIDENCE_ASSERTIONS = {"present", "absent", "uncertain"}
+_SAFETY_NET_CHOICES = {"family_medicine", "continue"}
 _MEDICAL_ASSERTION_FIELDS = {"symptom", "accompanying_symptoms"}
 _CLINICAL_EVIDENCE_FIELDS = {
     "symptom", "accompanying_symptoms", "body_part", "duration", "severity", "onset",
@@ -453,7 +454,7 @@ def _pending_answer_from_ai(
     if pending_intent is None or not isinstance(value, dict):
         return None
     base_keys = {"answered_intent", "answer_status", "answer_source_text", "answer_confidence"}
-    if (not base_keys <= set(value) or set(value) - base_keys - {"answer_assertion", "concept_answers"}
+    if (not base_keys <= set(value) or set(value) - base_keys - {"answer_assertion", "concept_answers", "answer_choice"}
             or not isinstance(value.get("concept_answers", []), list)):
         logger.info("turn pending answer accepted=false reason=invalid_schema")
         return None
@@ -462,6 +463,8 @@ def _pending_answer_from_ai(
     source = value.get("answer_source_text")
     confidence = value.get("answer_confidence")
     assertion = value.get("answer_assertion")
+    # Only the safety-net question carries a choice; other intents drop it.
+    choice = value.get("answer_choice") if pending_intent == SAFETY_NET_PENDING_INTENT else None
     if (
         intent != pending_intent
         or not isinstance(status, str) or status not in {"answered", "partial", "unclear"}
@@ -473,6 +476,7 @@ def _pending_answer_from_ai(
         or not 0.0 <= confidence <= 1.0
         or (assertion is not None and (not isinstance(assertion, str) or assertion not in _EVIDENCE_ASSERTIONS))
         or (pending_intent == SAFETY_PENDING_INTENT and assertion not in _EVIDENCE_ASSERTIONS)
+        or (choice is not None and choice not in _SAFETY_NET_CHOICES)
     ):
         reason = (
             "wrong_intent" if intent != pending_intent else
@@ -489,6 +493,7 @@ def _pending_answer_from_ai(
         answer_confidence=float(confidence),
         answer_assertion=assertion,
         concept_answers=_concept_answers_from_ai(value.get("concept_answers", []), clue_concepts or [], user_sources),
+        answer_choice=choice,
     )
 
 
@@ -582,6 +587,7 @@ def _build_symptom_collection_prompt(
         "pending_clue_concepts": _pending_clue_concepts(case),
         "pending_availability_dimensions": list(case.conversation_state.availability_pending_dimensions)
         if pending_intent == AVAILABILITY_PENDING_INTENT else [],
+        "pending_safety_net_choice": pending_intent == SAFETY_NET_PENDING_INTENT,
     }
     try:
         prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
@@ -616,6 +622,7 @@ def _build_symptom_collection_prompt(
   15a. pending intent 為 safety_screen 時，answer_assertion 必填：present 表示患者明確回報安全問題中的狀況，absent 只表示患者明確否認 complete_safety_screen 整份問題，uncertain 表示無法確定。即使 pending_question 已縮小成聚焦追問，僅否認這一項也不能當成整份陰性。部分否認應為 partial，不知道或離題應為 unclear；抱怨跳針不得當成陰性。保留本輪回報的頭痛、頭暈等 evidence，不得由「其他沒有」否定已回報的症狀。不得輸出 red_flags_checked；Backend 只會把 grounded、高信心的 answered+absent 視為整份 safety negative。明確陽性仍須抽對應 catalog 內 TTAS evidence，不能由 answer_assertion 決定級數。
   15b. 若 pending_clue_concepts 非空，pending_question 是詢問這些官方症狀概念的線索題。pending_answer 必須另含 concept_answers 陣列，每項只含 concept、answer_assertion、source_text、confidence：concept 必須逐字取自 pending_clue_concepts（可把患者用語對應到官方概念，但輸出官方字串）；answer_assertion 為 present、absent 或 uncertain，患者說「醫師說過我有 ○○」「以前被說有 ○○」也視為 present；source_text 為 current_user_text 中支持該回答的最短連續逐字片段，簡短回答如「有」「沒有」也可以，但只在能明確判斷它回答了哪些概念時才輸出；confidence 為 0 到 1。患者沒有回答到的概念不要輸出，不得猜測。患者對整題籠統回答「不知道」「不清楚」「不確定」時，這是回答而不是答非所問：這題全部 pending_clue_concepts 都輸出 answer_assertion=uncertain，answer_status=answered。若全部概念都沒有回答，answer_status 用 partial 或 unclear，concept_answers 用 []。pending_clue_concepts 為空時 concept_answers 用 [] 或省略。
   15c. 若 pending_question 是詢問最近哪幾天、哪個時段方便看診（pending_availability_dimensions 列出這題問的面向：date＝日期、session＝時段；只列一個時是只追問該面向），患者表示「都可以」「沒有限制」也是 answered；提到具體可以或不行的日期、時段時，pending_answer 為 answered，且這些時間必須同時依規則 26 輸出 time_preferences。答非所問或只談症狀時，不得把它當成已回答時間。
+  15d. 若 pending_safety_net_choice=true，pending_question 是詢問患者要繼續描述症狀，還是先掛家庭醫學科。pending_answer 必須另含 answer_choice：患者明確選擇先掛家庭醫學科時為 family_medicine，明確選擇繼續描述時為 continue，兩者皆 answer_status=answered；無法判斷、離題或只談症狀時 answer_status 用 unclear，answer_choice 用 null。answer_choice 只依實際 pending_question 與 current_user_text 的意思判斷；同一句另外提到的症狀仍必須照常輸出 semantic_extractions。pending_safety_net_choice=false 時不要輸出 answer_choice。
   16. pending_answer 只表示本輪是否回答實際 pending_question，不能取代 semantic_extractions。即使 pending question 已回答，仍必須完整抽取本輪所有額外、明確、grounded 的 medical evidence；不得只輸出 pending_answer。
   17. 同一次 Turn Interpretation 必須完成 TTAS evidence 掃描。請逐一對照下方「目前 production 可執行的 TTAS evidence catalog」與 current_user_text。凡本輪患者原文直接支持的 evidence，都必須輸出；即使同一個事實已經同時出現在 semantic_extractions，也不可因此省略 ttas_evidence。
   18. catalog 的 label_zh / meaning_zh 是語意概念，不是固定關鍵字清單。患者可以使用不同自然說法；只要語意直接等價，而且 source_text 能逐字在 current_user_text 找到，即可抽取。不得只因出現相似字詞就硬套欄位。
