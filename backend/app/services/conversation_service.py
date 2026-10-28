@@ -727,6 +727,9 @@ def capture_safety_screen_answer(
         "low_confidence" if suggestion.answer_confidence < ACCEPT_THRESHOLD else
         f"{suggestion.answer_status}_{suggestion.answer_assertion}"
     )
+    if _safety_positive_answer(case, suggestion, user_sources):
+        state.safety_positive_reported = True
+        logger.info("safety answer case_id=%s positive_reported=true", case.case_id)
     if (
         case.conversation_state.clarification_status != "safety_check"
         or suggestion is None
@@ -743,6 +746,13 @@ def capture_safety_screen_answer(
         )
     ):
         logger.info("safety answer accepted=false reason=%s attempt=%s", state.safety_answer_validation, state.safety_answer_attempts)
+        return False
+    if state.safety_positive_reported:
+        # A later denial never turns a screen with an accepted positive answer negative;
+        # urgency itself still comes only from TTAS.
+        state.safety_answer_validation = "absent_after_positive"
+        _safety_unresolved(case)
+        logger.info("safety answer accepted=false reason=absent_after_positive attempt=%s", state.safety_answer_attempts)
         return False
 
     patient = case.patient_input
@@ -771,6 +781,33 @@ def capture_safety_screen_answer(
     return True
 
 
+def _safety_positive_answer(
+    case: TriageCase, suggestion: PendingAnswerInterpretation | None, user_sources: list[str],
+) -> bool:
+    """A grounded, confident present answer, or validated TTAS evidence this turn reports as true."""
+    if (suggestion is not None and suggestion.answer_status == "answered"
+            and suggestion.answer_assertion == "present"
+            and suggestion.answer_confidence >= ACCEPT_THRESHOLD
+            and _grounded_clarification_answer(
+                suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
+                suggestion.answer_confidence, SAFETY_PENDING_INTENT, user_sources,
+            )):
+        return True
+    return any(
+        item.semantic_status == "available" and item.value is True and item.confidence >= ACCEPT_THRESHOLD
+        and any(item.source_text in text for text in user_sources)
+        for item in case.ttas_evidence
+    )
+
+
+def _safety_unresolved(case: TriageCase) -> None:
+    _unresolved(case)
+    state = case.conversation_state
+    state.uncertainty_reasons = ["safety_information_unresolved"]
+    state.next_information_needed = []
+    state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+
+
 def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion | None) -> None:
     """Bound safety workflow retries without interpreting patient language."""
     state = case.conversation_state
@@ -780,10 +817,7 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
     if state.turn_count >= ABSOLUTE_TURN_CAP or state.safety_answer_attempts >= SAFETY_ANSWER_CAP or (
         state.safety_answer_validation == "request_explanation" and state.turn_count >= HARD_TURN_CAP
     ):
-        _unresolved(case)
-        state.uncertainty_reasons = ["safety_information_unresolved"]
-        state.next_information_needed = []
-        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+        _safety_unresolved(case)
         return
     question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
     if not question or _repeated_question(case, question, dialogue_act=state.last_dialogue_act,

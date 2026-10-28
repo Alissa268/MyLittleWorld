@@ -581,6 +581,8 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.turn_count = 0
     case.conversation_state.consecutive_no_progress_turns = 0
     case.conversation_state.clarification_status = "collecting"
+    # A corrected symptom starts a new safety screen.
+    case.conversation_state.safety_positive_reported = False
     case.conversation_state.uncertainty_reasons = []
     case.conversation_state.next_information_needed = []
     case.conversation_state.asked_clarification_intents = []
