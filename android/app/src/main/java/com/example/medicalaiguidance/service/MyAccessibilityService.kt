@@ -23,6 +23,33 @@ internal fun VisitPlan.toAccessibilityAppointmentTypeOrNull(): AppointmentType? 
         VisitPlan.UNKNOWN -> null
     }
 
+internal fun canLeaveAppointmentDate(
+    dateSelected: Boolean,
+    nextIsDoctor: Boolean,
+    sessionListVisible: Boolean,
+    dialogOpen: Boolean
+): Boolean = dateSelected && (!nextIsDoctor || (sessionListVisible && !dialogOpen))
+
+internal fun canAdvanceToBookingEntry(
+    nextTargetVisible: Boolean,
+    nextTargetEnabled: Boolean,
+    dialogOpen: Boolean
+): Boolean = nextTargetVisible && nextTargetEnabled && !dialogOpen
+
+internal fun hasSubClinicPickerLabels(labels: List<String>, currentDepartment: String): Boolean {
+    val texts = labels.map(String::trim)
+    return "CANCEL" in texts && texts.any {
+        it != currentDepartment && it.contains("科") && !it.endsWith("系") && it != "依門診科別"
+    }
+}
+
+internal fun canLeavePersonalDataWaiting(
+    formVisible: Boolean,
+    submitVisible: Boolean,
+    submitEnabled: Boolean,
+    dialogOpen: Boolean
+): Boolean = !formVisible && canAdvanceToBookingEntry(submitVisible, submitEnabled, dialogOpen)
+
 class MyAccessibilityService : AccessibilityService() {
     companion object {
         private const val VGH_PACKAGE_NAME = "tw.com.bicom.VGHTPE"
@@ -279,6 +306,7 @@ class MyAccessibilityService : AccessibilityService() {
 
     private fun markLeftVghApp(packageName: String) {
         lastCancellationMessage = null
+        if (guidanceSession.guidanceType == GuidanceType.BOOKING) cancelPendingStableHighlight()
         overlay?.hide()
         if (guidanceSession.markTargetLeft()) {
             scheduleExitAbort()
@@ -359,6 +387,7 @@ class MyAccessibilityService : AccessibilityService() {
         val boundedIndex = index.coerceIn(0, script.lastIndex.coerceAtLeast(0))
         if (currentStepIndex == boundedIndex) return
         cancelPendingStableHighlight()
+        if (guidanceSession.guidanceType == GuidanceType.BOOKING) overlay?.hide()
         currentStepIndex = boundedIndex
         trackedStepIndex = boundedIndex
         stepEnteredAt = System.currentTimeMillis()
@@ -366,7 +395,7 @@ class MyAccessibilityService : AccessibilityService() {
     }
     private fun isDoctorSessionListVisible(nodes: List<NodeData>): Boolean {
         return nodes
-            .filter { it.isOnScreen() }
+            .filter { it.isVisibleToUser && it.isOnScreen() }
             .any { it.text.toVisitSessionOrNull() != null }
     }
     private fun advanceStep(reason: String) {
@@ -381,6 +410,11 @@ class MyAccessibilityService : AccessibilityService() {
 
         val allNodes = findAllTextNodes(node)
         if (allNodes.isEmpty()) {
+            if (guidanceSession.guidanceType == GuidanceType.BOOKING) {
+                cancelPendingStableHighlight()
+                overlay?.hide()
+                return
+            }
             hideOverlayIfStable()
             return
         }
@@ -432,43 +466,65 @@ class MyAccessibilityService : AccessibilityService() {
             } else {
                 findBestMatch(allNodes, nextKeyword)
             }
-            if (nextNode != null && isTargetAppointmentDateSelected(allNodes, currentKeyword)) {
+            if (nextNode != null && canLeaveAppointmentDate(
+                    dateSelected = isTargetAppointmentDateSelected(allNodes, currentKeyword),
+                    nextIsDoctor = nextIsDoctor,
+                    sessionListVisible = isDoctorSessionListVisible(allNodes),
+                    dialogOpen = isDialogOpen
+                )) {
                 advanceStep("日期已選且下一步出現")
+                return
             }
         }
 
         val isWaitStep = currentKeyword.contains("請輸入") || isDateStep || isCalendarDayStep
 
-        if (!isWaitStep && currentStepIndex + 1 < script.size) {
+        // Department selection advances only through the dedicated picker check below.
+        if (!isWaitStep && !isDepartmentStep(currentKeyword) && currentStepIndex + 1 < script.size) {
             val nextKeyword = script[currentStepIndex + 1]
             if (nextKeyword.isCalendarDayNumber() && isClinicCalendarVisible(allNodes)) {
                 overlay?.hide()
                 advanceStep("進入行事曆頁，先隱藏舊紅框")
+                return
             } else {
                 val nextNode = findBestMatch(allNodes, nextKeyword)
-                if (nextNode != null) {
+                val requiresEnabledEntry = currentKeyword == "行動掛號" || currentKeyword == "繼續掛號" ||
+                    currentKeyword == "依門診科別" ||
+                    isClinicStep(currentKeyword) || isDoctorStep(currentKeyword)
+                val nextStageReady = if (requiresEnabledEntry) {
+                    canAdvanceToBookingEntry(
+                        nextTargetVisible = nextNode?.let { it.isVisibleToUser && it.isOnScreen() } == true,
+                        nextTargetEnabled = nextNode?.isEnabled == true,
+                        dialogOpen = isDialogOpen
+                    )
+                } else nextNode != null
+                if (nextStageReady) {
                     advanceStep("下一步目標已出現")
+                    return
                 }
             }
         }
 
         if (isDepartmentStep(script[currentStepIndex]) && isSubClinicPickerVisible(allNodes)) {
             advanceStep("子科別選單已開啟")
+            return
         }
 
         if (waitingForPersonalDataExit) {
-            val submitNode = findBestMatch(allNodes, "確認送出")
-            if (submitNode != null) {
-                waitingForPersonalDataExit = false
-                Log.d("vgh_id_detect", "確認送出已出現在畫面上，解除個資等待狀態")
-            } else if (isPersonalDataFormVisible(allNodes)) {
+            val visibleNodes = allNodes.filter { it.isVisibleToUser && it.isOnScreen() }
+            val submitNode = findBestMatch(visibleNodes, "確認送出")
+            if (!canLeavePersonalDataWaiting(
+                    formVisible = isPersonalDataFormVisible(visibleNodes),
+                    submitVisible = submitNode != null,
+                    submitEnabled = submitNode?.isEnabled == true,
+                    dialogOpen = isDialogOpen
+                )) {
+                cancelPendingStableHighlight()
                 overlay?.hide()
-                Log.d("vgh_id_detect", "等待使用者離開個資表單")
                 return
-            } else {
-                waitingForPersonalDataExit = false
-                Log.d("vgh_id_detect", "已離開個資表單，繼續確認送出步驟")
             }
+            waitingForPersonalDataExit = false
+            Log.d("vgh_id_detect", "個資表單已離開且確認送出入口可用，解除等待")
         }
 
         if (shouldEnterPersonalDataWaiting(allNodes)) {
@@ -499,7 +555,12 @@ class MyAccessibilityService : AccessibilityService() {
             val nextNode = nextKeyword?.let {
                 if (nextIsDoctor) findDoctorInSession(allNodes, it) else findBestMatch(allNodes, it)
             }
-            if (isTargetAppointmentDateSelected(allNodes, finalKeyword)) {
+            if (canLeaveAppointmentDate(
+                    dateSelected = isTargetAppointmentDateSelected(allNodes, finalKeyword),
+                    nextIsDoctor = nextIsDoctor,
+                    sessionListVisible = isDoctorSessionListVisible(allNodes),
+                    dialogOpen = isDialogOpen
+                )) {
                 if (nextKeyword != null) advanceStep("日期已選，進入下一步")
                 val unavailableStatus = nextKeyword?.let { findDoctorUnavailableStatus(allNodes, it) }
                 if (nextIsDoctor && nextKeyword != null && unavailableStatus != null) {
@@ -524,6 +585,7 @@ class MyAccessibilityService : AccessibilityService() {
             if (calendarDayNode != null) {
                 highlight(calendarDayNode.rect)
             } else {
+                cancelPendingStableHighlight()
                 overlay?.hide()
                 Log.d("vgh_id_detect", "行事曆日期未找到，等待使用者選日期 keyword=$finalKeyword")
             }
@@ -539,6 +601,7 @@ class MyAccessibilityService : AccessibilityService() {
             if (departmentTarget != null) {
                 highlight(departmentTarget.rect)
             } else {
+                cancelPendingStableHighlight()
                 showScrollHintWhenStepStable(
                     "溫馨提醒：請在${pendingAppointmentType.displayName()}找到「$finalKeyword」"
                 )
@@ -551,6 +614,7 @@ class MyAccessibilityService : AccessibilityService() {
             if (clinicTarget != null) {
                 highlight(clinicTarget.rect)
             } else {
+                cancelPendingStableHighlight()
                 showScrollHint("溫馨提醒：請往下滑找到「$finalKeyword」")
             }
             return
@@ -565,6 +629,8 @@ class MyAccessibilityService : AccessibilityService() {
 
             val doctorTarget = findDoctorInSession(allNodes, finalKeyword)
             val unavailableStatus = findDoctorUnavailableStatus(allNodes, finalKeyword)
+
+            if (doctorTarget == null || unavailableStatus != null) cancelPendingStableHighlight()
 
             if (unavailableStatus != null) {
                 showUnavailableSessionHint(finalKeyword, unavailableStatus)
@@ -585,6 +651,7 @@ class MyAccessibilityService : AccessibilityService() {
         if (currentTarget != null) {
             highlight(currentTarget.rect)
         } else {
+            if (guidanceSession.guidanceType == GuidanceType.BOOKING) cancelPendingStableHighlight()
             if (finalKeyword == "確認送出") {
                 overlay?.hide()
                 Log.d("vgh_id_detect", "等待確認送出出現")
@@ -603,22 +670,8 @@ class MyAccessibilityService : AccessibilityService() {
                 return
             }
 
-            var foundFuture = false
-            for (i in 1..2) {
-                if (currentStepIndex + i < script.size) {
-                    val futureKeyword = script[currentStepIndex + i]
-                    val futureNode = findBestMatch(allNodes, futureKeyword)
-                    if (futureNode != null) {
-                        moveToStep(currentStepIndex + i, "找到後續步驟")
-                        highlight(futureNode.rect)
-                        foundFuture = true
-                        break
-                    }
-                }
-            }
-            if (foundFuture) return
-
-            if (currentStepIndex >= script.indexOf("請輸入身分證號")) {
+            if (guidanceSession.guidanceType != GuidanceType.BOOKING &&
+                currentStepIndex >= script.indexOf("請輸入身分證號")) {
                 val prevKeyword = script[currentStepIndex - 1]
                 val prevNode = findBestMatch(allNodes, prevKeyword)
                 if (prevNode != null) {
@@ -651,6 +704,8 @@ class MyAccessibilityService : AccessibilityService() {
 
     private fun beginBookingResultWait() {
         if (awaitingBookingResult) return
+        cancelPendingStableHighlight()
+        overlay?.hide()
         awaitingBookingResult = true
         val generation = guidanceSession.generation
         mainHandler.postDelayed({
@@ -1156,16 +1211,9 @@ class MyAccessibilityService : AccessibilityService() {
     private fun isSubClinicPickerVisible(nodes: List<NodeData>): Boolean {
         val nextKeyword = script.getOrNull(currentStepIndex + 1)
         if (nextKeyword != pendingClinic) return false
-        if (nodes.none { it.text.trim() == "CANCEL" }) return false
-
         val currentDepartment = pendingDepartment ?: return false
-        return nodes.any { node ->
-            val text = node.text.trim()
-            text != currentDepartment &&
-                    text.contains("科") &&
-                    !text.endsWith("系") &&
-                    text != "依門診科別"
-        }
+        val visibleLabels = nodes.filter { it.isVisibleToUser && it.isOnScreen() }.map { it.text }
+        return hasSubClinicPickerLabels(visibleLabels, currentDepartment)
     }
 
     private fun isClinicStep(keyword: String): Boolean =
@@ -1323,10 +1371,13 @@ class MyAccessibilityService : AccessibilityService() {
     private fun scheduleScrollHintRecheck(message: String, delay: Long) {
         val key = "$currentStepIndex|$message"
         val sessionGeneration = guidanceSession.generation
+        val expectedStep = currentStepIndex
         pendingScrollHintRecheck?.let(mainHandler::removeCallbacks)
         val task = Runnable {
             pendingScrollHintRecheck = null
             if (!guidanceSession.isCurrentGeneration(sessionGeneration)) return@Runnable
+            if (guidanceSession.guidanceType == GuidanceType.BOOKING &&
+                !canDisplayBookingCallback(sessionGeneration, expectedStep)) return@Runnable
             if ("$currentStepIndex|$message" == key) {
                 showScrollHint(message)
             }
@@ -1401,6 +1452,9 @@ class MyAccessibilityService : AccessibilityService() {
             overlay?.hide()
             return
         }
+        if (keyword == "確認送出") {
+            Log.d("vgh_id_detect", "確認送出範圍 raw=${rect.toShortString()} normalized=${targetRect.toShortString()}")
+        }
         val tolerance = dp(STABLE_RECT_TOLERANCE_DP)
         if (displayedStableKeyword == key && displayedStableRect?.isCloseTo(targetRect, tolerance) == true) {
             displayedStableRect = targetRect
@@ -1416,6 +1470,7 @@ class MyAccessibilityService : AccessibilityService() {
      */
     private fun scheduleStableHighlight(key: String, rect: Rect, message: String?) {
         val sessionGeneration = guidanceSession.generation
+        val expectedStep = currentStepIndex
         val tolerance = dp(STABLE_RECT_TOLERANCE_DP)
         if (pendingStableKeyword == key && pendingStableRect?.isCloseTo(rect, tolerance) == true) return
 
@@ -1425,8 +1480,15 @@ class MyAccessibilityService : AccessibilityService() {
         pendingStableKeyword = key
         pendingStableRect = rect
         if (replacingVisibleTarget) overlay?.hide()
-        val task = Runnable {
+        lateinit var task: Runnable
+        task = Runnable {
+            if (pendingStableHighlight !== task) return@Runnable
             if (!guidanceSession.isCurrentGeneration(sessionGeneration)) return@Runnable
+            if (guidanceSession.guidanceType == GuidanceType.BOOKING &&
+                !canDisplayBookingCallback(sessionGeneration, expectedStep)) {
+                cancelPendingStableHighlight()
+                return@Runnable
+            }
             val stableKey = pendingStableKeyword
             val stableRect = pendingStableRect
             pendingStableHighlight = null
@@ -1436,6 +1498,37 @@ class MyAccessibilityService : AccessibilityService() {
             if (stableKey != currentKey) return@Runnable
             val finalRect = stableRect ?: return@Runnable
 
+            val keyword = script.getOrNull(currentStepIndex).orEmpty()
+            if (guidanceSession.guidanceType == GuidanceType.BOOKING &&
+                BookingHighlightStability.requiresRecheck(keyword, isDepartmentStep(keyword))) {
+                val root = rootInActiveWindow ?: return@Runnable
+                root.refresh()
+                val visibleNodes = findAllTextNodes(root).filter { it.isVisibleToUser && it.isOnScreen() }
+                val latestTarget = if (isDepartmentStep(keyword)) {
+                    findDepartmentInReservationSection(visibleNodes, keyword, pendingAppointmentType.toReservationSection())
+                } else {
+                    findBestMatch(visibleNodes, keyword)?.takeIf { it.isEnabled }
+                }
+                if (latestTarget == null) {
+                    overlay?.hide()
+                    return@Runnable
+                }
+                val raw = latestTarget.rect
+                val latestRect = normalizeHighlightRect(raw, keyword) ?: return@Runnable
+                val screenWidth = screenSize().first
+                val rawWithinViewport = raw.left >= -tolerance && raw.right <= screenWidth + tolerance
+                val settled = BookingHighlightStability.canDisplay(
+                    HighlightBounds(finalRect.left, finalRect.top, finalRect.right, finalRect.bottom),
+                    HighlightBounds(latestRect.left, latestRect.top, latestRect.right, latestRect.bottom),
+                    screenWidth, tolerance
+                )
+                if (!rawWithinViewport || !settled) {
+                    overlay?.hide()
+                    scheduleStableHighlight(key, latestRect, message)
+                    return@Runnable
+                }
+            }
+
             displayedStableKeyword = stableKey
             displayedStableRect = finalRect
             showHighlightImmediately(finalRect, message)
@@ -1444,6 +1537,10 @@ class MyAccessibilityService : AccessibilityService() {
         pendingStableHighlight = task
         mainHandler.postDelayed(task, STABLE_HIGHLIGHT_DELAY_MS)
     }
+
+    private fun canDisplayBookingCallback(generation: Long, step: Int): Boolean =
+        guidanceSession.canDisplayDelayedGuidance(generation, step) &&
+            rootInActiveWindow?.packageName?.toString() == VGH_PACKAGE_NAME
 
     private fun cancelPendingStableHighlight() {
         pendingStableHighlight?.let(mainHandler::removeCallbacks)
@@ -1472,7 +1569,10 @@ class MyAccessibilityService : AccessibilityService() {
         val usesPreviousRange = keyword == "選擇看診時間" ||
                 keyword == "選擇看診時間 / 醫師" ||
                 keyword == "填寫個人資料"
-        val shouldCompact = if (usesPreviousRange) {
+        // A full-width submit button is valid: retain its node aspect ratio.
+        val shouldCompact = if (keyword == "確認送出") {
+            false
+        } else if (usesPreviousRange) {
             rect.height() > screenHeight * 0.7f
         } else {
             rect.height() > screenHeight * 0.7f || rect.width() > screenWidth * 0.92f

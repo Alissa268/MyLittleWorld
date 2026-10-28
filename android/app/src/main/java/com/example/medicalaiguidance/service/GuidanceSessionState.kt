@@ -46,6 +46,9 @@ internal class GuidanceSessionState {
 
     fun isCurrentGeneration(value: Long): Boolean = canHandleTargetEvent() && generation == value
 
+    fun canDisplayDelayedGuidance(expectedGeneration: Long, expectedStep: Int): Boolean =
+        isCurrentGeneration(expectedGeneration) && currentStepIndex == expectedStep && !isAwaitingTargetReturn
+
     fun markTargetLeft(): Boolean {
         if (!canHandleTargetEvent() || isAwaitingTargetReturn) return false
         isAwaitingTargetReturn = true
