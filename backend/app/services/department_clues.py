@@ -16,6 +16,7 @@ A concept held by several candidates credits every department in its ``dept_ids`
 ``ConversationState.department_clue_offer`` holds only the top ``clue_planner_concept_limit``
 ranked clues for the planner. 平手加問（Commit 5）必須從全部可問線索找，不能只用
 department_clue_offer：tiebreak_clues() must receive the full clue_concepts() result.
+2026-10-28 起平手改採收斂 AI 排名（decide 的 ai_order），決定流程不再呼叫 tiebreak_clues()。
 """
 
 from __future__ import annotations
@@ -320,9 +321,14 @@ def decide(
     *, ai_resolved_dept_id: int | None, candidates: set[int], scores: dict[int, int],
     askable: list[ClueConcept], questions_asked: int, tiebreak_used: bool,
     user_declined: bool, clue_confirmed_dept_ids: set[int], question_limit: int,
-    non_target_dept_ids: Iterable[int] = (),
+    non_target_dept_ids: Iterable[int] = (), ai_order: Iterable[int] = (),
 ) -> ClueDecision:
-    """Apply rules A/C and the decision triggers; every decision still needs user confirmation."""
+    """Apply rules A/C and the decision triggers; every decision still needs user confirmation.
+
+    A tied top score goes to the tied department ranked first in ``ai_order`` (this turn's
+    validated convergence candidates); only when none of them is ranked does it fall back
+    to family medicine. No extra tiebreak question is asked, so ``tiebreak_used`` is unused.
+    """
     if not candidates:
         return ClueDecision("defer_to_safety_net", reason="no_candidates")
     if ai_resolved_dept_id is not None and ai_resolved_dept_id in candidates:
@@ -341,6 +347,7 @@ def decide(
     tied = sorted(dept_id for dept_id in candidates if scores.get(dept_id, 0) == best)
     if len(tied) == 1:
         return ClueDecision("decide", dept_id=tied[0], reason=reason)
-    if not user_declined and not tiebreak_used and tiebreak_clues(askable, set(tied), non_target_dept_ids):
-        return ClueDecision("tiebreak", tied_dept_ids=tuple(tied), reason=reason)
+    ranked = [dept_id for dept_id in dict.fromkeys(ai_order) if dept_id in tied]
+    if ranked:
+        return ClueDecision("decide", dept_id=ranked[0], tied_dept_ids=tuple(tied), reason="tie_broken_by_ai_rank")
     return ClueDecision("family_medicine", tied_dept_ids=tuple(tied), reason=reason)

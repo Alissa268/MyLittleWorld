@@ -457,15 +457,10 @@ def apply_clue_decision(
         user_declined=False,
         clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates, records),
         question_limit=settings.clue_question_limit, non_target_dept_ids={settings.family_medicine_dept_id},
+        ai_order=[item.dept_id for item in state.candidate_departments],
     )
     kind, dept_id, result = decision.kind, decision.dept_id, None
-    if kind == "tiebreak":
-        # Tiebreak clues come from every askable clue, never only the planner's top-ranked offer.
-        state.department_clue_offer = clues.clue_offer(clues.tiebreak_clues(
-            askable, set(decision.tied_dept_ids), {settings.family_medicine_dept_id},
-            _clue_priority(state, retrieved, candidates, records),
-        ))
-    elif kind == "decide" and dept_id == ai_resolved:
+    if kind == "decide" and dept_id == ai_resolved:
         result = case.department_result
     elif kind == "decide":
         confidence = next((item.confidence for item in state.candidate_departments if item.dept_id == dept_id), 0.0)

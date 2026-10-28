@@ -121,8 +121,10 @@ def test_below_limit_without_trigger_keeps_asking():
 
 
 def test_tie_without_tiebreak_asks_tiebreak_for_tied_departments():
+    # 2026-10-28: a tie no longer asks a tiebreak question; without an AI ranking it goes to
+    # family medicine. tiebreak_clues() is kept as a helper and still selects tied-unique clues.
     result = decide(questions_asked=5, scores={ENT: 2, NEURO: 2, CARDIO: 1})
-    assert result.kind == "tiebreak" and result.tied_dept_ids == (NEURO, ENT)
+    assert result.kind == "family_medicine" and result.tied_dept_ids == (NEURO, ENT)
     tiebreakers = clues.tiebreak_clues(clues.clue_concepts(RECORDS, CANDIDATES, set(), []), {ENT, NEURO})
     assert "噁心" not in {clue.concept for clue in tiebreakers}
     assert all(len(clue.dept_ids & {ENT, NEURO}) == 1 for clue in tiebreakers)

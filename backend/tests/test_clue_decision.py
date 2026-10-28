@@ -4,12 +4,13 @@ import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.config import Settings, get_settings
 from app.main import app
 from app.schemas import (
-    ClueConceptRecord, ClueDecisionRecord, ConversationState, DepartmentResult, Message, TriageCase,
+    CandidateDepartment, ClueConceptRecord, ClueDecisionRecord, ConversationState, DepartmentResult, Message, TriageCase,
 )
 from app.services import conversation_service, rag_triage_adapter
 from app.services import department_clues as clues
@@ -147,12 +148,12 @@ def test_unknown_answers_lead_to_tiebreak_then_family_medicine_confirmation():
     assert state.pending_clarification_intent == clues.clue_intent(2)
     for _ in range(3):
         case, body = turn(case, "不知道", assertion="uncertain")
+    # 2026-10-28: the convergence AI ranks no candidate here, so the tie goes straight to
+    # family medicine at the 5-question limit; no 6th tiebreak question is asked.
     case, body = turn(case, "不知道", assertion="uncertain")
     state = case.conversation_state
-    assert body["conversation_state"]["clue_decision"]["kind"] == "tiebreak"
-    assert (state.clue_questions_asked, state.clue_tiebreak_used) == (6, True)
+    assert (state.clue_questions_asked, state.clue_tiebreak_used) == (5, False)
     assert set(body["conversation_state"]["clue_decision"]["tied_dept_ids"]) == DIZZY
-    case, body = turn(case, "不知道", assertion="uncertain")
     decision = body["conversation_state"]["clue_decision"]
     assert (decision["kind"], decision["dept_id"]) == ("family_medicine", FAMILY)
     assert_waiting_confirmation(body, FAMILY)
@@ -161,7 +162,8 @@ def test_unknown_answers_lead_to_tiebreak_then_family_medicine_confirmation():
 
 def test_family_medicine_unavailable_is_terminal_and_invents_nothing():
     case, _ = dizzy_start("decide-family-missing")
-    for _ in range(5):
+    # 2026-10-28: the tie is decided at the 5th answer (no 6th tiebreak question).
+    for _ in range(4):
         case, _ = turn(case, "不知道", assertion="uncertain")
     without_family = [row for row in ACTIVE if row["dept_id"] != FAMILY]
     case, body = turn(case, "不知道", assertion="uncertain", active=without_family)
@@ -277,8 +279,10 @@ def test_tiebreak_uses_every_askable_clue_not_only_the_top_offer():
     assert "A與C線索" not in {item.concept for item in clues.rank_clue_concepts(askable, 10)}
     reasoning.apply_clue_decision(case, askable, [*TIED, hit(A, "暈"), hit(B, "暈"), hit(C, "頭暈")], ACTIVE)
     state = case.conversation_state
-    assert state.clue_decision.kind == "tiebreak" and set(state.clue_decision.tied_dept_ids) == {A, B}
-    assert [item.concept for item in state.department_clue_offer] == ["A與C線索"]
+    # 2026-10-28: the decision flow no longer asks a tiebreak question; the helper still
+    # searches every askable clue, not only the planner's top-ranked offer.
+    assert state.clue_decision.kind == "family_medicine" and set(state.clue_decision.tied_dept_ids) == {A, B}
+    assert [item.concept for item in clues.tiebreak_clues(askable, {A, B})] == ["A與C線索"]
 
 
 def test_ai_resolved_decides_even_while_a_clue_question_is_pending():
@@ -425,3 +429,123 @@ def test_present_concept_scores_every_current_holder_once_per_question():
 def test_concept_no_longer_in_knowledge_base_falls_back_to_snapshot():
     record = ClueConceptRecord(concept="已移除概念", dept_id=ENT, dept_ids=[ENT], question_index=1, answer="present")
     assert clues.answered_concept_departments(record, RECORDS) == {ENT}
+
+
+# --- 2026-10-28: a tied top score is broken by the convergence AI's ranking ---------------------
+
+ORTHO, REHAB, RHEUM, NEURO, NEURO_SURG, CARDIO, META, PSY = 1298, 1265, 1255, 1274, 1244, 1241, 1237, 1251
+
+
+def ranked(case, order):
+    """Store validated convergence candidates in the AI's order (confidence descending)."""
+    rows = {row["dept_id"]: row for row in ACTIVE}
+    case.conversation_state.candidate_departments = [
+        CandidateDepartment(dept_id=dept_id, parentDept=rows[dept_id]["parent_dept"],
+                            childDept=rows[dept_id]["child_dept"], confidence=0.6 - 0.1 * index)
+        for index, dept_id in enumerate(order)
+    ]
+    return case
+
+
+def test_decide_breaks_a_tie_with_the_ai_rank():
+    common = dict(ai_resolved_dept_id=None, askable=[clue("咳嗽", {A, B})], questions_asked=5, tiebreak_used=False,
+                  user_declined=False, clue_confirmed_dept_ids=set(), question_limit=5, non_target_dept_ids={FAMILY})
+    tied = clues.decide(candidates={A, B, C}, scores={A: 2, B: 2, C: 1}, ai_order=[C, B, A], **common)
+    assert (tied.kind, tied.dept_id, tied.reason, tied.tied_dept_ids) == ("decide", B, "tie_broken_by_ai_rank", (A, B))
+    unranked = clues.decide(candidates={A, B, C}, scores={A: 2, B: 2, C: 1}, ai_order=[C], **common)
+    assert (unranked.kind, unranked.reason, unranked.tied_dept_ids) == ("family_medicine", "question_limit", (A, B))
+    single = clues.decide(candidates={A, B, C}, scores={A: 1, B: 2, C: 1}, ai_order=[A, C], **common)
+    assert (single.kind, single.dept_id, single.reason) == ("decide", B, "question_limit")
+
+
+def test_tie_takes_the_ai_ranked_department_and_waits_for_confirmation():
+    case = ranked(decision_case(), [C, B, A])
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", B, "tie_broken_by_ai_rank")
+    assert set(decision.tied_dept_ids) == {A, B}
+    assert case.department_result.dept_id == B and case.conversation_state.department_status == "resolved"
+    assert case.conversation_state.clue_tiebreak_used is False
+
+
+def test_tie_outside_the_ai_ranking_still_falls_back_to_family_medicine():
+    for order in ([C], []):
+        case = ranked(decision_case(), order)
+        reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
+        assert case.conversation_state.clue_decision.kind == "family_medicine"
+        assert case.department_result.dept_id == FAMILY
+
+
+def test_family_medicine_ranked_first_in_a_tie_uses_the_general_confirmation():
+    case = ranked(decision_case(candidates=(A, FAMILY)), [FAMILY, A])
+    case.history_records = [Message(role="user", content="頭暈"), Message(role="user", content="沒有")]
+    case.patient_input.symptom = "頭暈"
+    case.conversation_state.clarification_evidence = {clues.clue_intent(1): "沒有"}
+    reasoning.apply_clue_decision(case, [], [hit(A, "頭暈"), hit(FAMILY, "頭暈")], ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", FAMILY, "tie_broken_by_ai_rank")
+    conversation_service.advance_conversation(case, None, user_sources=["沒有"], current_extractions=[])
+    assert case.conversation_state.reply_source == "CONFIRMATION" and case.conversation_state.is_complete
+    reply = chat_route.build_department_confirmation_reply(case)
+    assert reply != get_settings().family_medicine_fallback_message + CONFIRM_PROMPT
+    assert case.department_result.childDept in reply
+
+
+class RankedConvergence:
+    """Fake convergence AI: ambiguous, ranking the given departments in order."""
+
+    def __init__(self, order):
+        self.order = order
+
+    async def __call__(self, prompt, *, purpose):
+        retrieved = json.loads(prompt.split("\n資料：", 1)[1])["retrieved_official_evidence"]
+        candidates = []
+        for index, dept_id in enumerate(self.order):
+            item = next(entry for entry in retrieved if entry["dept_id"] == dept_id)
+            support = {key: item[key] for key in ("patient_source_text", "knowledge_source_id", "knowledge_concept")}
+            candidates.append({"dept_id": dept_id, "confidence": 0.6 - 0.1 * index, "supporting_evidence": [support]})
+        return json.dumps({"status": "ambiguous", "candidates": candidates}, ensure_ascii=False)
+
+
+def test_tie_at_the_question_limit_never_asks_a_sixth_question():
+    order = sorted(DIZZY - {FAMILY})[::-1][:2]
+    convergence = RankedConvergence(order)
+    case, body = turn(new_case("decide-ai-rank"), "最近一直頭暈", [symptom("頭暈", "頭暈")], convergence=convergence)
+    # Absent answers never subtract, so every dizziness department stays tied at the limit.
+    for _ in range(4):
+        case, body = turn(case, "沒有", assertion="absent", convergence=convergence)
+        assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
+    case, body = turn(case, "沒有", assertion="absent", convergence=convergence)
+    decision = body["conversation_state"]["clue_decision"]
+    assert (decision["kind"], decision["dept_id"], decision["reason"]) == ("decide", order[0], "tie_broken_by_ai_rank")
+    assert set(decision["tied_dept_ids"]) == DIZZY
+    assert (case.conversation_state.clue_questions_asked, case.conversation_state.clue_tiebreak_used) == (5, False)
+    assert_waiting_confirmation(body, order[0])
+    assert body["reply"] != get_settings().family_medicine_fallback_message + CONFIRM_PROMPT
+
+
+# Benchmark baseline (docs/BENCHMARK_BASELINE_20261028.md): validated convergence candidates, in AI
+# order, on the turn the old flow fell back to family medicine after 6 clue questions. Every listed
+# candidate is tied here; the decision must take the first AI-ranked one instead of family medicine.
+BENCHMARK_FINAL_TURNS = {
+    "c09_run1": [REHAB],
+    "c09_run2": [RHEUM, ORTHO, REHAB],
+    "c10_run1": [A, NEURO, NEURO_SURG],
+    "c10_run2": [A, FAMILY, NEURO],
+    "c11_run1": [CARDIO, A, META],
+    "c11_run2": [CARDIO, A],
+    "c16_run1": [A, PSY],
+    "c16_run2": [A, PSY],
+}
+
+
+@pytest.mark.parametrize("name", sorted(BENCHMARK_FINAL_TURNS))
+def test_benchmark_family_medicine_fallbacks_take_the_ai_ranked_department(name):
+    order = BENCHMARK_FINAL_TURNS[name]
+    tied = set(order) | {FAMILY}
+    case = ranked(decision_case(candidates=tuple(sorted(tied))), order)
+    reasoning.apply_clue_decision(case, [], [hit(dept_id, "症狀") for dept_id in tied], ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", order[0], "tie_broken_by_ai_rank")
+    assert set(decision.tied_dept_ids) == tied
+    assert case.department_result.dept_id == order[0]
