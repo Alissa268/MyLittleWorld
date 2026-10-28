@@ -3,17 +3,21 @@ from __future__ import annotations
 
 import importlib
 import json
+import re
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 from fastapi.testclient import TestClient
 
 from app.main import app
-from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase, UrgencyResult, VisitType
+from app.schemas import (
+    DepartmentResult, Message, SemanticExtraction, TimePreference, TriageCase, UrgencyResult, VisitType,
+)
 from app.services import rag_triage_adapter
 from app.services.case_store import get_case, save_case
 from app.services.conversation_service import (
-    AVAILABILITY_PENDING_INTENT, AVAILABILITY_QUESTION, ClarificationSuggestion,
+    AVAILABILITY_DATE_QUESTION, AVAILABILITY_PENDING_INTENT, AVAILABILITY_QUESTION, AVAILABILITY_SESSION_QUESTION,
+    ClarificationSuggestion,
 )
 
 chat_route = importlib.import_module("app.routes.chat")
@@ -51,6 +55,16 @@ def symptom(text: str) -> dict:
 def availability_answer(source: str) -> dict:
     return dict(answered_intent=AVAILABILITY_PENDING_INTENT, answer_status="answered",
                 answer_source_text=source, answer_confidence=0.95)
+
+
+def next_tuesday(source: str, relation: str = "prefer") -> dict:
+    return dict(kind="relative_weekday", relation=relation, priority=1 if relation != "exclude" else None,
+                week_offset=1, weekday="tuesday", source_text=source, confidence=0.95)
+
+
+def afternoon(source: str) -> dict:
+    return dict(kind="session", relation="prefer", priority=1, session="afternoon", source_text=source,
+                confidence=0.95)
 
 
 async def converge(case):
@@ -103,15 +117,16 @@ def test_converged_department_asks_availability_before_confirmation():
 
 
 def test_specific_time_answer_goes_to_confirmation():
+    # 6-H-1: a session-only answer now asks for the date; this answer covers both dimensions.
     case_id = ready_case("avail-specific").case_id
     ask(case_id)
-    text = "下午比較方便"
-    body, planner = turn(case_id, text, payload(text, act="answer", pending=availability_answer(text), times=[dict(
-        kind="session", relation="prefer", priority=1, session="afternoon", source_text="下午", confidence=0.95)]))
+    text = "下週二下午"
+    body, planner = turn(case_id, text, payload(text, act="answer", pending=availability_answer(text), times=[
+        next_tuesday("下週二"), afternoon("下午")]))
     state = state_of(body)
     assert state["availability_status"] == "answered" and state["stage"] == "waiting_confirmation"
     assert state["is_complete"] is True and state["reply_source"] == "CONFIRMATION"
-    assert [item["session"] for item in body["triage_case"]["availability"]["time_preferences"]] == ["afternoon"]
+    assert [item["session"] for item in body["triage_case"]["availability"]["time_preferences"]] == [None, "afternoon"]
 
 
 def test_anytime_answer_confirms_without_time_conditions():
@@ -125,7 +140,9 @@ def test_anytime_answer_confirms_without_time_conditions():
 
 
 def test_time_already_given_is_not_asked_again():
+    # 6-H-1: both dimensions must be known up front; a session alone now asks for the date.
     case = ready_case("avail-known")
+    case.availability.preferred_days = ["星期二"]
     case.availability.preferred_sessions = ["下午"]
     save_case(case)
     state = state_of(ask(case.case_id))
@@ -180,3 +197,121 @@ def test_recommend_is_blocked_while_availability_is_open():
     save_case(case)
     response = TestClient(app).post("/recommend", json={"case_id": case_id})
     assert response.status_code == 400 and "尚未完成" in response.json()["detail"]
+
+
+# 6-H-1: date and session are settled as two dimensions.
+
+def with_time(case_id: str, *preferences: dict) -> str:
+    case = ready_case(case_id)
+    case.availability.time_preferences = [TimePreference(**item) for item in preferences]
+    save_case(case)
+    return case.case_id
+
+
+def only_afternoon() -> list[dict]:
+    return [dict(kind="session", relation="exclude", session=value, source_text="只能下午", confidence=0.95)
+            for value in ("morning", "evening")]
+
+
+def test_session_only_opening_asks_only_the_date():
+    case_id = with_time("avail-dim-session-first", *only_afternoon())
+    body = ask(case_id)
+    state = state_of(body)
+    assert body["reply"] == AVAILABILITY_DATE_QUESTION and state["reply_source"] == "AVAILABILITY_QUESTION"
+    assert state["pending_clarification_intent"] == AVAILABILITY_PENDING_INTENT
+    assert state["availability_pending_dimensions"] == ["date"]
+    assert (state["availability_date_attempts"], state["availability_session_attempts"]) == (1, 0)
+    body, _ = turn(case_id, "下週二", payload("下週二", act="answer", pending=availability_answer("下週二"),
+                                             times=[next_tuesday("下週二")]))
+    state = state_of(body)
+    assert state["availability_status"] == "answered" and state["stage"] == "waiting_confirmation"
+
+
+def test_date_only_answer_asks_the_session():
+    case_id = ready_case("avail-dim-date-answer").case_id
+    ask(case_id)
+    text = "下週二比較方便"
+    body, planner = turn(case_id, text, payload(text, act="answer", pending=availability_answer(text),
+                                                 times=[next_tuesday("下週二")]))
+    state = state_of(body)
+    assert body["reply"] == AVAILABILITY_SESSION_QUESTION and state["availability_status"] == "asked"
+    assert state["availability_pending_dimensions"] == ["session"] and state["is_complete"] is False
+    assert (state["availability_date_attempts"], state["availability_session_attempts"]) == (1, 2)
+    body, _ = turn(case_id, "下午", payload("下午", act="answer", pending=availability_answer("下午"),
+                                           times=[afternoon("下午")]))
+    state = state_of(body)
+    assert state["availability_status"] == "answered" and state["stage"] == "waiting_confirmation"
+    assert state["is_complete"] is True
+
+
+def test_anytime_answer_settles_both_dimensions_as_unrestricted():
+    case_id = ready_case("avail-dim-anytime").case_id
+    ask(case_id)
+    body, _ = turn(case_id, "都可以", payload("都可以", act="answer", pending=availability_answer("都可以")))
+    state = state_of(body)
+    assert state["availability_dimension_outcomes"] == {"date": "unrestricted", "session": "unrestricted"}
+    assert state["availability_status"] == "answered" and state["availability_question_attempts"] == 1
+
+
+def test_excluded_date_only_asks_the_session():
+    case_id = ready_case("avail-dim-exclude").case_id
+    ask(case_id)
+    text = "週四不行"
+    body, _ = turn(case_id, text, payload(text, act="answer", pending=availability_answer(text), times=[dict(
+        kind="weekday", relation="exclude", weekday="thursday", source_text="週四不行", confidence=0.95)]))
+    state = state_of(body)
+    assert body["reply"] == AVAILABILITY_SESSION_QUESTION and state["availability_pending_dimensions"] == ["session"]
+
+
+def test_two_off_topic_session_answers_leave_session_unrestricted():
+    case_id = with_time("avail-dim-session-limit", next_tuesday("下週二"))
+    assert ask(case_id)["reply"] == AVAILABILITY_SESSION_QUESTION
+    off_topic = payload("今天天氣很好", act="off_topic")
+    body, _ = turn(case_id, "今天天氣很好", off_topic)
+    state = state_of(body)
+    assert body["reply"] == AVAILABILITY_SESSION_QUESTION and state["availability_session_attempts"] == 2
+    body, _ = turn(case_id, "今天天氣很好", off_topic)
+    state = state_of(body)
+    assert state["availability_dimension_outcomes"] == {"session": "exhausted"}
+    assert state["availability_status"] == "answered" and state["stage"] == "waiting_confirmation"
+    assert state["availability_date_attempts"] == 0
+
+
+def test_two_off_topic_full_questions_exhaust_both_dimensions():
+    case_id = ready_case("avail-dim-full-limit").case_id
+    ask(case_id)
+    off_topic = payload("今天天氣很好", act="off_topic")
+    turn(case_id, "今天天氣很好", off_topic)
+    body, _ = turn(case_id, "今天天氣很好", off_topic)
+    state = state_of(body)
+    assert state["availability_dimension_outcomes"] == {"date": "exhausted", "session": "exhausted"}
+    assert state["availability_status"] == "unspecified" and state["stage"] == "waiting_confirmation"
+
+
+def test_urgent_symptom_while_asking_session_takes_urgent_flow():
+    case_id = with_time("avail-dim-urgent", next_tuesday("下週二"))
+    assert ask(case_id)["reply"] == AVAILABILITY_SESSION_QUESTION
+    text = "下午可以，但現在胸口突然很痛"
+    body, _ = turn(case_id, text, payload(text, act="answer", pending=availability_answer("下午可以"),
+                                          extractions=[symptom("胸口突然很痛")]), urgent=True)
+    state = state_of(body)
+    assert state["clarification_status"] == "urgent" and state["stage"] == "done"
+
+
+def test_revision_does_not_ask_the_settled_dimension_again():
+    case_id = with_time("avail-dim-revision", next_tuesday("下週二"))
+    assert ask(case_id)["reply"] == AVAILABILITY_SESSION_QUESTION
+    revision = TestClient(app).post("/chat", json={"case_id": case_id, "revision_requested": True})
+    assert revision.status_code == 200
+    body, _ = turn(case_id, "其實是右膝痛", payload("其實是右膝痛", extractions=[symptom("右膝痛")]))
+    state = state_of(body)
+    assert body["reply"] == AVAILABILITY_SESSION_QUESTION and state["availability_pending_dimensions"] == ["session"]
+    assert (state["availability_date_attempts"], state["availability_session_attempts"]) == (0, 2)
+
+
+def test_interpreter_receives_the_asked_dimension_via_pending_context():
+    case_id = with_time("avail-dim-context", next_tuesday("下週二"))
+    ask(case_id)
+    prompt = rag_triage_adapter._build_symptom_collection_prompt(get_case(case_id), ["下午"])
+    assert re.search(r'"pending_availability_dimensions": \[\s*"session"\s*\]', prompt)
+    assert f'"pending_question": "{AVAILABILITY_SESSION_QUESTION}"' in prompt

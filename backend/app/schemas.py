@@ -397,6 +397,13 @@ class ConversationState(BaseModel):
     # Appointment availability asked once the department converged; revision keeps it.
     availability_status: Literal["not_asked", "asked", "answered", "unspecified"] = "not_asked"
     availability_question_attempts: int = Field(default=0, ge=0)
+    # 6-H-1: date and session settle separately; the full question counts once for each.
+    availability_date_attempts: int = Field(default=0, ge=0)
+    availability_session_attempts: int = Field(default=0, ge=0)
+    availability_pending_dimensions: List[Literal["date", "session"]] = Field(default_factory=list)
+    availability_dimension_outcomes: Dict[Literal["date", "session"], Literal["unrestricted", "exhausted"]] = Field(
+        default_factory=dict,
+    )
 
 
 class UrgencyResult(BaseModel):

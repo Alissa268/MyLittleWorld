@@ -73,6 +73,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_id_before = case.department_result.dept_id if case.department_result else None
         prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
         prior_medical_facts = _clinical_progress_facts(case)
+        prior_availability_facts = _availability_facts(case)
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
@@ -331,6 +332,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                     user_sources=user_text_parts,
                     current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
                     made_progress=bool(_clinical_progress_facts(case) - prior_medical_facts),
+                    availability_changed=_availability_facts(case) != prior_availability_facts,
                 )
                 if not has_user_input and not safety_check_turn and not case.history_records:
                     case.conversation_state.last_question_key = "symptom"
@@ -542,6 +544,13 @@ def _request_has_text_input(req: ChatRequest) -> bool:
     if req.message and req.message.strip():
         return True
     return any(message.role == "user" and message.content.strip() for message in req.messages)
+
+
+def _availability_facts(case: TriageCase) -> dict:
+    """Accepted structured time data only; used to tell whether this turn produced any."""
+    return case.availability.model_dump(
+        include={"time_preferences", "preferred_dates", "preferred_days", "preferred_sessions"},
+    )
 
 
 def _clinical_progress_facts(case: TriageCase) -> set[tuple[str, ...]]:

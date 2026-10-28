@@ -33,7 +33,11 @@ SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明�
 SAFETY_PENDING_INTENT = "safety_screen"
 AVAILABILITY_PENDING_INTENT = "appointment_availability"
 AVAILABILITY_QUESTION = "最近哪幾天、哪個時段比較方便看診？不方便的時間也可以告訴我；都可以的話直接說『都可以』。"
+AVAILABILITY_SESSION_QUESTION = "那一天中，上午、下午還是晚上比較方便？都可以的話直接說『都可以』。"
+AVAILABILITY_DATE_QUESTION = "那最近哪幾天比較方便？都可以的話直接說『都可以』。"
+# Per dimension; the full question counts once for date and once for session.
 AVAILABILITY_QUESTION_LIMIT = 2
+AVAILABILITY_DIMENSIONS = ("date", "session")
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
 TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
 FAMILY_MEDICINE_UNAVAILABLE_REPLY = "資訊不足，無法判斷科別。請改用手動選科或洽醫院掛號服務。"
@@ -808,6 +812,7 @@ def advance_conversation(
     user_sources: list[str],
     current_extractions: list[SemanticExtraction],
     made_progress: bool = False,
+    availability_changed: bool = False,
 ) -> None:
     """Apply only validated clarification proposals and Backend-owned state gates."""
     state = case.conversation_state
@@ -877,7 +882,7 @@ def advance_conversation(
     )
     if sufficient:
         if safety_screen_resolved(case) and state.department_status == "resolved":
-            if not availability_settled(case):
+            if not availability_settled(case, availability_changed=availability_changed):
                 _ask_availability(case)
                 return
             _release_availability_pending(case)
@@ -976,18 +981,47 @@ def has_accepted_time_preferences(case: TriageCase) -> bool:
                 or availability.preferred_days or availability.preferred_sessions)
 
 
-def availability_settled(case: TriageCase) -> bool:
-    """Settle availability: accepted time data or a grounded answer, else unspecified after the limit."""
+def availability_dimension_has_data(case: TriageCase, dimension: str) -> bool:
+    """Only accepted structured time data counts; relation does not matter."""
+    availability = case.availability
+    if dimension == "date":
+        return bool(any(item.kind != "session" for item in availability.time_preferences)
+                    or availability.preferred_dates or availability.preferred_days)
+    return bool(any(item.session is not None for item in availability.time_preferences)
+                or availability.preferred_sessions)
+
+
+def _availability_dimension_done(case: TriageCase, dimension: str) -> bool:
+    return (availability_dimension_has_data(case, dimension)
+            or dimension in case.conversation_state.availability_dimension_outcomes)
+
+
+def availability_settled(case: TriageCase, *, availability_changed: bool = False) -> bool:
+    """Settle date and session separately: data, a grounded no-limit answer, or the per-dimension limit."""
     state = case.conversation_state
     if state.availability_status in {"answered", "unspecified"}:
         return True
-    if has_accepted_time_preferences(case) or AVAILABILITY_PENDING_INTENT in state.clarification_evidence:
-        state.availability_status = "answered"
-    elif state.availability_question_attempts >= AVAILABILITY_QUESTION_LIMIT:
+    outcomes = state.availability_dimension_outcomes
+    if AVAILABILITY_PENDING_INTENT in state.clarification_evidence and not availability_changed:
+        # A grounded answer that produced no time data means no limit for the dimensions it was asked.
+        for dimension in state.availability_pending_dimensions:
+            if not availability_dimension_has_data(case, dimension):
+                outcomes.setdefault(dimension, "unrestricted")
+    attempts = {"date": state.availability_date_attempts, "session": state.availability_session_attempts}
+    for dimension in AVAILABILITY_DIMENSIONS:
+        if not _availability_dimension_done(case, dimension) and attempts[dimension] >= AVAILABILITY_QUESTION_LIMIT:
+            outcomes[dimension] = "exhausted"
+    if not all(_availability_dimension_done(case, dimension) for dimension in AVAILABILITY_DIMENSIONS):
+        return False
+    if (all(outcomes.get(dimension) == "exhausted" for dimension in AVAILABILITY_DIMENSIONS)
+            and not has_accepted_time_preferences(case)):
         state.availability_status = "unspecified"
         logger.info("availability case_id=%s unspecified=true attempts=%s",
                     case.case_id, state.availability_question_attempts)
-    return state.availability_status in {"answered", "unspecified"}
+    else:
+        state.availability_status = "answered"
+    state.availability_pending_dimensions = []
+    return True
 
 
 def awaiting_availability_answer(case: TriageCase) -> bool:
@@ -1009,12 +1043,26 @@ def _release_availability_pending(case: TriageCase) -> None:
 
 
 def _ask_availability(case: TriageCase) -> None:
-    """Backend-owned fixed question; medical completion is unchanged, confirmation waits for it."""
+    """Backend-owned fixed question for the missing dimensions; confirmation waits for it."""
     state = case.conversation_state
+    missing = [dimension for dimension in AVAILABILITY_DIMENSIONS if not _availability_dimension_done(case, dimension)]
+    if len(missing) == len(AVAILABILITY_DIMENSIONS):
+        question = AVAILABILITY_QUESTION
+    elif missing == ["date"]:
+        question = AVAILABILITY_DATE_QUESTION
+    else:
+        question = AVAILABILITY_SESSION_QUESTION
+    if "date" in missing:
+        state.availability_date_attempts += 1
+    if "session" in missing:
+        state.availability_session_attempts += 1
+    state.availability_pending_dimensions = missing
+    # Each ask needs its own grounded answer; an earlier one belonged to the previous question.
+    state.clarification_evidence.pop(AVAILABILITY_PENDING_INTENT, None)
     state.availability_status = "asked"
     state.availability_question_attempts += 1
     state.pending_clarification_intent = AVAILABILITY_PENDING_INTENT
-    state.pending_clarification_question = AVAILABILITY_QUESTION
+    state.pending_clarification_question = question
     if AVAILABILITY_PENDING_INTENT not in state.asked_clarification_intents:
         state.asked_clarification_intents.append(AVAILABILITY_PENDING_INTENT)
     state.next_information_needed = []
@@ -1024,7 +1072,7 @@ def _ask_availability(case: TriageCase) -> None:
     state.reply_source = "AVAILABILITY_QUESTION"
     state.is_complete = False
     case.triage.need_more_info = True
-    case.triage.next_question = AVAILABILITY_QUESTION
+    case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append("症狀資訊已完成，確認前詢問看診時間；時間不是醫療完成門檻。")
 
