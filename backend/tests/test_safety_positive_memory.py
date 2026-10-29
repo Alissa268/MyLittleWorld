@@ -128,6 +128,22 @@ def test_hemiparesis_positive_then_denial_stops_safely(runtime):
     assert_safety_stop(client, case_id, result, department)
 
 
+def test_partial_positive_then_denial_stops_safely(runtime):
+    # Benchmark c20 run 2: "有半邊無力，其他沒有" is a partial denial (prompt rule 15a) that
+    # still reports one item; a later "沒有" must not complete the screen as negative.
+    client, interpreter, planner, department = runtime
+    case_id = start_safety(client, interpreter, "突然右邊手腳沒力", WEAKNESS)
+    text = "有半邊無力，其他沒有。"
+    result = say(client, interpreter, planner, case_id, text, pending("有半邊無力", status="partial", assertion="present"),
+                 next_question="請問是否有突發劇烈頭痛或突發胸痛？")
+    assert result["conversation_state"]["clarification_status"] == "safety_check"
+    assert result["conversation_state"]["safety_positive_reported"] is True
+    department.reset_mock()
+    result = say(client, interpreter, planner, case_id, "沒有。", pending("沒有"))
+    assert result["conversation_state"]["safety_answer_validation"] == "absent_after_positive"
+    assert_safety_stop(client, case_id, result, department)
+
+
 def test_validated_ttas_true_evidence_counts_as_positive(runtime):
     client, interpreter, planner, department = runtime
     case_id = start_safety(client, interpreter, "突然右邊手腳沒力", WEAKNESS)

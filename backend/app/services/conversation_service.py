@@ -864,8 +864,11 @@ def capture_safety_screen_answer(
 def _safety_positive_answer(
     case: TriageCase, suggestion: PendingAnswerInterpretation | None, user_sources: list[str],
 ) -> bool:
-    """A grounded, confident present answer, or validated TTAS evidence this turn reports as true."""
-    if (suggestion is not None and suggestion.answer_status == "answered"
+    """A grounded, confident present answer, or validated TTAS evidence this turn reports as true.
+
+    A partial answer counts too: "有半邊無力，其他沒有" is a partial denial that still reports one item.
+    """
+    if (suggestion is not None and suggestion.answer_status in {"answered", "partial"}
             and suggestion.answer_assertion == "present"
             and suggestion.answer_confidence >= ACCEPT_THRESHOLD
             and _grounded_clarification_answer(
