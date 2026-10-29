@@ -6,9 +6,15 @@
     .venv/Scripts/python.exe -m benchmark.run_benchmark --out <scratchpad>/bench.json
     .venv/Scripts/python.exe -m benchmark.run_benchmark --case c09_right_knee_pain --repeat 1 --out ...
     .venv/Scripts/python.exe -m benchmark.run_benchmark --base-url http://<host>:8080 --out ...
+    .venv/Scripts/python.exe -m benchmark.run_benchmark --tier smoke --out ...
+    .venv/Scripts/python.exe -m benchmark.run_benchmark --rerun-failed <scratchpad>/bench.json --out ...
     .venv/Scripts/python.exe -m benchmark.run_benchmark --summarize <scratchpad>/bench.json
 
 給 --base-url 時改以 HTTP（timeout 120 秒）呼叫遠端後端，模擬病人仍在本機以 .env 金鑰呼叫。
+
+省額度：預設每案例只跑 1 次；--tier smoke 只跑 cases.yaml 標 smoke 的精簡組；
+--rerun-failed 只重跑上次結果中失敗的案例。每次執行都記錄 token 用量
+（後端用量只有 TestClient 模式量得到，--base-url 模式只記模擬病人）。
 """
 from __future__ import annotations
 
@@ -68,8 +74,59 @@ def load_cases(path: Path = CASES_FILE) -> list[dict[str, Any]]:
         return yaml.safe_load(handle)["cases"]
 
 
-class PatientSimulator:
+TOKEN_FIELDS = ("calls", "prompt_tokens", "completion_tokens", "total_tokens")
+
+
+class TokenMeter:
+    """Per-run AI token usage, split into backend and simulator buckets."""
+
     def __init__(self) -> None:
+        self.reset()
+
+    def reset(self) -> None:
+        self.buckets: dict[str, Counter[str]] = {"backend": Counter(), "simulator": Counter()}
+
+    def add(self, bucket: str, response: Any) -> None:
+        usage = getattr(response, "usage", None)
+        counter = self.buckets[bucket]
+        counter["calls"] += 1
+        for field in TOKEN_FIELDS[1:]:
+            counter[field] += int(getattr(usage, field, 0) or 0)
+
+    def snapshot(self) -> dict[str, dict[str, int]]:
+        return {name: {field: counter[field] for field in TOKEN_FIELDS} for name, counter in self.buckets.items()}
+
+
+def install_backend_meter(meter: TokenMeter) -> None:
+    """Wrap the backend's Cerebras client in-process (TestClient mode only); backend code is untouched."""
+    from app.services import ai_service
+
+    def wrap_client() -> None:
+        completions = getattr(getattr(ai_service._cerebras_client, "chat", None), "completions", None)
+        if completions is None or getattr(completions.create, "_benchmark_metered", False):
+            return
+        original = completions.create
+
+        async def metered(*args: Any, **kwargs: Any) -> Any:
+            response = await original(*args, **kwargs)
+            meter.add("backend", response)
+            return response
+
+        metered._benchmark_metered = True  # type: ignore[attr-defined]
+        completions.create = metered
+
+    original_initialize = ai_service._initialize_cerebras
+
+    def initialize(settings: Any) -> None:
+        original_initialize(settings)
+        wrap_client()
+
+    ai_service._initialize_cerebras = initialize
+    wrap_client()
+
+
+class PatientSimulator:
+    def __init__(self, meter: TokenMeter) -> None:
         from cerebras.cloud.sdk import Cerebras
 
         from app.config import get_settings
@@ -79,6 +136,7 @@ class PatientSimulator:
             raise RuntimeError("CEREBRAS_API_KEY 未設定，無法啟動模擬病人。")
         self.model = settings.cerebras_model
         self.client = Cerebras(api_key=settings.cerebras_api_key, timeout=30.0, max_retries=0)
+        self.meter = meter
 
     def answer(self, case: dict[str, Any], transcript: list[dict[str, str]], system_reply: str) -> str:
         history = "\n".join(
@@ -99,7 +157,8 @@ class PatientSimulator:
                     model=self.model,
                     messages=[{"role": "user", "content": prompt}],
                 )
-                text = str(response.choices[0].message.content or "").strip().strip("「」\"")
+                self.meter.add("simulator", response)
+                text =str(response.choices[0].message.content or "").strip().strip("「」\"")
                 if text:
                     return text.splitlines()[0].strip()
                 last_error = ValueError("simulator returned empty content")
@@ -187,6 +246,7 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
     seen_concepts: Counter[str] = Counter()
     repeated = 0
     urgent_seen = False
+    simulator.meter.reset()
     started = time.perf_counter()
 
     try:
@@ -289,6 +349,7 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
         "avg_turn_seconds": round(sum(seconds) / len(seconds), 3) if seconds else None,
         "max_turn_seconds": round(max(seconds), 3) if seconds else None,
         "wall_seconds": round(time.perf_counter() - started, 3),
+        "tokens": simulator.meter.snapshot(),
     })
     record.setdefault("recommend_http_status", None)
     first_top = (turns[0].get("candidates") or [None])[0] if turns else None
@@ -298,6 +359,18 @@ def run_case(client: Any, simulator: PatientSimulator, case: dict[str, Any], run
     })
     score_run(record)
     return record
+
+
+def run_failed(run: dict[str, Any]) -> bool:
+    """Errored, wrong department (non-urgent), or urgent case not intercepted."""
+    score_run(run)
+    if run["error"]:
+        return True
+    return not run["urgent_intercepted"] if run["expect_urgent"] else not run["final_in_accept"]
+
+
+def run_tokens(run: dict[str, Any], bucket: str) -> int:
+    return ((run.get("tokens") or {}).get(bucket) or {}).get("total_tokens", 0)
 
 
 def safety_stopped(run: dict[str, Any]) -> bool:
@@ -354,12 +427,15 @@ def summarize(runs: list[dict[str, Any]]) -> dict[str, Any]:
         "errors": sum(1 for run in runs if run["error"]),
         "end_reasons": dict(Counter(run["end_reason"] for run in runs)),
         "recommend_status": dict(Counter(str(run["recommend_http_status"]) for run in runs)),
+        "backend_tokens_total": sum(run_tokens(run, "backend") for run in runs),
+        "simulator_tokens_total": sum(run_tokens(run, "simulator") for run in runs),
+        "failed_case_ids": sorted({run["case_id"] for run in runs if run_failed(run)}),
     }
 
 
 def print_table(runs: list[dict[str, Any]], summary: dict[str, Any]) -> None:
     print("case_id\trun\tend\tfinal\tok\tever_cand\tturn1_top\tturns\tclues\trepeat\turgent\tstopped\trec"
-          "\tavg_s\tmax_s\terror")
+          "\tavg_s\tmax_s\tbe_tok\tsim_tok\terror")
     for run in map(score_run, runs):
         print("\t".join(str(value) for value in (
             run["case_id"], run["run"], run["end_reason"], run["final_department"], run["final_in_accept"],
@@ -367,7 +443,7 @@ def print_table(runs: list[dict[str, Any]], summary: dict[str, Any]) -> None:
             f"{run.get('first_turn_top_candidate')}({run.get('first_turn_top_in_accept')})",
             run["total_turns"], run["clue_questions"], run["repeated_concepts"],
             run["urgent_detected"], run["safety_stopped"], run["recommend_http_status"], run["avg_turn_seconds"],
-            run["max_turn_seconds"],
+            run["max_turn_seconds"], run_tokens(run, "backend"), run_tokens(run, "simulator"),
             (run["error"] or "")[:80],
         )))
     print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -375,8 +451,11 @@ def print_table(runs: list[dict[str, Any]], summary: dict[str, Any]) -> None:
 
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description="Conversation benchmark against /chat with real AI.")
-    parser.add_argument("--repeat", type=int, default=2)
+    parser.add_argument("--repeat", type=int, default=1)
     parser.add_argument("--case", action="append", help="只跑指定案例 id（可重複）")
+    parser.add_argument("--tier", choices=("full", "smoke"), default="full",
+                        help="smoke 只跑 cases.yaml 標 smoke: true 的精簡組")
+    parser.add_argument("--rerun-failed", type=Path, help="只重跑這份既有結果 JSON 裡失敗的案例")
     parser.add_argument("--out", type=Path, default=Path(tempfile.gettempdir()) / "benchmark_results.json")
     parser.add_argument("--summarize", type=Path, help="只讀取既有結果 JSON 並輸出總表")
     parser.add_argument("--base-url", help="有給就以 HTTP 呼叫該網址的 /chat、/recommend；沒給才用 TestClient")
@@ -398,8 +477,19 @@ def main(argv: list[str] | None = None) -> int:
         missing = wanted - {case["id"] for case in cases}
         if missing:
             parser.error(f"未知案例：{sorted(missing)}")
+    if args.tier == "smoke":
+        cases = [case for case in cases if case.get("smoke")]
+    if args.rerun_failed:
+        previous = json.loads(args.rerun_failed.read_text(encoding="utf-8"))["runs"]
+        failed = {run["case_id"] for run in previous if run_failed(run)}
+        cases = [case for case in cases if case["id"] in failed]
+        if not cases:
+            print(f"{args.rerun_failed} 沒有需要重跑的失敗案例。")
+            return 0
+    print(f"將執行 {len(cases)} 個案例 × {args.repeat} 次：{[case['id'] for case in cases]}", flush=True)
 
-    simulator = PatientSimulator()
+    meter = TokenMeter()
+    simulator = PatientSimulator(meter)
     runs: list[dict[str, Any]] = []
     started_at = time.strftime("%Y-%m-%dT%H:%M:%S")
     wall_started = time.perf_counter()
@@ -414,6 +504,7 @@ def main(argv: list[str] | None = None) -> int:
 
         from app.main import app
 
+        install_backend_meter(meter)
         client_context = TestClient(app)
     with client_context as client:
         for case in cases:
@@ -424,7 +515,8 @@ def main(argv: list[str] | None = None) -> int:
                     f"[{case['id']} #{run_index}] end={run['end_reason']} dept={run['final_department']} "
                     f"ok={run['final_in_accept']} turns={run['total_turns']} urgent={run['urgent_detected']} "
                     f"stopped={run['safety_stopped']} "
-                    f"rec={run['recommend_http_status']} err={run['error']}",
+                    f"rec={run['recommend_http_status']} tokens(be/sim)={run_tokens(run, 'backend')}/"
+                    f"{run_tokens(run, 'simulator')} err={run['error']}",
                     flush=True,
                 )
                 args.out.parent.mkdir(parents=True, exist_ok=True)

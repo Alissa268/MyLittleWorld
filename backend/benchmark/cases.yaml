@@ -4,6 +4,7 @@
 # patient_mode:
 #   simulate     模擬病人依 present/absent 回答
 #   always_unknown  每題一律回答「不知道」
+# smoke: true 的案例屬於 --tier smoke 的精簡組（日常檢查用，省 AI 額度）
 
 cases:
   - id: c01_back_pain_monday
@@ -21,6 +22,7 @@ cases:
     expect_urgent: false
 
   - id: c03_dizziness_tinnitus
+    smoke: true
     opening: 最近常常頭暈
     present: [耳鳴, 聽力變差]
     absent: []
@@ -28,6 +30,7 @@ cases:
     expect_urgent: false
 
   - id: c04_cough_two_weeks
+    smoke: true
     opening: 咳嗽咳了兩個禮拜
     present: [有痰, 走路會喘]
     absent: [發燒, 咳血]
@@ -63,6 +66,7 @@ cases:
     expect_urgent: false
 
   - id: c09_right_knee_pain
+    smoke: true
     opening: 右膝蓋痛三天
     present: [走路會痛, 有點腫]
     absent: []
@@ -127,6 +131,7 @@ cases:
     expect_urgent: false
 
   - id: c18_unknown_patient
+    smoke: true
     opening: 我不太舒服
     patient_mode: always_unknown
     present: []
@@ -135,6 +140,7 @@ cases:
     expect_urgent: false
 
   - id: c19_urgent_chest_pain
+    smoke: true
     opening: 突然胸口很痛
     present: [冒冷汗, 喘不過氣]
     absent: []
