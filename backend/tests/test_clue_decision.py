@@ -61,7 +61,8 @@ def new_case(case_id):
     return case
 
 
-def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, convergence=None, ttas=None, act=None):
+def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, convergence=None, ttas=None, act=None,
+         answer=None):
     """One /chat turn with real department reasoning; the planner always fails, so clues use the template."""
     concepts = clues.pending_clue_concepts(case.conversation_state)
     pending = None
@@ -72,6 +73,7 @@ def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, conver
             concept_answers=[dict(concept=name, answer_assertion=assertion(name) if callable(assertion) else assertion,
                                   source_text=message, confidence=0.95) for name in concepts],
         )
+    pending = answer or pending
     save_case(case)
     settings = SimpleNamespace(cerebras_api_key="test-key")
     semantic = AsyncMock(return_value=json.dumps(dict(
@@ -555,7 +557,7 @@ def test_benchmark_family_medicine_fallbacks_take_the_ai_ranked_department(name)
 
 def test_decline_decides_from_current_evidence_without_another_clue_question():
     case = decision_case(asked=1)
-    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    case.conversation_state.clue_user_declined = True
     reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], [*TIED, hit(A, "暈")], ACTIVE)
     decision = case.conversation_state.clue_decision
     assert (decision.kind, decision.dept_id, decision.reason) == ("decide", A, "user_declined")
@@ -564,13 +566,13 @@ def test_decline_decides_from_current_evidence_without_another_clue_question():
 
 def test_decline_tie_takes_the_ai_ranked_department_else_family_medicine():
     case = ranked(decision_case(asked=1), [C, B, A])
-    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    case.conversation_state.clue_user_declined = True
     reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
     decision = case.conversation_state.clue_decision
     assert (decision.kind, decision.dept_id, decision.reason) == ("decide", B, "tie_broken_by_ai_rank")
 
     case = ranked(decision_case(asked=1), [C])
-    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    case.conversation_state.clue_user_declined = True
     reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
     decision = case.conversation_state.clue_decision
     assert (decision.kind, decision.reason) == ("family_medicine", "user_declined")
@@ -591,3 +593,33 @@ def test_declining_a_pending_clue_question_skips_the_reask_and_asks_for_confirma
     assert case.conversation_state.pending_clue_question_index is None
     assert all(record.answer != "unanswered" for record in case.conversation_state.clue_concepts_asked)
     assert_waiting_confirmation(body, state["clue_decision"]["dept_id"])
+
+
+def test_decline_is_remembered_so_a_later_turn_does_not_ask_clue_questions_again():
+    # 310 report 2026-10-30: after "我不想回答了，直接給我結果" and the time question, the next
+    # turn recomputed departments without the decline and asked another clue question.
+    case, _ = dizzy_start("decline-remembered")
+    case.conversation_state.clarification_evidence = {"onset_time": "昨天開始"}
+    # As on 310: the time question comes after the decision, before confirmation.
+    case.conversation_state.availability_status = "not_asked"
+    case, body = turn(case, "我不想回答了，直接給我結果", act="decline_further_questions")
+    assert case.conversation_state.clue_user_declined is True
+    assert body["next_question"] == conversation_service.AVAILABILITY_QUESTION
+    decided = body["conversation_state"]["clue_decision"]["dept_id"]
+    case, body = turn(case, "都可以吧", act="answer", answer=dict(
+        answered_intent=conversation_service.AVAILABILITY_PENDING_INTENT, answer_status="answered",
+        answer_source_text="都可以吧", answer_confidence=0.95))
+    assert body["conversation_state"]["last_dialogue_act"] == "answer"
+    state = body["conversation_state"]
+    assert (state["clue_decision"]["kind"], state["clue_decision"]["dept_id"]) == (
+        body["conversation_state"]["clue_decision"]["kind"], decided)
+    assert state["clue_decision"]["reason"] in {"user_declined", "tie_broken_by_ai_rank"}
+    assert case.conversation_state.pending_clue_question_index is None
+    assert state["reply_source"] != "CLUE_TEMPLATE"
+
+
+def test_revision_clears_the_decline():
+    case = decision_case()
+    case.conversation_state.clue_user_declined = True
+    chat_route._begin_revision(case)
+    assert case.conversation_state.clue_user_declined is False

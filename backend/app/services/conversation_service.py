@@ -704,7 +704,7 @@ def safety_net_family_medicine_reason(case: TriageCase, user_sources: list[str])
     if state.safety_net_choice == "family_medicine":
         return "safety_net_choice"
     # Reached only when decide() found no candidate department to settle on.
-    if state.last_dialogue_act == "decline_further_questions":
+    if state.clue_user_declined:
         return "user_declined_no_candidates"
     # advance_conversation adds this turn's messages afterwards.
     if state.turn_count + len(user_sources) >= get_settings().hard_turn_cap:

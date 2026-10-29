@@ -227,6 +227,8 @@ async def chat(req: ChatRequest) -> TriageResult:
         case.conversation_state.last_dialogue_act = validated_dialogue_act(
             getattr(ai_suggestion, "dialogue_act", None), user_text_parts,
         )
+        if case.conversation_state.last_dialogue_act == "decline_further_questions":
+            case.conversation_state.clue_user_declined = True
         if ai_suggestion is not None and getattr(ai_suggestion, "department_preference", None) is not None:
             department_preference_name = ai_suggestion.department_preference.department_name
         if free_text_request and not ai_available and not safety_check_turn:
@@ -609,6 +611,7 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.clue_questions_asked = 0
     case.conversation_state.clue_concepts_asked = []
     case.conversation_state.clue_tiebreak_used = False
+    case.conversation_state.clue_user_declined = False
     case.conversation_state.department_clue_offer = []
     case.conversation_state.department_clue_candidates = []
     case.conversation_state.pending_clue_question_index = None

@@ -390,6 +390,8 @@ class ConversationState(BaseModel):
     clue_questions_asked: int = Field(default=0, ge=0)
     clue_concepts_asked: List[ClueConceptRecord] = Field(default_factory=list)
     clue_tiebreak_used: bool = False
+    # The patient declined further questions; kept until revision so later turns settle on current evidence.
+    clue_user_declined: bool = False
     # Recomputed every department turn, like candidate_departments.
     department_clue_offer: List[ClueOffer] = Field(default_factory=list)
     department_clue_candidates: List[int] = Field(default_factory=list)
