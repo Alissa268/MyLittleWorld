@@ -832,7 +832,7 @@ def test_control_safety_explanation_does_not_consume_answer_attempt(runtime, cap
     assert state["clarification_status"] == "safety_check"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
     assert result["triage_case"]["patient_input"]["red_flags_status"] == "not_checked"
-    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]}"
     assert state["reply_source"] == "AI_PLANNER"
     department.assert_not_awaited()
     planner.assert_awaited_once()

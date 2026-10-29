@@ -93,7 +93,7 @@ def test_legacy_reply_flag_does_not_disable_natural_question_planner(runtime, re
     assert result["question_batch"] == []
 
 
-def test_live_loop_is_focused_and_bounded_without_invented_negative(runtime):
+def test_live_loop_restates_the_checklist_and_is_bounded_without_invented_negative(runtime):
     client, interpreter, planner, department = runtime
     respond(interpreter, [evidence("symptom", "頭痛", "頭很痛"), evidence("body_part", "頭", "頭", None)])
     first = client.post("/chat", json=dict(message="我現在頭很痛")).json()
@@ -109,10 +109,10 @@ def test_live_loop_is_focused_and_bounded_without_invented_negative(runtime):
         result = client.post("/chat", json=dict(case_id=case_id, message=text)).json()
         assert not result["triage_case"]["patient_input"]["red_flags_checked"]
         assert result["triage_case"]["patient_input"]["red_flags"] == []
-        assert result["next_question"] != QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
         assert result["conversation_state"]["confirmed"] is False
-        if index == 0:
-            assert result["next_question"] == question
+        if index < 2:
+            # The planner's focused question is never shown; the full checklist is restated.
+            assert result["next_question"] == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
     assert interpreter.await_count == 4
     assert result["conversation_state"]["safety_answer_attempts"] == 3
     assert result["conversation_state"]["clarification_status"] == "unresolved"
@@ -121,6 +121,30 @@ def test_live_loop_is_focused_and_bounded_without_invented_negative(runtime):
     assert {e["normalized_value"][0] for e in result["triage_case"]["semantic_extractions"] if e["field"] == "accompanying_symptoms"} == {"頭暈"}
     department.assert_not_awaited()
     assert client.post("/recommend", json=dict(case_id=case_id, visit_type="initial")).status_code == 400
+
+
+def test_denial_after_uncertain_answers_completes_the_screen(runtime):
+    # 310 report 2026-10-30: focused single-item denials were partial and could never complete the
+    # screen, so a patient denying everything still hit the three-attempt cap.
+    client, interpreter, planner, department = runtime
+    respond(interpreter, [evidence("symptom", "頭暈", "頭腦昏沉"), evidence("onset", "最近", "最近")])
+    first = client.post("/chat", json=dict(message="我最近頭腦昏沉食慾不振")).json()
+    assert first["conversation_state"]["clarification_status"] == "safety_check"
+    case_id = first["case_id"]
+    planner.return_value = json.dumps(dict(status="clarification_needed", question="請問最近是否有劇烈頭痛？",
+        intent="safety_screen", reason="安全面向尚未確認", information_needs=["是否突然發生"],
+        explanation="「意識不清」指叫不醒或認不得人，不是頭昏，「突發」指突然出現。"))
+    for text in ("最近意識昏沉，因為頭暈，這算嗎", "不是突然出現的，就是這幾天都這樣"):
+        respond(interpreter, answer=pending(text, "partial", "uncertain"))
+        result = client.post("/chat", json=dict(case_id=case_id, message=text)).json()
+        assert result["next_question"].endswith(QUESTION_TEXTS[RED_FLAG_QUESTION_KEY])
+        assert result["next_question"].startswith("「意識不清」指叫不醒")
+    department.reset_mock()
+    respond(interpreter, answer=pending("沒有"))
+    result = client.post("/chat", json=dict(case_id=case_id, message="沒有")).json()
+    assert result["triage_case"]["patient_input"]["red_flags_status"] == "negative"
+    assert result["conversation_state"]["clarification_status"] != "unresolved"
+    department.assert_awaited_once()
 
 
 def test_complete_grounded_denial_reconnects_department(runtime):

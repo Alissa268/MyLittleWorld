@@ -203,7 +203,7 @@ def test_safety_explanation_keeps_attempts_and_shows_explanation(runtime):
     assert state["safety_answer_attempts"] == 1
     assert state["safety_answer_validation"] == "request_explanation"
     assert state["clarification_status"] == "safety_check"
-    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{SAFETY_EXPLANATION_QUESTION}"
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
     assert result["reply"] != cs.SAFETY_RETRY_REPLY
     assert state["reply_source"] == "AI_PLANNER"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
@@ -216,13 +216,13 @@ def test_safety_explanation_degrades_without_technical_fallback(runtime):
     result = ask_explanation(client, interpreter, active_safety_case())
     state = result["conversation_state"]
     assert state["safety_answer_attempts"] == 1
-    assert result["reply"] == SAFETY_EXPLANATION_QUESTION
+    assert result["reply"] == CHECKLIST
     assert state["question_rejection_reason"] == "explanation_degraded"
     assert state["reply_source"] == "AI_REPAIR"
     assert result["reply"] not in {cs.SAFETY_RETRY_REPLY, cs.TECHNICAL_CLARIFICATION_REPLY}
 
 
-def test_earlier_explained_safety_question_is_not_reused(runtime):
+def test_safety_explanation_restates_the_checklist_after_earlier_turns(runtime):
     client, interpreter, planner, _ = runtime
     case = active_safety_case()
     case.history_records.append(
@@ -230,8 +230,9 @@ def test_earlier_explained_safety_question_is_not_reused(runtime):
     case.history_records.append(Message(role="assistant", content=CHECKLIST))
     planner.return_value = json.dumps(safety_explanation_plan(), ensure_ascii=False)
     result = ask_explanation(client, interpreter, case)
-    assert result["conversation_state"]["question_rejection_reason"] == "duplicate_question"
-    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+    # The safety screen always restates the full checklist, so repeats are expected there.
+    assert result["conversation_state"]["question_rejection_reason"] is None
+    assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
 
 
 CHECKLIST = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
@@ -256,16 +257,15 @@ def test_safety_explanation_may_restate_explained_checklist(runtime):
     planner.assert_awaited_once()
 
 
-def test_restated_checklist_without_explanation_is_rejected_not_degraded(runtime):
+def test_restated_checklist_without_explanation_degrades_to_the_checklist(runtime):
     client, interpreter, planner, _ = runtime
     planner.return_value = restate_checklist(None)
     result = ask_explanation(client, interpreter, active_safety_case())
     state = result["conversation_state"]
     assert planner.await_count == 2
-    assert "duplicate_question" in planner.await_args_list[1].args[0]
-    assert state["question_rejection_reason"] == "duplicate_question"
-    assert state["question_repair_attempted"] is True
-    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+    assert "missing_or_invalid_explanation" in planner.await_args_list[1].args[0]
+    assert state["question_rejection_reason"] == "explanation_degraded"
+    assert result["reply"] == CHECKLIST
 
 
 def test_restated_checklist_repair_may_add_explanation(runtime):

@@ -16,6 +16,7 @@ from test_phase7_natural_safety import runtime, evidence, pending, respond
 
 ACTIVE = [{"dept_id": 1333, "parent_dept": "耳鼻喉部", "child_dept": "耳科"}]
 QUESTION = "我想確認這次頭痛是否突然開始？"
+CHECKLIST = cs.QUESTION_TEXTS[cs.RED_FLAG_QUESTION_KEY]
 EXPLANATION = "突然開始是指頭痛在很短時間內變得很明顯，這能幫助確認是否需要優先處理。"
 
 
@@ -38,7 +39,8 @@ def test_safety_explanation_has_ai_question_or_technical_failure(runtime, succes
     assert state["safety_answer_attempts"] == 0
     assert state["clarification_status"] == "safety_check"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
-    assert result["reply"] == (f"{EXPLANATION}\n{QUESTION}" if success else cs.TECHNICAL_CLARIFICATION_REPLY)
+    # The AI question is never shown during the safety screen; the full checklist always is.
+    assert result["reply"] == (f"{EXPLANATION}\n{CHECKLIST}" if success else cs.TECHNICAL_CLARIFICATION_REPLY)
     assert state["reply_source"] == ("AI_PLANNER" if success else "TECHNICAL_FALLBACK")
     assert planner.await_count == (1 if success else 2)
     department.assert_not_awaited()
@@ -57,7 +59,7 @@ def test_unclear_medical_safety_answer_still_uses_three_attempt_cap(runtime):
         assert result["conversation_state"]["safety_answer_attempts"] == attempt
         assert not result["triage_case"]["patient_input"]["red_flags_checked"]
         if attempt < 3:
-            assert result["reply"] == cs.SAFETY_RETRY_REPLY
+            assert result["reply"] == f"{cs.SAFETY_RETRY_REPLY}\n{CHECKLIST}"
     assert result["conversation_state"]["clarification_status"] == "unresolved"
     department.assert_not_awaited()
 

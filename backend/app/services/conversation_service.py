@@ -230,8 +230,10 @@ async def request_clarification(
         "answered_intent、answer_source_text、answer_status、answer_confidence 必須全部輸出 null。"
     )
     prompt = (
-        ("目前仍在安全澄清，不能改問科別問題。只針對目前原文與已接受證據中仍未確認的一個安全面向自然追問，"
-         "不要重貼整份安全清單，不要把不知道、離題或部分否認當成整份陰性；不得新增醫療判級規則。"
+        ("目前仍在安全澄清，不能改問科別問題。Backend 一律重問完整的 safety_screen_question，不採用你的 question，"
+         "所以不要拆成單項追問；question 原樣填 safety_screen_question。使用者不確定、部分回答或要求解釋時，"
+         "在 explanation 用 1～2 句白話說明清單中相關症狀的意思（例如「意識不清」指叫不醒、認不得人，"
+         "不是頭昏，「突發」指突然出現），explanation 不得含問號或分號，不要把不知道、離題或部分否認當成整份陰性；不得新增醫療判級規則。"
          "intent 必須為 safety_screen；即使你認為已足夠，Backend 仍決定安全狀態。" if safety_planning else "") +
         "你是醫療問診的自然澄清問題規劃器，只提出目前最能降低不確定性的一個追問。"
         "question 與 explanation 必須使用台灣繁體中文，不得使用簡體字。"
@@ -311,8 +313,8 @@ async def request_clarification(
             case.case_id, rejection is None, rejection, bool(attempt),
         )
         if rejection is None:
-            return _accepted_suggestion(proposal, attempt, initial_rejection, keep_explanation=explanation_required,
-                                        clue=clue)
+            return _accepted_suggestion(proposal, attempt, initial_rejection,
+                                        keep_explanation=explanation_required or safety_planning, clue=clue)
         if attempt == 0:
             initial_rejection = rejection
             repair_context = dict(payload, original_proposal=proposal if proposal is not None else str(raw),
@@ -323,7 +325,7 @@ async def request_clarification(
                 "question 與 explanation 必須使用台灣繁體中文，不得使用簡體字"
                 "（rejection_reason=simplified_chinese_output 即表示含簡體字）；"
                 "若 rejection_reason=missing_or_invalid_explanation，保留合格 question 並補上合格 explanation。"
-                "若 rejection_reason=duplicate_question 或 repeated_safety_checklist：只有 dialogue_act.act="
+                "若 rejection_reason=duplicate_question：只有 dialogue_act.act="
                 "request_explanation 且附上合格 explanation 時，才可原樣重問上一題；否則改問同一面向、"
                 "未曾問過的一個聚焦問題。\n"
                 + json.dumps(repair_context, ensure_ascii=False)
@@ -419,7 +421,8 @@ def _accepted_suggestion(proposal: dict, attempt: int, rejection_reason: str | N
         repair_attempted=bool(attempt) if repair_attempted is None else repair_attempted,
         reply_source="AI_REPAIR" if attempt else "AI_PLANNER",
         # AI explanations are kept only for a validated request_explanation turn; otherwise dropped.
-        explanation=proposal["explanation"].strip() if keep_explanation and clarifying else None,
+        explanation=(proposal["explanation"].strip()
+                     if keep_explanation and clarifying and isinstance(proposal.get("explanation"), str) else None),
         clue_concepts=selected,
         clue_dept_id=min(common) if common else None,
     )
@@ -461,10 +464,11 @@ def _repeated_question(case: TriageCase, question: str, *, dialogue_act: str | N
     if (dialogue_act == "request_explanation" and _valid_explanation(explanation)
             and question == _explained_question(case)):
         return None
+    # The safety screen always restates the full question (continue_safety_check).
+    if safety_planning:
+        return None
     if _asked_before(case, question, since):
         return "duplicate_question"
-    if safety_planning and question == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]:
-        return "repeated_safety_checklist"
     return None
 
 
@@ -922,18 +926,18 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
     if state.turn_count >= get_settings().hard_turn_cap or state.safety_answer_attempts >= SAFETY_ANSWER_CAP:
         _safety_unresolved(case)
         return
-    question = suggestion.question if suggestion and suggestion.intent == SAFETY_PENDING_INTENT else None
-    if not question or _repeated_question(case, question, dialogue_act=state.last_dialogue_act,
-                                          explanation=suggestion.explanation, safety_planning=True):
-        if state.safety_answer_validation == "request_explanation":
-            question = TECHNICAL_CLARIFICATION_REPLY
-            state.reply_source = "TECHNICAL_FALLBACK"
-        else:
-            question = SAFETY_RETRY_REPLY
-            state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
-    else:
+    # Always the full question: a focused single-item denial is partial and could never complete the screen.
+    question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+    if suggestion is not None and suggestion.intent == SAFETY_PENDING_INTENT:
         state.reply_source = suggestion.reply_source
-        question = _with_explanation(suggestion, question)
+        if _valid_explanation(suggestion.explanation):
+            question = f"{suggestion.explanation.strip()}\n{question}"
+    elif state.safety_answer_validation == "request_explanation":
+        question = TECHNICAL_CLARIFICATION_REPLY
+        state.reply_source = "TECHNICAL_FALLBACK"
+    else:
+        question = f"{SAFETY_RETRY_REPLY}\n{question}"
+        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     state.clarification_status = "safety_check"
     state.last_question_key = RED_FLAG_QUESTION_KEY
     state.is_complete = False
