@@ -131,13 +131,14 @@ def settle_unanswered_clue_question(case: TriageCase) -> None:
 
     Runs before department reasoning, only on turns the Turn Interpreter completed. The first
     miss re-asks the same concepts once; the second marks its unanswered concepts uncertain and
-    releases the pending question. Its question count is never changed.
+    releases the pending question. Its question count is never changed. A patient declining
+    further questions releases it at once so decide() can run this turn.
     """
     state = case.conversation_state
     index = clues.pending_clue_index(state)
     if index is None or state.last_dialogue_act == "request_explanation":
         return
-    if state.clue_reask_count < 1:
+    if state.clue_reask_count < 1 and state.last_dialogue_act != "decline_further_questions":
         state.clue_reask_count += 1
         logger.info("clue question case_id=%s index=%s reask=true", case.case_id, index)
         return
@@ -681,7 +682,8 @@ def _capture_safety_net_choice(
 
 
 def safety_net_family_medicine_reason(case: TriageCase, user_sources: list[str]) -> str | None:
-    """Why this turn routes to family medicine: the patient's safety-net choice or the hard turn cap.
+    """Why this turn routes to family medicine: the patient's safety-net choice, declining further
+    questions with no candidate department, or the hard turn cap.
 
     Only once the safety screen is complete and the department is still undecided; TTAS urgency
     is handled before this is reached.
@@ -692,6 +694,9 @@ def safety_net_family_medicine_reason(case: TriageCase, user_sources: list[str])
         return None
     if state.safety_net_choice == "family_medicine":
         return "safety_net_choice"
+    # Reached only when decide() found no candidate department to settle on.
+    if state.last_dialogue_act == "decline_further_questions":
+        return "user_declined_no_candidates"
     # advance_conversation adds this turn's messages afterwards.
     if state.turn_count + len(user_sources) >= get_settings().hard_turn_cap:
         return "safety_net_turn_cap"

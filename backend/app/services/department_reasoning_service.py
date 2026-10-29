@@ -454,7 +454,7 @@ def apply_clue_decision(
         ai_resolved_dept_id=ai_resolved, candidates=candidates,
         scores=clues.department_scores(retrieved, candidates, state.clue_concepts_asked, records),
         askable=askable, questions_asked=state.clue_questions_asked, tiebreak_used=state.clue_tiebreak_used,
-        user_declined=False,
+        user_declined=state.last_dialogue_act == "decline_further_questions",
         clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates, records),
         question_limit=settings.clue_question_limit, non_target_dept_ids={settings.family_medicine_dept_id},
         ai_order=[item.dept_id for item in state.candidate_departments],

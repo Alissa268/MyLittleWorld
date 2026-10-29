@@ -1,4 +1,5 @@
 """Step 11 safety net: one turn-8 choice and the turn-20 family medicine cap; all AI and SQL are mocked."""
+import json
 from unittest.mock import patch
 
 import pytest
@@ -215,3 +216,25 @@ def test_prior_answer_reference_cannot_answer_the_safety_net_question():
     act = DialogueActInterpretation(act="claims_already_answered", source_text="我說過了", confidence=0.9)
     reference = dict(answered_intent=cs.SAFETY_NET_PENDING_INTENT, answer_source_text="頭暈", answer_confidence=0.9)
     assert cs.validate_prior_answer_reference(reference, act, cs.SAFETY_NET_PENDING_INTENT, (), ["頭暈"]) is None
+
+
+def test_declining_further_questions_with_no_candidate_department_routes_to_family_medicine(runtime):
+    client, interpreter, _, _ = runtime
+    case = ambiguous_case(3)
+    respond(interpreter)
+    payload = json.loads(interpreter.return_value)
+    payload["dialogue_act"] = dict(act="decline_further_questions", source_text="我說不出更多了", confidence=0.95)
+    interpreter.return_value = json.dumps(payload, ensure_ascii=False)
+    result = post(client, case, "我說不出更多了")
+    assert_family_medicine_confirmation(result, "user_declined_no_candidates")
+
+
+def test_declining_before_the_safety_screen_is_complete_never_routes_to_family_medicine(runtime):
+    client, interpreter, _, _ = runtime
+    case = ambiguous_case(3, safety_done=False, case_id="safety-net-decline-open-screen")
+    respond(interpreter)
+    payload = json.loads(interpreter.return_value)
+    payload["dialogue_act"] = dict(act="decline_further_questions", source_text="不想回答", confidence=0.95)
+    interpreter.return_value = json.dumps(payload, ensure_ascii=False)
+    result = post(client, case, "不想回答")
+    assert result["conversation_state"]["clue_decision"] is None and result["department_result"] is None

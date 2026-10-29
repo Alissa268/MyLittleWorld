@@ -61,7 +61,7 @@ def new_case(case_id):
     return case
 
 
-def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, convergence=None, ttas=None):
+def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, convergence=None, ttas=None, act=None):
     """One /chat turn with real department reasoning; the planner always fails, so clues use the template."""
     concepts = clues.pending_clue_concepts(case.conversation_state)
     pending = None
@@ -77,7 +77,7 @@ def turn(case, message, extractions=(), assertion=None, *, active=ACTIVE, conver
     semantic = AsyncMock(return_value=json.dumps(dict(
         semantic_extractions=list(extractions), pending_answer=pending, ttas_evidence=ttas or [],
         time_preferences=[], prior_answer_reference=None, department_preference=None,
-        dialogue_act=dict(act="answer" if pending else "new_information", source_text=message, confidence=0.99),
+        dialogue_act=dict(act=act or ("answer" if pending else "new_information"), source_text=message, confidence=0.99),
     ), ensure_ascii=False))
     with patch.object(chat_route, "get_settings", return_value=settings), patch.object(
         rag_triage_adapter, "get_settings", return_value=settings,
@@ -549,3 +549,45 @@ def test_benchmark_family_medicine_fallbacks_take_the_ai_ranked_department(name)
     assert (decision.kind, decision.dept_id, decision.reason) == ("decide", order[0], "tie_broken_by_ai_rank")
     assert set(decision.tied_dept_ids) == tied
     assert case.department_result.dept_id == order[0]
+
+
+# --- Commit 6: decline_further_questions ------------------------------------------------------------
+
+def test_decline_decides_from_current_evidence_without_another_clue_question():
+    case = decision_case(asked=1)
+    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], [*TIED, hit(A, "暈")], ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", A, "user_declined")
+    assert case.department_result.dept_id == A and case.conversation_state.department_status == "resolved"
+
+
+def test_decline_tie_takes_the_ai_ranked_department_else_family_medicine():
+    case = ranked(decision_case(asked=1), [C, B, A])
+    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.dept_id, decision.reason) == ("decide", B, "tie_broken_by_ai_rank")
+
+    case = ranked(decision_case(asked=1), [C])
+    case.conversation_state.last_dialogue_act = "decline_further_questions"
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)
+    decision = case.conversation_state.clue_decision
+    assert (decision.kind, decision.reason) == ("family_medicine", "user_declined")
+    assert case.department_result.dept_id == FAMILY
+
+
+def test_declining_a_pending_clue_question_skips_the_reask_and_asks_for_confirmation():
+    case, body = dizzy_start("decline-pending")
+    assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
+    asked = case.conversation_state.clue_questions_asked
+    # A completed safety screen implies grounded details were already collected.
+    case.conversation_state.clarification_evidence = {"onset_time": "昨天開始"}
+    case, body = turn(case, "我不想再回答了，直接幫我選科", act="decline_further_questions")
+    state = body["conversation_state"]
+    assert state["clue_decision"]["kind"] in {"decide", "family_medicine"}
+    assert state["clue_decision"]["reason"] in {"user_declined", "tie_broken_by_ai_rank"}
+    assert case.conversation_state.clue_questions_asked == asked
+    assert case.conversation_state.pending_clue_question_index is None
+    assert all(record.answer != "unanswered" for record in case.conversation_state.clue_concepts_asked)
+    assert_waiting_confirmation(body, state["clue_decision"]["dept_id"])

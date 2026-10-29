@@ -91,7 +91,7 @@ class SemanticExtraction(BaseModel):
 
 class DialogueActInterpretation(BaseModel):
     act: Literal["answer", "request_explanation", "claims_already_answered", "correction",
-                 "new_information", "unknown", "off_topic"] = "unknown"
+                 "new_information", "decline_further_questions", "unknown", "off_topic"] = "unknown"
     source_text: str = ""
     confidence: float = Field(default=0.0, ge=0, le=1, allow_inf_nan=False, strict=True)
 
