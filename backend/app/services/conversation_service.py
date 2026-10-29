@@ -29,6 +29,11 @@ SAFETY_UNRESOLVED_REPLY = (
     "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
     "若情況緊急，請立即尋求緊急醫療協助。"
 )
+# A patient-reported positive safety answer stops at once; it asserts no TTAS level.
+SAFETY_POSITIVE_REPLY = (
+    "您回報的狀況可能需要立即處理，線上問診無法判斷嚴重程度，因此不會繼續掛號導引。"
+    "請立即前往急診；情況危急請撥打 119。"
+)
 SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
 SAFETY_PENDING_INTENT = "safety_screen"
 AVAILABILITY_PENDING_INTENT = "appointment_availability"
@@ -810,6 +815,13 @@ def capture_safety_screen_answer(
     if _safety_positive_answer(case, suggestion, user_sources):
         state.safety_positive_reported = True
         logger.info("safety answer case_id=%s positive_reported=true", case.case_id)
+        if _patient_reported_positive(suggestion, user_sources):
+            # The patient said yes to the screen: stop now instead of asking the remaining items.
+            state.safety_answer_validation = "patient_reported_positive"
+            _safety_unresolved(case)
+            logger.info("safety answer accepted=false reason=patient_reported_positive attempt=%s",
+                        state.safety_answer_attempts)
+            return False
     if (
         case.conversation_state.clarification_status != "safety_check"
         or suggestion is None
@@ -861,20 +873,29 @@ def capture_safety_screen_answer(
     return True
 
 
-def _safety_positive_answer(
-    case: TriageCase, suggestion: PendingAnswerInterpretation | None, user_sources: list[str],
+def _patient_reported_positive(
+    suggestion: PendingAnswerInterpretation | None, user_sources: list[str],
 ) -> bool:
-    """A grounded, confident present answer, or validated TTAS evidence this turn reports as true.
+    """A grounded, confident present answer to the screen.
 
     A partial answer counts too: "有半邊無力，其他沒有" is a partial denial that still reports one item.
     """
-    if (suggestion is not None and suggestion.answer_status in {"answered", "partial"}
-            and suggestion.answer_assertion == "present"
-            and suggestion.answer_confidence >= ACCEPT_THRESHOLD
-            and _grounded_clarification_answer(
-                suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
-                suggestion.answer_confidence, SAFETY_PENDING_INTENT, user_sources,
-            )):
+    return bool(
+        suggestion is not None and suggestion.answer_status in {"answered", "partial"}
+        and suggestion.answer_assertion == "present"
+        and suggestion.answer_confidence >= ACCEPT_THRESHOLD
+        and _grounded_clarification_answer(
+            suggestion.answered_intent, suggestion.answer_source_text, suggestion.answer_status,
+            suggestion.answer_confidence, SAFETY_PENDING_INTENT, user_sources,
+        )
+    )
+
+
+def _safety_positive_answer(
+    case: TriageCase, suggestion: PendingAnswerInterpretation | None, user_sources: list[str],
+) -> bool:
+    """The patient's present answer, or validated TTAS evidence this turn reports as true."""
+    if _patient_reported_positive(suggestion, user_sources):
         return True
     return any(
         item.semantic_status == "available" and item.value is True and item.confidence >= ACCEPT_THRESHOLD

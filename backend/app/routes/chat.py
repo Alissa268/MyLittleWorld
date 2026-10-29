@@ -20,6 +20,7 @@ from app.services.chat_perf import (
 from app.services.conversation_service import (
     FAMILY_MEDICINE_UNAVAILABLE_REPLY,
     UNRESOLVED_REPLY,
+    SAFETY_POSITIVE_REPLY,
     SAFETY_UNRESOLVED_REPLY,
     SAFETY_ANSWER_CAP,
     adopt_safety_net_family_medicine,
@@ -433,7 +434,10 @@ async def chat(req: ChatRequest) -> TriageResult:
         reply = case.triage.warning_message or URGENT_WARNING_FALLBACK
     elif case.conversation_state.clarification_status == "unresolved":
         decision = case.conversation_state.clue_decision
+        if case.conversation_state.safety_positive_reported:
+            case.conversation_state.reply_source = "SAFETY_POSITIVE_STOP"
         reply = (
+            SAFETY_POSITIVE_REPLY if case.conversation_state.safety_positive_reported else
             SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else
             FAMILY_MEDICINE_UNAVAILABLE_REPLY if decision and decision.kind == "family_medicine_unavailable" else
             UNRESOLVED_REPLY

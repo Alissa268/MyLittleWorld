@@ -1,5 +1,8 @@
 """1B: an accepted positive safety answer is never overridden by a later denial.
 
+2026-10-30: the patient's own "yes" (answered or partial present) stops the screen at once
+with SAFETY_POSITIVE_REPLY instead of asking the remaining items.
+
 AI proposals are mocked; safety state, TTAS evaluation and the /recommend and
 /generate_script gates stay real. Replays follow benchmark c19/c20 turn by turn.
 """
@@ -16,7 +19,7 @@ from fastapi.testclient import TestClient
 from app.main import app
 from app.services import conversation_service, rag_triage_adapter
 from app.services.case_store import get_case
-from app.services.conversation_service import SAFETY_UNRESOLVED_REPLY
+from app.services.conversation_service import SAFETY_POSITIVE_REPLY
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 
 route = importlib.import_module("app.routes.chat")
@@ -86,7 +89,7 @@ def assert_safety_stop(client, case_id, result, department):
     assert state["safety_positive_reported"] is True
     assert state["stage"] != "waiting_confirmation" and state["awaiting_confirmation"] is False
     assert state["clue_questions_asked"] == 0 and state["availability_status"] == "not_asked"
-    assert result["reply"] == SAFETY_UNRESOLVED_REPLY and result["next_question"] is None
+    assert result["reply"] == SAFETY_POSITIVE_REPLY and result["next_question"] is None
     patient = result["triage_case"]["patient_input"]
     assert patient["red_flags_checked"] is False and patient["red_flags_status"] != "negative"
     # Urgency still only comes from TTAS; the stop never asserts a TTAS level.
@@ -103,45 +106,40 @@ WEAKNESS = [evidence("symptom", "手腳無力", "手腳沒力"), evidence("body_
             evidence("onset", "突然", "突然")]
 
 
-def test_chest_pain_positive_then_denial_stops_safely(runtime):
+@pytest.mark.parametrize("opening,extractions,text,answer", [
+    ("突然胸口很痛", CHEST, "有，胸口很痛", "有，胸口很痛"),
+    ("突然右邊手腳沒力", WEAKNESS, "有半邊無力", "有半邊無力"),
+    # Benchmark c20 run 2: a partial denial (prompt rule 15a) that still reports one item.
+    ("突然右邊手腳沒力", WEAKNESS, "有半邊無力，其他沒有。", "有半邊無力"),
+], ids=["chest_pain", "hemiparesis", "partial_positive"])
+def test_patient_positive_answer_stops_at_once_without_further_safety_questions(
+        runtime, opening, extractions, text, answer):
     client, interpreter, planner, department = runtime
+    case_id = start_safety(client, interpreter, opening, extractions)
+    department.reset_mock()
+    status = "partial" if answer != text else "answered"
+    planner.reset_mock()
+    result = say(client, interpreter, planner, case_id, text, pending(answer, status=status, assertion="present"),
+                 next_question="請問是否有突發劇烈頭痛？")
+    assert result["conversation_state"]["safety_answer_validation"] == "patient_reported_positive"
+    assert result["conversation_state"]["reply_source"] == "SAFETY_POSITIVE_STOP"
+    assert_safety_stop(client, case_id, result, department)
+    planner.assert_not_awaited()
+    # A later denial or any other reply stays on the stop.
+    result = say(client, interpreter, planner, case_id, "沒有", pending("沒有"))
+    assert result["conversation_state"]["clarification_status"] == "unresolved"
+    assert result["reply"] == SAFETY_POSITIVE_REPLY
+
+
+def test_ttas_immediate_level_still_takes_the_urgent_path_over_the_positive_stop(runtime):
+    client, interpreter, planner, _ = runtime
     case_id = start_safety(client, interpreter, "突然胸口很痛", CHEST)
-    text = "有，胸口很痛"
-    result = say(client, interpreter, planner, case_id, text, pending(text, assertion="present"),
-                 next_question="請問您現在是否有意識不清的情況？")
-    assert result["conversation_state"]["clarification_status"] == "safety_check"
-    assert result["conversation_state"]["safety_positive_reported"] is True
-    department.reset_mock()
-    result = say(client, interpreter, planner, case_id, "沒有", pending("沒有"))
-    assert result["conversation_state"]["safety_answer_validation"] == "absent_after_positive"
-    assert_safety_stop(client, case_id, result, department)
-
-
-def test_hemiparesis_positive_then_denial_stops_safely(runtime):
-    client, interpreter, planner, department = runtime
-    case_id = start_safety(client, interpreter, "突然右邊手腳沒力", WEAKNESS)
-    text = "有半邊無力"
-    say(client, interpreter, planner, case_id, text, pending(text, assertion="present"),
-        next_question="請問是否有突發劇烈頭痛？")
-    department.reset_mock()
-    result = say(client, interpreter, planner, case_id, "沒有", pending("沒有"))
-    assert_safety_stop(client, case_id, result, department)
-
-
-def test_partial_positive_then_denial_stops_safely(runtime):
-    # Benchmark c20 run 2: "有半邊無力，其他沒有" is a partial denial (prompt rule 15a) that
-    # still reports one item; a later "沒有" must not complete the screen as negative.
-    client, interpreter, planner, department = runtime
-    case_id = start_safety(client, interpreter, "突然右邊手腳沒力", WEAKNESS)
-    text = "有半邊無力，其他沒有。"
-    result = say(client, interpreter, planner, case_id, text, pending("有半邊無力", status="partial", assertion="present"),
-                 next_question="請問是否有突發劇烈頭痛或突發胸痛？")
-    assert result["conversation_state"]["clarification_status"] == "safety_check"
-    assert result["conversation_state"]["safety_positive_reported"] is True
-    department.reset_mock()
-    result = say(client, interpreter, planner, case_id, "沒有。", pending("沒有"))
-    assert result["conversation_state"]["safety_answer_validation"] == "absent_after_positive"
-    assert_safety_stop(client, case_id, result, department)
+    text = "有，化學藥劑濺到我的眼睛"
+    eye = dict(field="chemical_eye_injury", value=True, semantic_status="available", confidence=0.95,
+               source_text="化學藥劑濺到我的眼睛")
+    result = say(client, interpreter, planner, case_id, text, pending(text, assertion="present"), ttas=[eye])
+    assert result["conversation_state"]["clarification_status"] == "urgent"
+    assert result["reply"] != SAFETY_POSITIVE_REPLY
 
 
 def test_validated_ttas_true_evidence_counts_as_positive(runtime):
@@ -194,7 +192,8 @@ def test_revision_after_positive_allows_a_new_screen(runtime):
 
 
 # Benchmark baseline turns (docs/BENCHMARK_BASELINE_20261028.md): patient text, answer status/assertion,
-# and the safety follow-up the system asked next. The final denial used to complete the screen.
+# and the safety follow-up the system asked next. The final denial used to complete the screen;
+# now the first positive answer stops it.
 C19_RUN1 = [
     ("有，胸口很痛，也喘不過氣。", "answered", "present", "請問您的呼吸困難是否已達到說不出話或感到呼吸急促的程度？"),
     ("有，已經說不出話", "answered", "present", "請問您現在是否有意識不清的情況？"),
@@ -228,11 +227,13 @@ def test_benchmark_urgent_replays_stop_before_general_triage(runtime, opening, e
     client, interpreter, planner, department = runtime
     case_id = start_safety(client, interpreter, opening, extractions)
     department.reset_mock()
-    for text, status, assertion, follow_up in turns:
-        result = say(client, interpreter, planner, case_id, text, pending(text, status, assertion),
-                     next_question=follow_up)
+    text, status, assertion, follow_up = turns[0]
+    result = say(client, interpreter, planner, case_id, text, pending(text, status, assertion),
+                 next_question=follow_up)
+    # The first "yes" already stops; the system no longer asks the follow-ups it asked in the baseline.
     assert_safety_stop(client, case_id, result, department)
-    # A later turn stays on the terminal safety stop.
-    result = say(client, interpreter, planner, case_id, "都可以", None)
-    assert result["conversation_state"]["clarification_status"] == "unresolved"
-    assert result["reply"] == SAFETY_UNRESOLVED_REPLY
+    for text, status, assertion, _ in turns[1:]:
+        result = say(client, interpreter, planner, case_id, text, pending(text, status, assertion))
+        assert result["conversation_state"]["clarification_status"] == "unresolved"
+        assert result["reply"] == SAFETY_POSITIVE_REPLY
+    department.assert_not_awaited()
