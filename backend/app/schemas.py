@@ -529,7 +529,8 @@ class RecommendationItem(BaseModel):
 
 
 class RecommendationColumns(BaseModel):
-    specialty_first: List[RecommendationItem] = Field(default_factory=list, max_length=5)
+    # Up to 5 doctors x 3 slots each (appointment_service.SPECIALTY_DOCTOR_LIMIT / SPECIALTY_SLOTS_PER_DOCTOR).
+    specialty_first: List[RecommendationItem] = Field(default_factory=list, max_length=15)
     time_first: List[RecommendationItem] = Field(default_factory=list, max_length=5)
 
 

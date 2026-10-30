@@ -172,9 +172,9 @@ def test_same_doctor_is_scored_once_but_concrete_schedule_contract_is_preserved(
     result = asyncio.run(recommend_appointments(_case()))
     scorer.assert_awaited_once()
     assert len(scorer.await_args.args[2]) == 5
-    assert len(result.recommendations.specialty_first) == 5
+    assert [item.schedule_id for item in result.recommendations.specialty_first] == ["s-0", "s-1", "s-2"]
     assert {item.doctor_id for item in result.recommendations.specialty_first} == {"same"}
-    assert len({item.schedule_id for item in result.recommendations.specialty_first}) == 5
+    assert len(result.recommendations.time_first) == 5
 
 
 def test_each_column_is_limited_to_five_concrete_schedule_rows(monkeypatch):
@@ -183,6 +183,31 @@ def test_each_column_is_limited_to_five_concrete_schedule_rows(monkeypatch):
     result = asyncio.run(recommend_appointments(_case()))
     assert len(result.recommendations.specialty_first) == 5
     assert len(result.recommendations.time_first) == 5
+
+
+def test_specialty_column_takes_five_doctors_with_up_to_three_slots_each():
+    case = _case()
+    case.availability.time_preferences = [_session("afternoon", 1)]
+    rows = [
+        _row(doctor, f"s-{doctor}-{index}", _future(index + 1), "下午" if index % 2 else "上午")
+        for doctor in ("a", "b", "c", "d", "e", "f")
+        for index in range(5)
+    ] + [_row("g", "s-g-0", _future(1), "下午")]
+    levels = {"a": 1.0, "b": 0.75, "c": 0.75, "d": 0.5, "e": 0.5, "f": 0.25, "g": 0.5}
+    scores = {key: SpecialtyScore(key, key, "一般骨科", value, "ai", "ai") for key, value in levels.items()}
+    tiers = pareto_time_tiers(rows, case.availability)
+    items = _build_recommendations(case, case.case_id, rows, "rec", True, scores, tiers)
+
+    doctors = list(dict.fromkeys(item.doctor_id for item in items))
+    # Equal levels fall back to each doctor's best slot: g's earliest afternoon beats d and e.
+    assert doctors == ["a", "b", "c", "g", "d"]
+    per_doctor = {doctor: [item for item in items if item.doctor_id == doctor] for doctor in doctors}
+    assert [len(per_doctor[doctor]) for doctor in doctors] == [3, 3, 3, 1, 3]
+    # Each doctor's slots stay together, preferred afternoon first, then by date.
+    assert [item.session for item in per_doctor["a"]] == ["下午", "下午", "上午"]
+    assert [item.schedule_id for item in per_doctor["a"]] == ["s-a-1", "s-a-3", "s-a-0"]
+    assert [item.rank for item in items] == list(range(1, 14))
+    assert [item.is_best_match for item in items].count(True) == 1
 
 
 def test_complex_hard_exclusion_is_never_relaxed(monkeypatch):

@@ -50,13 +50,8 @@ def _row(doctor_id: str = "doc-1", *, tags: str = "膝關節") -> dict:
     }
 
 
-def _response(rows: list[dict], *, offset: float = 0.0) -> str:
-    return json.dumps({
-        "scores": [
-            {"doctor_id": row["doctor_id"], "score": 0.6 + offset + index * 0.01}
-            for index, row in enumerate(rows)
-        ]
-    })
+def _response(rows: list[dict], *, level: str = "high") -> str:
+    return json.dumps({"scores": [{"doctor_id": row["doctor_id"], "level": level} for row in rows]})
 
 
 def test_deterministic_fallback_is_neutral_and_has_no_keyword_inference():
@@ -96,7 +91,7 @@ def test_twenty_schedule_rows_for_one_doctor_are_scored_once():
 
 
 def test_large_set_uses_small_batches_not_one_call_per_doctor():
-    rows = [_row(f"doc-{index}") for index in range(23)]
+    rows = [_row(f"doc-{index:02d}") for index in range(23)]
     provider = AsyncMock(side_effect=[
         _response(rows[0:10]), _response(rows[10:20]), _response(rows[20:23]),
     ])
@@ -111,12 +106,12 @@ def test_large_set_uses_small_batches_not_one_call_per_doctor():
 
 
 @pytest.mark.parametrize("bad_payload", [
-    {"scores": [{"doctor_id": "missing", "score": 0.8}]},
-    {"scores": [{"doctor_id": "doc-0", "score": 0.8}, {"doctor_id": "doc-0", "score": 0.7}]},
-    {"scores": [{"doctor_id": "doc-0", "score": 0.8}]},
-    {"scores": [{"doctor_id": "doc-0", "score": 1.1}, {"doctor_id": "doc-1", "score": 0.7}]},
-    {"scores": [{"doctor_id": "doc-0", "score": -0.1}, {"doctor_id": "doc-1", "score": 0.7}]},
-    {"scores": [{"doctor_id": "doc-0", "score": float("nan")}, {"doctor_id": "doc-1", "score": 0.7}]},
+    {"scores": [{"doctor_id": "missing", "level": "high"}]},
+    {"scores": [{"doctor_id": "doc-0", "level": "high"}, {"doctor_id": "doc-0", "level": "low"}]},
+    {"scores": [{"doctor_id": "doc-0", "level": "high"}]},
+    {"scores": [{"doctor_id": "doc-0", "level": "excellent"}, {"doctor_id": "doc-1", "level": "low"}]},
+    {"scores": [{"doctor_id": "doc-0", "level": "非常相關"}, {"doctor_id": "doc-1", "level": "low"}]},
+    {"scores": [{"doctor_id": "doc-0", "score": 0.8}, {"doctor_id": "doc-1", "score": 0.7}]},
 ])
 def test_any_invalid_batch_result_makes_whole_set_neutral(bad_payload):
     rows = [_row("doc-0"), _row("doc-1")]
@@ -130,7 +125,7 @@ def test_any_invalid_batch_result_makes_whole_set_neutral(bad_payload):
 
 
 def test_timeout_in_later_batch_neutralizes_earlier_successes():
-    rows = [_row(f"doc-{index}") for index in range(12)]
+    rows = [_row(f"doc-{index:02d}") for index in range(12)]
     provider = AsyncMock(side_effect=[_response(rows[:10]), TimeoutError("timeout")])
     with patch.object(specialty_scoring, "get_settings", return_value=AiSettings()), patch.object(
         specialty_scoring, "complete_prompt", new=provider
@@ -248,3 +243,38 @@ def test_missing_doctor_id_never_enters_formal_scoring():
 
     provider.assert_not_awaited()
     assert scores == {}
+
+
+@pytest.mark.parametrize(("level", "expected"), [
+    ("very_high", 1.0), ("high", 0.75), ("medium", 0.5), ("low", 0.25), ("none", 0.0),
+])
+def test_each_level_maps_to_a_fixed_score(level, expected):
+    rows = [_row("doc-0")]
+    provider = AsyncMock(return_value=_response(rows, level=level))
+    with patch.object(specialty_scoring, "get_settings", return_value=AiSettings()), patch.object(
+        specialty_scoring, "complete_prompt", new=provider
+    ):
+        scores = asyncio.run(score_doctor_specialties(_case(), _department(), rows))
+
+    assert scores["doc-0"].score == expected
+    assert scores["doc-0"].source == "ai"
+
+
+def test_prompt_lists_doctors_in_fixed_id_order():
+    rows = [_row("doc-c"), _row("doc-a"), _row("doc-b")]
+    provider = AsyncMock(return_value=_response(rows))
+    with patch.object(specialty_scoring, "get_settings", return_value=AiSettings()), patch.object(
+        specialty_scoring, "complete_prompt", new=provider
+    ):
+        asyncio.run(score_doctor_specialties(_case(), _department(), rows))
+
+    prompt = provider.await_args.args[0]
+    assert prompt.index("doc-a") < prompt.index("doc-b") < prompt.index("doc-c")
+
+
+def test_doctor_scoring_requests_deterministic_output():
+    runtime = AsyncMock(return_value="{}")
+    with patch.object(specialty_scoring, "_complete_runtime_json", new=runtime):
+        asyncio.run(specialty_scoring.complete_prompt("prompt"))
+
+    runtime.assert_awaited_once_with("prompt", purpose="doctor_scoring", deterministic=True)

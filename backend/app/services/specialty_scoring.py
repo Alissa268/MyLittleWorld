@@ -20,11 +20,20 @@ DEFAULT_BATCH_SIZE = 10
 DEFAULT_MAX_CANDIDATES = 40
 DEFAULT_MAX_BATCHES = 4
 DEFAULT_TOTAL_TIMEOUT_SECONDS = 12.0
+# The AI picks one of five levels instead of a free decimal, so small wording drift
+# between calls cannot reorder doctors; the API keeps its 0..1 score scale.
+RELEVANCE_LEVELS = {
+    "very_high": 1.0,
+    "high": 0.75,
+    "medium": 0.5,
+    "low": 0.25,
+    "none": 0.0,
+}
 
 
 async def complete_prompt(prompt: str) -> str:
     """Compatibility seam for tests; production sends one small doctor batch per call."""
-    return await _complete_runtime_json(prompt, purpose="doctor_scoring")
+    return await _complete_runtime_json(prompt, purpose="doctor_scoring", deterministic=True)
 
 
 @dataclass(frozen=True)
@@ -58,10 +67,11 @@ async def score_doctor_specialties(
         logger.info("specialty_scoring ai skipped case_id=%s reason=unavailable", case.case_id)
         return neutral
 
-    scorable = [
-        row for row in doctor_rows
-        if _has_specialty(row.get("specialty_tags") or row.get("specialty"))
-    ]
+    # Fixed doctor order keeps the prompt identical for the same candidates.
+    scorable = sorted(
+        (row for row in doctor_rows if _has_specialty(row.get("specialty_tags") or row.get("specialty"))),
+        key=_row_doctor_id,
+    )
     if not scorable:
         return neutral
 
@@ -201,12 +211,12 @@ def _build_scoring_prompt(
 
 規則：
 1. 每個 doctor_id 恰好輸出一次，且必須完全照抄。
-2. score 是 0 到 1 的語意相關程度，不是診斷機率、醫師能力、品質或成功率。
+2. level 是語意相關程度，只能是下列其一：very_high（非常相關）、high（相關）、medium（普通）、low（不太相關）、none（無關）。這不是診斷機率、醫師能力、品質或成功率。
 3. 只能使用提供的患者證據與 specialty_tags，不得診斷、補專長或參考名氣年資。
 4. 不要輸出自然語言理由。
 
 只輸出 JSON：
-{{"scores":[{{"doctor_id":"候選 doctor_id","score":0.0}}]}}"""
+{{"scores":[{{"doctor_id":"候選 doctor_id","level":"medium"}}]}}"""
 
 
 def _parse_json_object(raw: str) -> dict[str, Any]:
@@ -230,17 +240,16 @@ def _validate_complete_batch(
         if not isinstance(item, dict):
             return None
         doctor_id = item.get("doctor_id")
-        score = item.get("score")
+        level = item.get("level")
         if (
             not isinstance(doctor_id, str)
             or doctor_id not in expected
             or doctor_id in accepted
-            or type(score) not in {int, float}
-            or not math.isfinite(float(score))
-            or not 0.0 <= float(score) <= 1.0
+            or not isinstance(level, str)
+            or level not in RELEVANCE_LEVELS
         ):
             return None
-        accepted[doctor_id] = float(score)
+        accepted[doctor_id] = RELEVANCE_LEVELS[level]
     return accepted if set(accepted) == expected else None
 
 

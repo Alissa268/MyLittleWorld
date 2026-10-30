@@ -34,6 +34,10 @@ from app.services.time_preference_service import (
 
 logger = logging.getLogger(__name__)
 
+TIME_FIRST_LIMIT = 5
+SPECIALTY_DOCTOR_LIMIT = 5
+SPECIALTY_SLOTS_PER_DOCTOR = 3
+
 class DepartmentResolutionError(ValueError):
     """The selected department cannot be tied to one canonical DB record."""
 
@@ -159,12 +163,12 @@ async def recommend_appointments(
         relaxed_by_date=relaxed_by_date,
     )
 
-    total_count = len(specialty_first[:5]) + len(time_first[:5])
+    total_count = len(specialty_first) + len(time_first)
     return RecommendationResult(
         case_id=case.case_id,
         recommendations=RecommendationColumns(
-            specialty_first=specialty_first[:5],
-            time_first=time_first[:5],
+            specialty_first=specialty_first,
+            time_first=time_first,
         ),
         fallback_departments=[],
         total_count=total_count,
@@ -304,6 +308,8 @@ def _build_recommendations(
         slots,
         key=lambda slot: _ranking_key(slot, specialty_scores, time_tiers, specialty_first),
     )
+    if specialty_first:
+        sorted_slots = _doctor_grouped_slots(sorted_slots)
     items = []
     seen = set()
     for slot in sorted_slots:
@@ -368,9 +374,33 @@ def _build_recommendations(
             ),
         )
         items.append(item)
-        if len(items) >= 5:
+        if not specialty_first and len(items) >= TIME_FIRST_LIMIT:
             break
     return items
+
+
+def _doctor_grouped_slots(sorted_slots: list[dict]) -> list[dict]:
+    """Specialty column: doctors first, then slots.
+
+    Takes the first SPECIALTY_DOCTOR_LIMIT doctors in ranking order and up to
+    SPECIALTY_SLOTS_PER_DOCTOR of each one's slots, best time preference first; the
+    doctor's slots stay together so each doctor's first slot is their best one.
+    """
+    groups: dict[str, list[dict]] = {}
+    seen = set()
+    for slot in sorted_slots:
+        schedule_key = str(slot.get("schedule_id") or "")
+        if schedule_key in seen:
+            continue
+        seen.add(schedule_key)
+        doctor_key = str(slot.get("doctor_id") or "")
+        if doctor_key not in groups:
+            if len(groups) >= SPECIALTY_DOCTOR_LIMIT:
+                continue
+            groups[doctor_key] = []
+        if len(groups[doctor_key]) < SPECIALTY_SLOTS_PER_DOCTOR:
+            groups[doctor_key].append(slot)
+    return [slot for group in groups.values() for slot in group]
 
 
 def _ranking_key(

@@ -84,7 +84,8 @@ def test_recommend_success_contract(monkeypatch):
     assert set(body) == RESULT_FIELDS
     assert set(body["recommendations"]) == {"specialty_first", "time_first"}
     columns = body["recommendations"]
-    assert all(1 <= len(columns[name]) <= 5 for name in ("specialty_first", "time_first"))
+    assert 1 <= len(columns["specialty_first"]) <= 15
+    assert 1 <= len(columns["time_first"]) <= 5
     # total_count is the number of items actually returned in both columns together; a
     # schedule present in both columns is counted twice. It is not the number of SQL rows.
     assert body["total_count"] == len(columns["specialty_first"]) + len(columns["time_first"]) == 10

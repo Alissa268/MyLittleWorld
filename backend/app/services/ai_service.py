@@ -8,6 +8,7 @@ from app.services.chat_perf import record_ai_call, safe_exception_status
 
 RUNTIME_AI_PROVIDER = "cerebras"
 RUNTIME_AI_MODEL = "gpt-oss-120b"
+DETERMINISTIC_SEED = 20261107
 
 _initialized = False
 _llama_settings: Any = None
@@ -73,11 +74,14 @@ async def complete_prompt(
     *,
     provider: str | None = None,
     json_mode: bool = False,
+    deterministic: bool = False,
 ) -> str:
     settings = get_settings()
     selected_provider = str(provider or RUNTIME_AI_PROVIDER).strip().lower()
     initialize_ai(selected_provider)
     if selected_provider == "cerebras":
+        if deterministic:
+            return await _complete_cerebras(prompt, settings, json_mode=json_mode, deterministic=True)
         return await _complete_cerebras(prompt, settings, json_mode=json_mode)
     if selected_provider != "gemini":
         raise ValueError(f"Unsupported AI provider: {selected_provider}")
@@ -155,7 +159,7 @@ def runtime_ai_available(settings: Any | None = None) -> bool:
     return available
 
 
-async def complete_runtime_json(prompt: str, *, purpose: str) -> str:
+async def complete_runtime_json(prompt: str, *, purpose: str, deterministic: bool = False) -> str:
     settings = get_settings()
     started_at = time.perf_counter()
     logger.info(
@@ -165,10 +169,12 @@ async def complete_runtime_json(prompt: str, *, purpose: str) -> str:
         RUNTIME_AI_MODEL,
     )
     try:
+        extra = {"deterministic": True} if deterministic else {}
         result = await complete_prompt(
             prompt,
             provider=RUNTIME_AI_PROVIDER,
             json_mode=True,
+            **extra,
         )
     except BaseException as exc:
         logger.warning(
@@ -213,7 +219,9 @@ def _initialize_cerebras(settings: Any) -> None:
     logger.info("AI initialized in Cerebras async mode model=%s", RUNTIME_AI_MODEL)
 
 
-async def _complete_cerebras(prompt: str, settings: Any, *, json_mode: bool = False) -> str:
+async def _complete_cerebras(
+    prompt: str, settings: Any, *, json_mode: bool = False, deterministic: bool = False,
+) -> str:
     if _cerebras_client is None:
         raise RuntimeError("Cerebras AI is not initialized")
     provider_started_at = time.perf_counter()
@@ -224,6 +232,10 @@ async def _complete_cerebras(prompt: str, settings: Any, *, json_mode: bool = Fa
         }
         if json_mode:
             request["response_format"] = {"type": "json_object"}
+        if deterministic:
+            # Same prompt, same answer as far as the provider allows.
+            request["temperature"] = 0
+            request["seed"] = DETERMINISTIC_SEED
         response = await asyncio.wait_for(
             _cerebras_client.chat.completions.create(**request),
             timeout=settings.ai_timeout_seconds,
