@@ -14,6 +14,7 @@ import com.example.medicalaiguidance.model.Department
 import com.example.medicalaiguidance.model.Doctor
 import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryRecommendation
+import com.example.medicalaiguidance.model.resolveHistorySummary
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.network.ChatRequest
@@ -262,7 +263,9 @@ class MedicalRepository(
                     updateHistory(id) { history ->
                         val snapshot = item.toHistoryRecommendation()
                         history.copy(
-                            recommendations = history.recommendations.filterNot { it.recommendationId == snapshot.recommendationId } + snapshot,
+                            recommendations = if (history.recommendations.any { it.recommendationId == snapshot.recommendationId }) {
+                                history.recommendations
+                            } else history.recommendations + snapshot,
                             selectedRecommendationId = snapshot.recommendationId
                         )
                     }
@@ -417,7 +420,7 @@ class MedicalRepository(
             id = historyId,
             date = existing?.date ?: todayText(),
             typeTitle = typeTitle,
-            summaryText = summaryText.ifBlank { "問診紀錄" },
+            summaryText = resolveHistorySummary(summaryText, chatMessages),
             status = HistoryStatus.UNCOMPLETED,
             chatMessages = chatMessages.toList(),
             completedAt = null,
@@ -498,9 +501,9 @@ class MedicalRepository(
     internal fun saveRecommendationSnapshot(caseId: String, result: RecommendationResultDto) {
         require(result.caseId == caseId) { "推薦案件與目前問診不一致，請重新取得推薦。" }
         val recommendationSnapshots = (
-            result.recommendations.specialtyFirst + result.recommendations.timeFirst
+            result.recommendations.specialtyFirst.map { it.toHistoryRecommendation().copy(category = "specialty") } +
+                result.recommendations.timeFirst.map { it.toHistoryRecommendation().copy(category = "time") }
         ).distinctBy { it.recommendationId }
-            .map { it.toHistoryRecommendation() }
         updateHistory(caseId) { history ->
             val selected = history.recommendations.find { it.recommendationId == history.selectedRecommendationId }
             history.copy(
@@ -603,6 +606,7 @@ internal fun History.toJson(): JSONObject = JSONObject().apply {
                 put("session", recommendation.session)
                 recommendation.sessionTime?.let { put("sessionTime", it) }
                 recommendation.room?.let { put("room", it) }
+                recommendation.category?.let { put("category", it) }
             })
         }
     })
@@ -641,7 +645,8 @@ private fun JSONObject.toHistory(): History {
                     date = item.optString("date"),
                     session = item.optString("session"),
                     sessionTime = item.optString("sessionTime").takeIf { it.isNotBlank() },
-                    room = item.optString("room").takeIf { it.isNotBlank() }
+                    room = item.optString("room").takeIf { it.isNotBlank() },
+                    category = item.optString("category").takeIf { it in setOf("specialty", "time") }
                 )
             }
         }

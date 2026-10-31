@@ -27,5 +27,51 @@ data class HistoryRecommendation(
     val date: String,
     val session: String,
     val sessionTime: String? = null,
-    val room: String? = null
+    val room: String? = null,
+    val category: String? = null
 )
+
+internal fun HistoryRecommendation.recommendationCategory(): String =
+    category?.takeIf { it in setOf("specialty", "time") }
+        ?: when {
+            recommendationId.startsWith("rec_s_") -> "specialty"
+            recommendationId.startsWith("rec_t_") -> "time"
+            else -> "legacy"
+        }
+
+internal fun String.visibleAssistantText(): String =
+    replace("已確認分診結果，可呼叫 /recommend 取得推薦掛號方案。", "")
+        .replace("請確認後取得推薦掛號方案。", "")
+        .trim()
+
+internal fun String.historyDisplayDate(): String {
+    val match = Regex("(\\d{4})[-/](\\d{1,2})[-/](\\d{1,2})").find(this) ?: return this
+    return "${match.groupValues[1]}/${match.groupValues[2].padStart(2, '0')}/${match.groupValues[3].padStart(2, '0')}"
+}
+
+internal fun HistoryRecommendation.historyDisplaySession(): String {
+    val raw = session.trim().lowercase()
+    return when {
+        raw.contains("上午") || raw.contains("早") || raw == "morning" -> "上午診"
+        raw.contains("下午") || raw.contains("午") || raw == "afternoon" -> "下午診"
+        raw.contains("晚") || raw.contains("夜") || raw == "evening" -> "夜診"
+        else -> {
+            val hour = Regex("(\\d{1,2}):\\d{2}").find(sessionTime.orEmpty().ifBlank { raw })
+                ?.groupValues?.get(1)?.toIntOrNull()
+            when (hour) {
+                in 0..11 -> "上午診"
+                in 12..17 -> "下午診"
+                in 18..23 -> "夜診"
+                else -> "未保存時段"
+            }
+        }
+    }
+}
+
+internal fun resolveHistorySummary(summary: String, messages: List<ChatMessage>): String =
+    summary.visibleAssistantText().takeIf { it.isNotBlank() }
+        ?: messages.asReversed().asSequence()
+            .filter { it.sender == MessageSender.AI }
+            .map { it.content.visibleAssistantText() }
+            .firstOrNull { it.isNotBlank() }
+        ?: "問診紀錄"

@@ -29,7 +29,8 @@ import androidx.compose.material.icons.filled.CalendarToday
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.ExposedDropdownMenuBox
+import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.FilterChip
 import androidx.compose.material3.FilterChipDefaults
@@ -42,7 +43,6 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -52,7 +52,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.shadow
 import androidx.compose.ui.focus.onFocusChanged
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.layout.onGloballyPositioned
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -80,7 +79,7 @@ private val ErrorColor = Color(0xFFBA1A1A)
 
 private val DisableBgGray = Color(0xFFE0E0E0)
 private val DisableTextGray = Color(0xFF9E9E9E)
-private val DepartmentDropdownMaxHeight = 420.dp
+private val DepartmentDropdownMaxHeight = 280.dp
 
 private data class SessionOption(val label: String, val value: String)
 private data class SelectionOption(val value: String, val label: String, val supportingText: String = "")
@@ -246,7 +245,11 @@ private fun ReturnVisitFormCard(
             label = "就診科別（必填）",
             placeholder = "搜尋並選擇科別",
             options = sortQuickSearchDepartments(departments).map {
-                SelectionOption(value = it.deptId, label = it.childDept, supportingText = it.parentDept)
+                SelectionOption(
+                    value = it.deptId,
+                    label = it.childDept,
+                    supportingText = if (quickSearchDepartmentGroupRank(it.parentDept) == 0) "內科系" else it.parentDept
+                )
             },
             enabled = !loading && departmentLoadState == QuickSearchReferenceLoadState.Ready,
             loadState = departmentLoadState,
@@ -329,6 +332,7 @@ private fun ReturnVisitFormCard(
 }
 
 @Composable
+@OptIn(ExperimentalMaterial3Api::class)
 private fun SearchableSelectionField(
     selectedValue: String,
     resetKey: String,
@@ -343,7 +347,6 @@ private fun SearchableSelectionField(
 ) {
     var query by rememberSaveable(resetKey) { mutableStateOf(selectedValue) }
     var expanded by remember(resetKey) { mutableStateOf(false) }
-    var textFieldWidth by remember { mutableIntStateOf(0) }
     val interactionSource = remember { MutableInteractionSource() }
     val isPressed by interactionSource.collectIsPressedAsState()
 
@@ -368,7 +371,11 @@ private fun SearchableSelectionField(
     }
 
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        Box(modifier = Modifier.fillMaxWidth()) {
+        ExposedDropdownMenuBox(
+            expanded = expanded && enabled,
+            onExpandedChange = { if (enabled) expanded = it },
+            modifier = Modifier.fillMaxWidth()
+        ) {
             OutlinedTextField(
                 value = query,
                 onValueChange = { value ->
@@ -395,17 +402,15 @@ private fun SearchableSelectionField(
                 },
                 modifier = Modifier
                     .fillMaxWidth()
-                    .onGloballyPositioned { coordinates -> textFieldWidth = coordinates.size.width }
+                    .menuAnchor()
                     .onFocusChanged { if (it.isFocused && enabled) expanded = true },
                 shape = RoundedCornerShape(12.dp),
                 colors = returnVisitTextFieldColors()
             )
-            val density = androidx.compose.ui.platform.LocalDensity.current
-            DropdownMenu(
+            ExposedDropdownMenu(
                 expanded = expanded && enabled,
                 onDismissRequest = { expanded = false },
                 modifier = Modifier
-                    .width(with(density) { textFieldWidth.toDp() })
                     .heightIn(max = DepartmentDropdownMaxHeight)
                     .background(Color.White)
             ) {
@@ -414,11 +419,11 @@ private fun SearchableSelectionField(
                 } else {
                     filteredOptions.forEach { option ->
                         DropdownMenuItem(
-                            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 8.dp, horizontal = 16.dp),
+                            contentPadding = androidx.compose.foundation.layout.PaddingValues(vertical = 4.dp, horizontal = 16.dp),
                             text = {
                                 Column(
-                                    modifier = Modifier.padding(vertical = 4.dp),
-                                    verticalArrangement = Arrangement.spacedBy(4.dp)
+                                    modifier = Modifier.padding(vertical = 2.dp),
+                                    verticalArrangement = Arrangement.spacedBy(2.dp)
                                 ) {
                                     Text(text = option.label, color = GreenPrimary, fontSize = 16.sp, fontWeight = FontWeight.Medium)
                                     if (option.supportingText.isNotBlank()) {
@@ -464,7 +469,7 @@ internal fun sortQuickSearchDepartments(
 internal fun quickSearchDepartmentGroupRank(parentDepartment: String): Int {
     val normalized = parentDepartment.trim()
     return when {
-        normalized == "內科系" || normalized == "一般內科" -> 0
+        normalized == "內科" || normalized == "內科系" || normalized == "一般內科" -> 0
         normalized == "外科系" -> 1
         normalized.startsWith("婦幼") -> 2
         normalized == "五官科" -> 3

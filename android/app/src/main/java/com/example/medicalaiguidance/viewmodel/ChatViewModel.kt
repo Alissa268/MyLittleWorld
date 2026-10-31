@@ -6,6 +6,7 @@ import android.content.Context
 import android.os.SystemClock
 import android.util.Log
 import com.example.medicalaiguidance.model.ChatMessage
+import com.example.medicalaiguidance.model.visibleAssistantText
 import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.network.MedicalApiException
@@ -36,7 +37,7 @@ internal data class ChatLatencyTrace(
 )
 
 internal fun shouldAppendAssistantReply(previous: ChatMessage?, reply: String): Boolean =
-    previous?.sender != MessageSender.AI || previous.content != reply
+    reply.isNotBlank() && (previous?.sender != MessageSender.AI || previous.content != reply)
 
 internal fun currentQuestionAnswer(question: QuestionItemDto?, answer: String): BatchAnswerDto? =
     question?.let { current ->
@@ -377,8 +378,8 @@ class ChatViewModel(
                 val previous = repository.getChatMessages().lastOrNull()
                 val replyMessage = if (shouldAppendAssistantReply(previous, reply)) {
                     ChatMessage(content = reply, sender = MessageSender.AI).also(repository::addMessage)
-                } else previous!!
-                if (requestStartElapsedMs != null) {
+                } else previous
+                if (requestStartElapsedMs != null && replyMessage != null && reply.isNotBlank()) {
                     latencyTrace = ChatLatencyTrace(
                         requestStartElapsedMs = requestStartElapsedMs,
                         responseReceivedElapsedMs = responseReceivedElapsedMs,
@@ -834,7 +835,12 @@ class ChatViewModel(
     }
 
     private fun publishMessages() {
-        val updated = repository.getChatMessages().toList()
+        val updated = repository.getChatMessages().mapNotNull {
+            if (it.sender == MessageSender.AI) {
+                it.content.visibleAssistantText().takeIf { text -> text.isNotBlank() }
+                    ?.let { text -> it.copy(content = text) }
+            } else it
+        }
         if (updated.lastOrNull()?.id != _messages.value.lastOrNull()?.id) stopVoicePlayback()
         _messages.value = updated
     }

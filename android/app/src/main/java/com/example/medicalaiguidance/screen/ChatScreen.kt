@@ -86,7 +86,6 @@ import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
-import androidx.compose.ui.text.withStyle
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.viewmodel.compose.viewModel
@@ -94,6 +93,9 @@ import androidx.navigation.NavHostController
 import com.example.medicalaiguidance.R
 import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryRecommendation
+import com.example.medicalaiguidance.model.historyDisplayDate
+import com.example.medicalaiguidance.model.historyDisplaySession
+import com.example.medicalaiguidance.model.recommendationCategory
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.repository.VoiceLanguagePreference
 import com.example.medicalaiguidance.model.VisitPlan
@@ -680,6 +682,15 @@ private fun CompletedHistorySnapshot(
     val selectedRecommendation = history.recommendations.firstOrNull {
         it.recommendationId == history.selectedRecommendationId
     }
+    val selectedCategory = selectedRecommendation?.recommendationCategory()
+    val categoryLabel = when (selectedCategory) {
+        "specialty" -> "醫師專長優先"
+        "time" -> "看診時間優先"
+        else -> null
+    }
+    val visibleRecommendations = if (categoryLabel != null) {
+        history.recommendations.filter { it.recommendationCategory() == selectedCategory }
+    } else history.recommendations
     Box(
         modifier = Modifier
             .fillMaxWidth()
@@ -707,7 +718,7 @@ private fun CompletedHistorySnapshot(
                     else -> "未記錄"
                 }
             )
-            HistorySnapshotRow("導引完成時間", history.completedAt ?: "尚未確認前往")
+            HistorySnapshotRow("導引完成時間", history.completedAt?.historyDisplayDate() ?: "尚未確認前往")
             HistorySnapshotRow(
                 "當時選擇醫師",
                 selectedRecommendation?.doctor ?: "未選擇或舊紀錄未保存"
@@ -737,7 +748,7 @@ private fun CompletedHistorySnapshot(
                         text = if (history.recommendations.isEmpty()) {
                             "此舊紀錄未保存醫師推薦"
                         } else {
-                            "查看醫師推薦（${history.recommendations.size}）"
+                            "查看醫師推薦"
                         },
                         color = primaryDark,
                         fontWeight = FontWeight.Bold,
@@ -755,16 +766,32 @@ private fun CompletedHistorySnapshot(
 
             if (showRecommendations) {
                 Spacer(modifier = Modifier.height(10.dp))
+                if (categoryLabel != null) {
+                    Text(
+                        text = categoryLabel,
+                        color = primaryDark,
+                        fontSize = 12.sp,
+                        fontWeight = FontWeight.Bold,
+                        modifier = Modifier
+                            .background(Color(0xFFEAF3F2), RoundedCornerShape(8.dp))
+                            .padding(horizontal = 10.dp, vertical = 5.dp)
+                    )
+                    Spacer(modifier = Modifier.height(8.dp))
+                }
                 Text(
                     text = "以下為當時結果，僅供查看，無法重新選擇。",
                     color = Color(0xFF708080),
                     fontSize = 13.sp
                 )
                 Spacer(modifier = Modifier.height(8.dp))
-                history.recommendations.forEach { recommendation ->
+                val recommendationGroups = if (selectedCategory == "specialty") {
+                    visibleRecommendations.groupBy { Triple(it.doctor, it.parentDepartment, it.department) }.values.toList()
+                } else visibleRecommendations.map { listOf(it) }
+                recommendationGroups.forEach { recommendations ->
                     ReadOnlyRecommendationItem(
-                        recommendation = recommendation,
-                        isSelected = recommendation.recommendationId == history.selectedRecommendationId,
+                        recommendations = recommendations,
+                        selectedRecommendationId = history.selectedRecommendationId,
+                        showSessionLabels = selectedCategory == "specialty",
                         primaryDark = primaryDark
                     )
                     Spacer(modifier = Modifier.height(8.dp))
@@ -800,10 +827,13 @@ private fun HistorySnapshotRow(label: String, value: String) {
 
 @Composable
 private fun ReadOnlyRecommendationItem(
-    recommendation: HistoryRecommendation,
-    isSelected: Boolean,
+    recommendations: List<HistoryRecommendation>,
+    selectedRecommendationId: String?,
+    showSessionLabels: Boolean,
     primaryDark: Color
 ) {
+    val recommendation = recommendations.first()
+    val isSelected = recommendations.any { it.recommendationId == selectedRecommendationId }
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -834,15 +864,31 @@ private fun ReadOnlyRecommendationItem(
         }
         Spacer(modifier = Modifier.height(4.dp))
         Text(recommendation.department, color = Color(0xFF607575), fontSize = 14.sp)
-        Text(recommendation.displayHistoryTime(), color = Color(0xFF607575), fontSize = 14.sp)
+        if (showSessionLabels) {
+            Spacer(modifier = Modifier.height(8.dp))
+            Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                recommendations.forEach { session ->
+                    val selected = session.recommendationId == selectedRecommendationId
+                    Text(
+                        text = session.displayHistoryTime() ,
+                        color = if (selected) Color.White else primaryDark,
+                        fontSize = 12.sp,
+                        modifier = Modifier
+                            .background(if (selected) primaryDark else Color(0xFFE4EEED), RoundedCornerShape(10.dp))
+                            .padding(horizontal = 10.dp, vertical = 7.dp)
+                    )
+                }
+            }
+        } else {
+            Text(recommendation.displayHistoryTime(), color = Color(0xFF607575), fontSize = 14.sp)
+        }
     }
 }
 
 private fun HistoryRecommendation.displayHistoryTime(): String =
     listOfNotNull(
-        date.takeIf { it.isNotBlank() },
-        (sessionTime ?: session).takeIf { it.isNotBlank() },
-        room?.takeIf { it.isNotBlank() }
+        date.historyDisplayDate().takeIf { it.isNotBlank() },
+        historyDisplaySession()
     ).joinToString(" ").ifBlank { "未保存時段" }
 
 @Composable
@@ -1161,18 +1207,26 @@ fun LanguageToggleItem(
 }
 
 private fun String.withBoldDepartment() = buildAnnotatedString {
-    val target = "檢傷結果"
-    val startIndex = indexOf(target)
-    if (startIndex == -1) {
-        append(this@withBoldDepartment)
-        return@buildAnnotatedString
+    append(this@withBoldDepartment)
+    for (target in listOf("檢傷結果")) {
+        var startIndex = this@withBoldDepartment.indexOf(target)
+        while (startIndex >= 0) {
+            addStyle(
+                SpanStyle(fontWeight = FontWeight.ExtraBold),
+                startIndex,
+                startIndex + target.length
+            )
+            startIndex = this@withBoldDepartment.indexOf(target, startIndex + target.length)
+        }
     }
-
-    append(substring(0, startIndex))
-    withStyle(SpanStyle(fontWeight = FontWeight.ExtraBold)) {
-        append(target)
-    }
-    append(substring(startIndex + target.length))
+    Regex("建議您先看([^。！？\\n]+)").findAll(this@withBoldDepartment).lastOrNull()
+        ?.groups?.get(1)?.let { department ->
+            addStyle(
+                SpanStyle(fontWeight = FontWeight.ExtraBold),
+                department.range.first,
+                department.range.last + 1
+            )
+        }
 }
 
 @Composable

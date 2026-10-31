@@ -1,6 +1,8 @@
 ﻿package com.example.medicalaiguidance.screen
 
 import androidx.compose.animation.animateColorAsState
+import com.example.medicalaiguidance.model.resolveHistorySummary
+import com.example.medicalaiguidance.model.historyDisplayDate
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -277,7 +279,7 @@ fun HistoryCardItem(
                 horizontalArrangement = Arrangement.SpaceBetween,
                 verticalAlignment = Alignment.CenterVertically
             ) {
-                Text(history.date, fontSize = 14.sp, color = Color(0xFF7A8B8B))
+                Text(history.date.historyDisplayDate(), fontSize = 14.sp, color = Color(0xFF7A8B8B))
 
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Surface(
@@ -371,7 +373,7 @@ fun HistoryCardItem(
                     )
                     Spacer(modifier = Modifier.height(4.dp))
                     Text(
-                        history.summaryText,
+                        resolveHistorySummary(history.summaryText, history.chatMessages),
                         fontSize = 15.sp,
                         color = Color(0xFF556666),
                         maxLines = 1,

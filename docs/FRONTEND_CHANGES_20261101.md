@@ -1,0 +1,91 @@
+# Android 前端修改紀錄
+
+日期：2026/11/01
+
+
+## 1. 問診訊息與歷史摘要
+
+### 顯示規則
+
+- 前端隱藏「已確認分診結果，可呼叫 /recommend 取得推薦掛號方案。」。
+- 前端移除「請確認後取得推薦掛號方案。」。
+- 過濾後沒有內容的 AI 訊息不顯示泡泡或播放按鈕；使用者訊息不套用此過濾。
+- 後端固定回覆維持原樣，本項由前端處理。
+
+### 歷史摘要修正
+
+- 保存摘要前先過濾上述文字，避免系統確認訊息覆蓋有效的科別說明。
+- 若摘要過濾後為空，從聊天訊息倒序尋找最後一則非空的有效 AI 回覆。
+- 沒有可用回覆時顯示「問診紀錄」。
+- 有效且非空的既有摘要仍保留；不會一律改成最後一則聊天內容。
+
+### 科別粗體
+
+- 僅將最後一次「建議您先看」後、句號等分隔符號前的科別文字加粗。
+- 同段前面提到的科別維持一般字體。
+
+相關檔案（相對於專案根目錄）：
+
+- `android/app/src/main/java/com/example/medicalaiguidance/model/History.kt`
+- `android/app/src/main/java/com/example/medicalaiguidance/viewmodel/ChatViewModel.kt`
+- `android/app/src/main/java/com/example/medicalaiguidance/repository/MedicalRepository.kt`
+- `android/app/src/main/java/com/example/medicalaiguidance/screen/HistoryScreen.kt`
+- `android/app/src/main/java/com/example/medicalaiguidance/screen/ChatScreen.kt`
+
+## 2. 歷史推薦分類與保存
+
+- 歷史推薦項目新增可選的 `category`，保存 `specialty` 或 `time`。
+- 保存兩類推薦的原有順序，JSON 讀寫同步保存分類。
+- 已存在的選中診次不再因確認導引而被移到清單最後，保留原排序。
+- 舊紀錄缺少分類時，以推薦 ID 的 `rec_s_`、`rec_t_` 前綴判斷。
+- 歷史畫面依當時選中的推薦項目，顯示單一小標籤：
+  - `specialty`：醫師專長優先。
+  - `time`：看診時間優先。
+- 若沒有選中項目或無法識別分類，保留原清單，不猜測分類，也不顯示分類標籤。
+
+分類依選中推薦項目的資料判斷，並未另外保存使用者僅切換頁籤、尚未選定診次的操作。
+
+## 3. 歷史專長推薦的醫師分組
+
+- 僅「醫師專長優先」清單合併同醫師。
+- 分組鍵為醫師姓名、父科別與子科別；不同科別不合併。
+- 每位醫師一張卡片，下方以直向小標籤列出多個時段。
+- 當時選中的時段以深綠底、白字標示；卡片保留「當時選擇」標示。
+- 「看診時間優先」維持每筆診次各一張卡片。
+
+
+## 4. 僅歷史紀錄的日期與診別格式
+
+- 導引完成時間只顯示日期，例如 `2026/11/01`，不顯示時分。
+- 歷史列表日期、已選時段日期及歷史推薦日期統一為 `yyyy/MM/dd`。
+- 時段顯示為「上午診／下午診／夜診」，取代原本的起訖時間。
+- 移除時段旁的 `3402` 等編號。
+- 原始日期、時間與編號資料仍保留，僅改顯示文字。
+- 本輪格式修改限於歷史紀錄，未套用到醫師推薦主畫面或快速查詢結果。
+
+## 5. 查詢門診班表：內科排序與名稱
+
+原因：實際 API 的父分類為「內科」，前端原本僅將「內科系／一般內科」判為第一順位，使「內科」落入未識別分類而排到最後。
+
+修正：
+
+- 排序接受「內科」、「內科系」、「一般內科」，均列為第一順位。
+- 下拉選單的內科分類輔助文字統一顯示「內科系」。
+- 科別名稱、科別 ID 及 API 原始資料不變。
+
+相關檔案：`android/app/src/main/java/com/example/medicalaiguidance/screen/QuickSearchScreen.kt`。
+
+## 6. 查詢門診班表：下拉選單排版
+
+- 一般 `DropdownMenu` 改為 `ExposedDropdownMenuBox` 搭配 `ExposedDropdownMenu`。
+- 使用輸入欄位的 `menuAnchor()` 定位，配合可用空間。
+- 最大高度由 `420.dp` 改為 `280.dp`。
+- 選項外側上下留白由 `8.dp` 改為 `4.dp`。
+- 內側上下留白與兩行文字間距由 `4.dp` 改為 `2.dp`。
+- 保留科別搜尋、選取與選單捲動功能。
+
+## 7. 操作教學預覽圖片更新
+
+- 更新醫師推薦步驟預覽圖：`android/app/src/main/res/drawable/preview_step_doctor.png`。
+- 更新歷史紀錄步驟預覽圖：`android/app/src/main/res/drawable/preview_step_history.png`。
+- 兩張圖片由 `android/app/src/main/java/com/example/medicalaiguidance/screen/GettingStartedScreen.kt` 的 `screenshotResList` 引用，用於操作教學畫面。
