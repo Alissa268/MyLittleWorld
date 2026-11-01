@@ -55,7 +55,9 @@ import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material.icons.filled.VolumeUp
+import androidx.compose.material.icons.filled.WarningAmber
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.Icon
 import androidx.compose.material3.OutlinedButton
@@ -78,6 +80,8 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalDensity
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.res.painterResource
@@ -95,6 +99,7 @@ import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryRecommendation
 import com.example.medicalaiguidance.model.historyDisplayDate
 import com.example.medicalaiguidance.model.historyDisplaySession
+import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import com.example.medicalaiguidance.model.recommendationCategory
 import com.example.medicalaiguidance.model.MessageSender
 import com.example.medicalaiguidance.repository.VoiceLanguagePreference
@@ -137,6 +142,8 @@ fun ChatScreen(
     val showDecisionButtons by viewModel.showDecisionButtons.collectAsState()
     val currentBatchQuestion by viewModel.currentBatchQuestion.collectAsState()
     val urgentWarning by viewModel.urgentWarning.collectAsState()
+    val isUrgentStopped by viewModel.isUrgentStopped.collectAsState()
+    val showUrgentDialog by viewModel.showUrgentDialog.collectAsState()
     val isHistoryReadOnly by viewModel.isHistoryReadOnly.collectAsState()
     val openedHistory by viewModel.openedHistory.collectAsState()
     val canRetryHistoryResume by viewModel.canRetryHistoryResume.collectAsState()
@@ -148,7 +155,9 @@ fun ChatScreen(
     val selectedLanguage by VoiceLanguagePreference.observe(context).collectAsState()
     var showHistoryRecommendations by remember(openedHistory?.id) { mutableStateOf(false) }
     var isInputFocused by remember { mutableStateOf(false) }
-    val canSendMessage = !isHistoryReadOnly && inputText.isNotBlank() &&
+    val density = LocalDensity.current
+    var urgentFooterHeight by remember { mutableStateOf(152.dp) }
+    val canSendMessage = !isHistoryReadOnly && !isUrgentStopped && inputText.isNotBlank() &&
         !isAiThinking && !isListening && !isVoiceTranscribing
     val navigateToDoctorSelection = {
         val effectiveVisitPlan = selectedVisitType ?: visitPlan
@@ -162,6 +171,40 @@ fun ChatScreen(
     val systemTextSpeaker = remember { SystemTextSpeaker(context) }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    LaunchedEffect(isUrgentStopped) {
+        if (isUrgentStopped) {
+            keyboardController?.hide()
+            focusManager.clearFocus()
+        }
+    }
+    if (showUrgentDialog) {
+        val urgentRed = Color(0xFFB44A4A)
+        AlertDialog(
+            onDismissRequest = viewModel::dismissUrgentDialog,
+            shape = RoundedCornerShape(24.dp),
+            containerColor = Color.White,
+            title = {
+                Text("急迫症狀提醒", color = urgentRed, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+            },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
+                    Text(urgentWarning.orEmpty(), color = Color(0xFF556666), fontSize = 16.sp, lineHeight = 24.sp)
+                    Text("本次問診已停止，無法繼續輸入或取得掛號推薦。", color = urgentRed, fontSize = 14.sp, fontWeight = FontWeight.Bold)
+                }
+            },
+            confirmButton = {
+                Box(
+                    modifier = Modifier.fillMaxWidth()
+                        .background(urgentRed, RoundedCornerShape(24.dp))
+                        .clickable(onClick = viewModel::dismissUrgentDialog)
+                        .padding(vertical = 14.dp),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Text("我知道了", color = Color.White, fontSize = 16.sp, fontWeight = FontWeight.Bold)
+                }
+            }
+        )
+    }
     val speechLauncher = rememberLauncherForActivityResult(
         contract = ActivityResultContracts.StartActivityForResult()
     ) { result ->
@@ -415,7 +458,11 @@ fun ChatScreen(
                     start = 18.dp,
                     end = 18.dp,
                     top = 16.dp,
-                    bottom = if (isHistoryReadOnly) 32.dp else 152.dp
+                    bottom = when {
+                        isUrgentStopped -> urgentFooterHeight + 16.dp
+                        isHistoryReadOnly -> 32.dp
+                        else -> 152.dp
+                    }
                 ),
                 verticalArrangement = Arrangement.spacedBy(16.dp, Alignment.Bottom)
             ) {
@@ -442,7 +489,7 @@ fun ChatScreen(
                             }
                         )
 
-                        if (showDecisionButtons && !isHistoryReadOnly && !isUser && isLastMessage) {
+                        if (showDecisionButtons && !isHistoryReadOnly && !isUrgentStopped && !isUser && isLastMessage) {
                             AnimatedVisibility(
                                 visible = true,
                                 enter = fadeIn() + slideInVertically(initialOffsetY = { it / 2 })
@@ -486,7 +533,9 @@ fun ChatScreen(
                     }
                 }
                 val historySnapshot = openedHistory
-                if (historySnapshot != null && (isHistoryReadOnly || historySnapshot.selectedRecommendationId != null)) {
+                val hasUrgentHistory = isUrgentStopped || historySnapshot?.hasUrgentSymptoms() == true
+                if (historySnapshot != null && !hasUrgentHistory &&
+                    (isHistoryReadOnly || historySnapshot.selectedRecommendationId != null)) {
                     item(key = "completed_history_${historySnapshot.id}") {
                         CompletedHistorySnapshot(
                             history = historySnapshot,
@@ -570,7 +619,19 @@ fun ChatScreen(
         }
 
         // ---- 使用者輸入框 Input bar (floating overlay at bottom) ----
-        if (!isHistoryReadOnly) Column(
+        if (isUrgentStopped) {
+            Text(
+                "本次問診已停止，請依急迫症狀提醒就醫。",
+                color = primaryDark,
+                fontSize = 14.sp,
+                fontWeight = FontWeight.Bold,
+                modifier = Modifier.align(Alignment.BottomCenter)
+                    .onSizeChanged { size -> urgentFooterHeight = with(density) { size.height.toDp() } }
+                    .navigationBarsPadding().padding(20.dp)
+                    .background(Color(0xFFE5F2F2), RoundedCornerShape(18.dp)).padding(16.dp)
+            )
+        }
+        if (!isHistoryReadOnly && !isUrgentStopped) Column(
             modifier = Modifier
                 .align(Alignment.BottomCenter)
                 .fillMaxWidth()
@@ -900,7 +961,18 @@ private fun UrgentWarningCard(warning: String) {
             .border(1.dp, Color(0xFFE6A23C), RoundedCornerShape(18.dp))
             .padding(16.dp)
     ) {
-        Text("急迫症狀提醒", color = Color(0xFFB45F06), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        Row(
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp)
+        ) {
+            Icon(
+                imageVector = Icons.Default.WarningAmber,
+                contentDescription = null,
+                tint = Color(0xFFB45F06),
+                modifier = Modifier.size(22.dp)
+            )
+            Text("急迫症狀提醒", color = Color(0xFFB45F06), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+        }
         Spacer(modifier = Modifier.height(6.dp))
         Text(warning, color = Color(0xFF704214), fontSize = 15.sp, lineHeight = 22.sp)
     }

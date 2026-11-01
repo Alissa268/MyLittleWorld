@@ -75,3 +75,7 @@ internal fun resolveHistorySummary(summary: String, messages: List<ChatMessage>)
             .map { it.content.visibleAssistantText() }
             .firstOrNull { it.isNotBlank() }
         ?: "問診紀錄"
+
+internal fun History.hasUrgentSymptoms(): Boolean =
+    (listOf(summaryText) + chatMessages.filter { it.sender == MessageSender.AI }.map { it.content })
+        .any { it.contains("119") && (it.contains("急診") || it.contains("情況危急")) }

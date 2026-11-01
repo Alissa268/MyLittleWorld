@@ -3,6 +3,7 @@
 import androidx.compose.animation.animateColorAsState
 import com.example.medicalaiguidance.model.resolveHistorySummary
 import com.example.medicalaiguidance.model.historyDisplayDate
+import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -364,7 +365,11 @@ fun HistoryCardItem(
 
                 Column(modifier = Modifier.weight(1f)) {
                     Text(
-                        text = if (isCompleted) history.typeTitle else "症狀評估中",
+                        text = when {
+                            history.hasUrgentSymptoms() -> "急迫症狀"
+                            isCompleted -> history.typeTitle
+                            else -> "症狀評估中"
+                        },
                         fontSize = 20.sp,
                         fontWeight = FontWeight.Bold,
                         color = Color(0xFF1A2E2E),

@@ -89,3 +89,15 @@
 - 更新醫師推薦步驟預覽圖：`android/app/src/main/res/drawable/preview_step_doctor.png`。
 - 更新歷史紀錄步驟預覽圖：`android/app/src/main/res/drawable/preview_step_history.png`。
 - 兩張圖片由 `android/app/src/main/java/com/example/medicalaiguidance/screen/GettingStartedScreen.kt` 的 `screenshotResList` 引用，用於操作教學畫面。
+
+## 8. 急迫症狀提醒與問診停用
+
+- 後端回報急迫狀態、要求警告，或回覆包含急診與 119 提醒時，前端顯示急迫警示彈窗。
+- 彈窗沿用白底與圓角，標題、重點提示及確認按鈕使用刪除對話相同的紅色 `#B44A4A`。
+- 停用當次問診的文字輸入、語音輸入及推薦操作，清除輸入並停止錄音；關閉彈窗不會解除停用。
+- 急迫歷史紀錄隱藏「未完成問診紀錄」摘要區塊，保留對話及警告。
+- 歷史列表與首頁近期紀錄將這類紀錄的標題顯示為「急迫症狀」。
+- 急迫提醒卡片標題旁新增橘色警告三角形圖示。
+- 依底部停止問診提示條的實際高度增加捲動留白，讓提醒卡片可完整閱讀。
+- 新增 `UrgentChatStopTest`，驗證急迫判斷與關閉彈窗後仍禁止輸入、語音及推薦。
+- 本項僅修改前端，未改動後端；推薦理由的新欄位與版型仍在討論，尚未實作。
