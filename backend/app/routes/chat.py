@@ -76,6 +76,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_id_before = case.department_result.dept_id if case.department_result else None
         prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
         prior_medical_facts = _clinical_progress_facts(case)
+        availability_pending_before = awaiting_availability_answer(case)
         prior_availability_facts = _availability_facts(case)
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
@@ -307,7 +308,13 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and turn_interpretation_complete
                     and (not safety_check_turn or safety_completed_this_turn)
                 )
-                if department_reasoning_allowed:
+                # An availability answer with no new symptom keeps the department already decided;
+                # re-running convergence on unchanged evidence could reopen it.
+                department_kept = bool(
+                    availability_pending_before
+                    and _symptom_facts(_clinical_progress_facts(case)) == _symptom_facts(prior_medical_facts)
+                )
+                if department_reasoning_allowed and not department_kept:
                     settle_unanswered_clue_question(case)
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
@@ -576,6 +583,11 @@ def _clinical_progress_facts(case: TriageCase) -> set[tuple[str, ...]]:
     if safety_screen_resolved(case):
         facts.add(("safety", "resolved"))
     return facts
+
+
+def _symptom_facts(facts: set[tuple[str, ...]]) -> set[tuple[str, ...]]:
+    """Accepted symptom evidence only; answers to workflow questions are left out."""
+    return {fact for fact in facts if fact[0] == "medical"}
 
 
 def _begin_revision(case: TriageCase) -> None:

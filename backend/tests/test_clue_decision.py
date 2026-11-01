@@ -460,6 +460,37 @@ def test_decide_breaks_a_tie_with_the_ai_rank():
     assert (single.kind, single.dept_id, single.reason) == ("decide", B, "question_limit")
 
 
+def test_turn_limit_decides_only_a_single_top_target_department():
+    common = dict(ai_resolved_dept_id=None, askable=[clue("咳嗽", {A, B})], questions_asked=4, tiebreak_used=False,
+                  user_declined=False, clue_confirmed_dept_ids=set(), question_limit=5, non_target_dept_ids={FAMILY},
+                  ai_order=[B, A])
+    before = clues.decide(candidates={A, B, FAMILY}, scores={A: 2, B: 1, FAMILY: 1}, **common)
+    assert (before.kind, before.reason) == ("ask_clue", "continue")
+    single = clues.decide(candidates={A, B, FAMILY}, scores={A: 2, B: 1, FAMILY: 1}, turn_limit_reached=True, **common)
+    assert (single.kind, single.dept_id, single.reason) == ("decide", A, "turn_limit_top_score")
+    # A tie is not broken by the AI rank here; the safety-net question is asked instead.
+    tied = clues.decide(candidates={A, B, FAMILY}, scores={A: 2, B: 2, FAMILY: 1}, turn_limit_reached=True, **common)
+    assert (tied.kind, tied.reason) == ("ask_clue", "continue")
+    family = clues.decide(candidates={A, B, FAMILY}, scores={A: 1, B: 1, FAMILY: 2}, turn_limit_reached=True, **common)
+    assert (family.kind, family.reason) == ("ask_clue", "continue")
+
+
+def test_safety_net_turn_decides_the_top_department_instead_of_asking():
+    settings = get_settings()
+    case = decision_case(asked=4)
+    case.conversation_state.turn_count = settings.safety_net_ask_turn - 1
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], [hit(A, "頭暈"), hit(A, "頭痛"), hit(B, "頭暈")], ACTIVE)
+    assert (case.conversation_state.clue_decision.kind, case.conversation_state.clue_decision.reason) == (
+        "decide", "turn_limit_top_score")
+    assert case.department_result.dept_id == A and case.conversation_state.department_status == "resolved"
+    # Once the safety-net question was asked, the patient's choice to continue is kept.
+    later = decision_case(asked=4)
+    later.conversation_state.turn_count = settings.safety_net_ask_turn
+    later.conversation_state.safety_net_asked = True
+    reasoning.apply_clue_decision(later, [clue("咳嗽", {A, B})], [hit(A, "頭暈"), hit(A, "頭痛"), hit(B, "頭暈")], ACTIVE)
+    assert later.conversation_state.clue_decision.kind == "ask_clue"
+
+
 def test_tie_takes_the_ai_ranked_department_and_waits_for_confirmation():
     case = ranked(decision_case(), [C, B, A])
     reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], TIED, ACTIVE)

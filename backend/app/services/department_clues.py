@@ -322,12 +322,15 @@ def decide(
     askable: list[ClueConcept], questions_asked: int, tiebreak_used: bool,
     user_declined: bool, clue_confirmed_dept_ids: set[int], question_limit: int,
     non_target_dept_ids: Iterable[int] = (), ai_order: Iterable[int] = (),
+    turn_limit_reached: bool = False,
 ) -> ClueDecision:
     """Apply rules A/C and the decision triggers; every decision still needs user confirmation.
 
     A tied top score goes to the tied department ranked first in ``ai_order`` (this turn's
     validated convergence candidates); only when none of them is ranked does it fall back
     to family medicine. No extra tiebreak question is asked, so ``tiebreak_used`` is unused.
+    At the safety-net turn (``turn_limit_reached``) only a single top-scoring target
+    department is decided; otherwise clues continue and the safety-net question is asked.
     """
     if not candidates:
         return ClueDecision("defer_to_safety_net", reason="no_candidates")
@@ -341,10 +344,14 @@ def decide(
         reason = "no_askable_clues"
     elif questions_asked >= question_limit:
         reason = "question_limit"
+    elif turn_limit_reached:
+        reason = "turn_limit_top_score"
     else:
         return ClueDecision("ask_clue", reason="continue")
     best = max(scores.get(dept_id, 0) for dept_id in candidates)
     tied = sorted(dept_id for dept_id in candidates if scores.get(dept_id, 0) == best)
+    if reason == "turn_limit_top_score" and (len(tied) != 1 or tied[0] in set(non_target_dept_ids)):
+        return ClueDecision("ask_clue", reason="continue")
     if len(tied) == 1:
         return ClueDecision("decide", dept_id=tied[0], reason=reason)
     ranked = [dept_id for dept_id in dict.fromkeys(ai_order) if dept_id in tied]

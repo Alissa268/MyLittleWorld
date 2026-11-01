@@ -458,6 +458,9 @@ def apply_clue_decision(
         clue_confirmed_dept_ids=clues.clue_confirmed_departments(state.clue_concepts_asked, candidates, records),
         question_limit=settings.clue_question_limit, non_target_dept_ids={settings.family_medicine_dept_id},
         ai_order=[item.dept_id for item in state.candidate_departments],
+        # advance_conversation counts this turn's message afterwards, as the safety-net check sees it.
+        turn_limit_reached=(not state.safety_net_asked
+                            and state.turn_count + 1 >= settings.safety_net_ask_turn),
     )
     kind, dept_id, result = decision.kind, decision.dept_id, None
     if kind == "decide" and dept_id == ai_resolved:

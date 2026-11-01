@@ -80,13 +80,13 @@ def urgent_ttas(case):
                          need_more_info=False, is_final=True)
 
 
-def turn(case_id: str, message: str, interpretation: str, *, urgent: bool = False):
+def turn(case_id: str, message: str, interpretation: str, *, urgent: bool = False, department=converge):
     planner = AsyncMock(return_value=ClarificationSuggestion("sufficient", None, None, "資訊足夠"))
     ttas = {"new": urgent_ttas} if urgent else {"new": chat_route.apply_ttas_evaluation}
     with patch.object(chat_route, "get_settings", return_value=SETTINGS), patch.object(
         rag_triage_adapter, "get_settings", return_value=SETTINGS,
     ), patch.object(rag_triage_adapter, "complete_prompt", new=AsyncMock(return_value=interpretation)), patch.object(
-        chat_route, "reason_about_departments", new=converge,
+        chat_route, "reason_about_departments", new=department,
     ), patch.object(chat_route, "request_clarification", new=planner), patch.object(
         chat_route, "generate_triage_reply", new=AsyncMock(side_effect=lambda **kw: kw["fallback_reply"]),
     ), patch.object(chat_route, "ttas_requires_immediate_action", return_value=urgent), patch.object(
@@ -137,6 +137,29 @@ def test_anytime_answer_confirms_without_time_conditions():
     assert state["availability_status"] == "answered" and state["stage"] == "waiting_confirmation"
     availability = body["triage_case"]["availability"]
     assert availability["time_preferences"] == [] and availability["preferred_sessions"] == []
+
+
+def test_anytime_answer_keeps_the_decided_department():
+    # The convergence AI may judge unchanged evidence differently; the availability answer adds no symptom.
+    case_id = ready_case("avail-keep-department").case_id
+    ask(case_id)
+    reopen = AsyncMock(side_effect=lambda case: setattr(case.conversation_state, "department_status", "ambiguous"))
+    body, _ = turn(case_id, "都可以", payload("都可以", act="answer", pending=availability_answer("都可以")),
+                   department=reopen)
+    state = state_of(body)
+    reopen.assert_not_awaited()
+    assert state["department_status"] == "resolved" and body["department_result"]["dept_id"] == 1298
+    assert state["reply_source"] == "CONFIRMATION" and state["stage"] == "waiting_confirmation"
+
+
+def test_new_symptom_with_the_availability_answer_recomputes_the_department():
+    case_id = ready_case("avail-new-symptom").case_id
+    ask(case_id)
+    department = AsyncMock(side_effect=converge)
+    text = "都可以，另外也會頭暈"
+    turn(case_id, text, payload(text, act="answer", pending=availability_answer("都可以"),
+                                extractions=[symptom("頭暈")]), department=department)
+    department.assert_awaited_once()
 
 
 def test_time_already_given_is_not_asked_again():
