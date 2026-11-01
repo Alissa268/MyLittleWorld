@@ -1125,29 +1125,30 @@ private fun buildRecommendationBreakdown(
     type: BreakdownType
 ): RecommendationBreakdown? {
     return when (type) {
-        BreakdownType.SPECIALTY -> RecommendationBreakdown(
-            title = SPECIALTY_MATCH_TITLE,
-            description = recommendation.specialtyDescription()
-        )
-        BreakdownType.TIME -> RecommendationBreakdown(
-            title = TIME_MATCH_TITLE,
-            description = recommendation.timeDescription()
-        )
+        BreakdownType.SPECIALTY -> recommendation.specialtyDescription().takeIf { it.isNotBlank() }?.let {
+            RecommendationBreakdown(title = SPECIALTY_MATCH_TITLE, description = it)
+        }
+        BreakdownType.TIME -> recommendation.timeDescription().takeIf { it.isNotBlank() }?.let {
+            RecommendationBreakdown(title = TIME_MATCH_TITLE, description = it)
+        }
     }
 }
 
 
-internal const val SPECIALTY_MATCH_TITLE = "醫師專長資料"
-internal const val TIME_MATCH_TITLE = "可掛號診次"
+internal const val SPECIALTY_MATCH_TITLE = "科別建議"
+internal const val TIME_MATCH_TITLE = "看診時間"
 
 internal fun RecommendationItemDto.specialtyDescription(): String {
-    val tags = specialtyTags.filter { it.isNotBlank() }.joinToString("、")
-    return if (tags.isBlank()) "目前沒有可顯示的正式專長資料。"
-        else "班表提供的醫師專長：$tags。此資料不是醫師能力或疾病診斷評價。"
+    return departmentReason.trim().ifBlank {
+        childDept.ifBlank { parentDept }.trim().takeIf { it.isNotBlank() }
+            ?.let { "目前建議您看${it}門診。" }.orEmpty()
+    }
 }
 
 internal fun RecommendationItemDto.timeDescription(): String {
-    return "可掛號診次：${naturalVisitTime()}。繼續前仍會重新確認班表。"
+    return timeReason.trim().ifBlank {
+        if (date.isBlank() || session.isBlank()) "" else "此門診的看診時間為${naturalVisitTime()}。"
+    }
 }
 
 

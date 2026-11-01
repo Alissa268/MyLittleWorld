@@ -287,7 +287,7 @@ class RecommendationIntegrationUnitTest {
 
     @Test fun neutralScoreIsNotInterpretedAsClinicalRating() {
         val item = displayRecommendation()
-        assertTrue(item.specialtyDescription().contains("聽力評估"))
+        assertEquals("目前建議您看耳科門診。", item.specialtyDescription())
         assertFalse(item.specialtyDescription().contains("高度符合"))
         assertFalse(item.specialtyDescription().contains("星"))
         assertEquals("SQL 專長資料：聽力評估", item.compactCardReason())
@@ -311,13 +311,47 @@ class RecommendationIntegrationUnitTest {
     }
 
     @Test fun presentationTitlesDescribeFactsNotAccuracy() {
-        assertEquals("醫師專長資料", SPECIALTY_MATCH_TITLE)
-        assertEquals("可掛號診次", TIME_MATCH_TITLE)
+        assertEquals("科別建議", SPECIALTY_MATCH_TITLE)
+        assertEquals("看診時間", TIME_MATCH_TITLE)
     }
 
     @Test fun missingSqlSpecialtiesDoesNotInferFromDepartmentOrSymptom() {
         val item = displayRecommendation().copy(specialtyTags = emptyList(), matchReason = null)
-        assertEquals("目前沒有可顯示的正式專長資料。", item.specialtyDescription())
+        assertEquals("目前建議您看耳科門診。", item.specialtyDescription())
+    }
+
+    @Test fun patientFacingReasonsUseBackendSentencesWithoutInventingMatch() {
+        val item = displayRecommendation().copy(
+            departmentReason = "  依您描述的眼睛紅，建議眼科。  ",
+            timeReason = "這個門診在11月10日（週二）下午，符合您說的「星期二」和「下午」。"
+        )
+        assertEquals("依您描述的眼睛紅，建議眼科。", item.specialtyDescription())
+        assertEquals(item.timeReason, item.timeDescription())
+        assertEquals(item.timeReason, item.copy(timeScore = 0.0).timeDescription())
+    }
+
+    @Test fun whitespaceAndLegacyReasonsDoNotBecomePatientFacingReasons() {
+        val item = displayRecommendation().copy(departmentReason = " \n ", timeReason = " ")
+        assertEquals("目前建議您看耳科門診。", item.specialtyDescription())
+        assertTrue(item.timeDescription().contains("下午"))
+        assertFalse(item.timeDescription().contains("符合"))
+        val empty = item.copy(childDept = "", parentDept = "", date = "", session = "")
+        assertEquals("", empty.specialtyDescription())
+        assertEquals("", empty.timeDescription())
+    }
+
+    @Test fun recommendationParserReadsBothPatientFacingReasons() {
+        val result = parseRecommendationResult("""{
+            "case_id":"reason_test",
+            "recommendations":{"specialty_first":[{
+                "recommendation_id":"rec_s_reason_001", "doctor":"測試醫師",
+                "department_reason":"依您描述的症狀，建議眼科。",
+                "time_reason":"此門診為週二下午，符合您的需求。"
+            }],"time_first":[]}
+        }""")
+        val item = result.recommendations.specialtyFirst.single()
+        assertEquals("依您描述的症狀，建議眼科。", item.departmentReason)
+        assertEquals("此門診為週二下午，符合您的需求。", item.timeReason)
     }
 
     @Test
