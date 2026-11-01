@@ -17,7 +17,7 @@ from app.services.case_store import save_case
 ITEM_FIELDS = {
     "recommendation_id", "parentDept", "childDept", "doctor", "date", "session", "slot", "doctor_id",
     "schedule_id", "session_time", "room", "visit_type", "specialty_tags", "specialty_score", "time_score",
-    "match_reason", "score", "reasons", "rank", "is_best_match", "dept_id",
+    "match_reason", "score", "reasons", "department_reason", "time_reason", "rank", "is_best_match", "dept_id",
 }
 RESULT_FIELDS = {"case_id", "recommendations", "fallback_departments", "total_count"}
 
@@ -101,6 +101,7 @@ def test_recommend_success_contract(monkeypatch):
         assert isinstance(item["score"], (int, float)) and 0 <= item["score"] <= 100
         assert 0 <= item["specialty_score"] <= 1 and 0 <= item["time_score"] <= 1
         assert isinstance(item["reasons"], list) and all(isinstance(reason, str) for reason in item["reasons"])
+        assert isinstance(item["department_reason"], str) and isinstance(item["time_reason"], str)
         assert isinstance(item["is_best_match"], bool)
     ids = [item["recommendation_id"] for item in items_of(body)]
     assert len(ids) == len(set(ids))

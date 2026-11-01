@@ -523,6 +523,9 @@ class RecommendationItem(BaseModel):
     match_reason: Optional[str] = None
     score: float
     reasons: List[str] = Field(default_factory=list)
+    # Patient-facing sentences; reasons keeps the diagnostic detail.
+    department_reason: str = ""
+    time_reason: str = ""
     rank: Optional[int] = None
     is_best_match: bool = False
     dept_id: Optional[int] = None

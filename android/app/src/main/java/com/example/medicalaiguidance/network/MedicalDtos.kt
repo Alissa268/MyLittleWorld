@@ -219,7 +219,9 @@ data class RecommendationItemDto(
     val specialtyScore: Double? = null,
     val timeScore: Double? = null,
     val matchReason: String? = null,
-    val deptId: Int? = null
+    val deptId: Int? = null,
+    val departmentReason: String = "",
+    val timeReason: String = ""
 )
 
 data class RecommendationColumnsDto(
@@ -639,7 +641,9 @@ private fun JSONObject.toRecommendationItemDto(): RecommendationItemDto = Recomm
     specialtyScore = optNullableDouble("specialty_score"),
     timeScore = optNullableDouble("time_score"),
     matchReason = optNullableString("match_reason"),
-    deptId = optNullableInt("dept_id")
+    deptId = optNullableInt("dept_id"),
+    departmentReason = optString("department_reason", ""),
+    timeReason = optString("time_reason", "")
 )
 
 private fun RecommendationItemDto.toJsonObject(): JSONObject = JSONObject().apply {
@@ -664,6 +668,8 @@ private fun RecommendationItemDto.toJsonObject(): JSONObject = JSONObject().appl
     timeScore?.let { put("time_score", it) }
     matchReason?.let { put("match_reason", it) }
     deptId?.let { put("dept_id", it) }
+    put("department_reason", departmentReason)
+    put("time_reason", timeReason)
 }
 
 private fun JSONArray?.toFallbackDepartmentList(): List<FallbackDepartmentDto> {

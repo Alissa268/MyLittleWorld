@@ -287,6 +287,10 @@ def _legacy_session_rank(row: dict[str, Any], availability: Availability) -> int
     return 0 if normalize_session(row.get("session")) in preferred else 1
 
 
+def preference_matches_row(row: dict[str, Any], preference: TimePreference) -> bool:
+    return _matches(row, preference)
+
+
 def _matches(row: dict[str, Any], preference: TimePreference) -> bool:
     row_date = parse_date(row.get("date"))
     if preference.kind == "session":

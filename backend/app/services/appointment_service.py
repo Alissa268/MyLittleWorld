@@ -23,6 +23,7 @@ from app.services.schedule_filter import (
     session_range,
     weekday_label as schedule_weekday_label,
 )
+from app.services.patient_reason_text import department_reason, time_reason
 from app.services.specialty_scoring import SpecialtyScore, score_doctor_specialties
 from app.services.time_preference_service import (
     describe_time_match,
@@ -367,6 +368,8 @@ def _build_recommendations(
             match_reason=None,
             score=score,
             reasons=reasons,
+            department_reason=department_reason(case, slot, specialty),
+            time_reason=time_reason(case, slot, relaxed_by_date),
             rank=len(items) + 1,
             is_best_match=specialty_first and len(items) == 0,
             dept_id=_optional_int(slot.get("dept_id")) or (

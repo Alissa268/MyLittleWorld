@@ -60,8 +60,9 @@ Code-level tests use synthetic Schedule rows and mocked AI responses. Final vali
 
 - 回應頂層欄位固定為 `case_id`、`recommendations`（`specialty_first`、`time_first` 兩欄）、`fallback_departments`、`total_count`。
 - 每欄最多 5 筆；同一 `recommendation_id` 不會重複出現。
-- 單筆欄位集合固定為：`recommendation_id`、`parentDept`、`childDept`、`doctor`、`date`、`session`、`slot`、`doctor_id`、`schedule_id`、`session_time`、`room`、`visit_type`、`specialty_tags`、`specialty_score`、`time_score`、`match_reason`、`score`、`reasons`、`rank`、`is_best_match`、`dept_id`。
+- 單筆欄位集合固定為：`recommendation_id`、`parentDept`、`childDept`、`doctor`、`date`、`session`、`slot`、`doctor_id`、`schedule_id`、`session_time`、`room`、`visit_type`、`specialty_tags`、`specialty_score`、`time_score`、`match_reason`、`score`、`reasons`、`department_reason`、`time_reason`、`rank`、`is_best_match`、`dept_id`。
 - 型別：`recommendation_id`、`doctor_id`、`schedule_id` 為非空字串；`dept_id` 為整數；`date` 為 ISO `YYYY-MM-DD`；`session` 為非空字串；`specialty_tags` 為字串或 `null`（SQL 原文，不拆陣列）；`reasons` 為字串陣列；`is_best_match` 為布林。
+- `department_reason`、`time_reason` 為給病人看的完整句子（字串，可為空；快速查詢與回診推薦目前為空字串）。由後端用已驗證的病人原話、線索題回答、官方科別、SQL 專長與班表組成，不另外呼叫 AI。`department_reason` 先說科別理由；AI 專長分數為 high 以上（≥0.75）或 medium（0.5）且有 `specialty_tags` 時，再接一句醫師專長理由。`time_reason` 引用病人說過的時間原話，並說明是否符合、第幾選擇。`reasons` 保留給除錯，不建議直接顯示。
 - 分數量尺：`score` 在 0～100（相容顯示值，不作排序）；`specialty_score` 與 `time_score` 在 0～1。
 - `total_count`＝兩欄實際回傳筆數相加（`len(specialty_first) + len(time_first)`，見 `appointment_service.py`）。同一班表同時出現在兩欄會算兩次；它不是 SQL 班表筆數，也不是去重後醫師數。
 - AI 專長評分失敗（逾時、格式錯誤等）時，整批所有醫師的 `specialty_score` 都是中性 0.5，仍回 200。
