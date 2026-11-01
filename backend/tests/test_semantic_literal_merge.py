@@ -64,7 +64,9 @@ def reason(case, provider):
 def test_c14_literal_itch_hit_still_runs_semantic_retrieval_and_adds_eye_department():
     case = red_itchy_eyes()
     literal = reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)
-    assert {row["knowledge_concept"] for row in literal} == {"癢"} and {row["dept_id"] for row in literal} == ITCH
+    # 「眼睛紅」 (official red-eye page, 2026-11-02) now matches literally; 「眼睛癢」 still needs semantics.
+    assert {row["knowledge_concept"] for row in literal} == {"癢", "眼睛紅"}
+    assert {row["dept_id"] for row in literal} == ITCH | EYE
     provider = Provider([("眼睛紅紅的很癢", "眼睛癢")])
     retrieved = reason(case, provider)
     assert provider.purposes == ["department_semantic_retrieval", "department_retrieval_entailment",

@@ -46,8 +46,7 @@ def normalize_concept(value: str) -> str:
 def load_department_knowledge(directory: Path = KNOWLEDGE_DIR) -> tuple[list[dict], list[dict]]:
     sources = json.loads((directory / "sources.json").read_text(encoding="utf-8"))["sources"]
     records = json.loads((directory / "vghtpe_department_guidance.json").read_text(encoding="utf-8"))["records"]
-    supplement = directory / "supplemental_guidance_20261021.json"
-    if supplement.exists():
+    for supplement in sorted(directory.glob("supplemental_guidance_*.json")):
         additions = json.loads(supplement.read_text(encoding="utf-8"))
         sources.extend(additions["sources"])
         records.extend(additions["records"])
