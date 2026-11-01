@@ -39,6 +39,12 @@ internal data class ChatLatencyTrace(
 internal fun shouldAppendAssistantReply(previous: ChatMessage?, reply: String): Boolean =
     reply.isNotBlank() && (previous?.sender != MessageSender.AI || previous.content != reply)
 
+internal fun TriageResultDto.requiresUrgentStop(): Boolean =
+    conversationState.clarificationStatus == "urgent" || triage.warningRequired ||
+        listOfNotNull(reply, triage.warningMessage).any {
+            it.contains("119") && (it.contains("急診") || it.contains("情況危急"))
+        }
+
 internal fun currentQuestionAnswer(question: QuestionItemDto?, answer: String): BatchAnswerDto? =
     question?.let { current ->
         answer.trim().takeIf { it.isNotBlank() }?.let { BatchAnswerDto(current.key, it) }
@@ -117,6 +123,24 @@ class ChatViewModel(
 
     private val _urgentWarning = MutableStateFlow<String?>(null)
     val urgentWarning: StateFlow<String?> = _urgentWarning.asStateFlow()
+    private val _isUrgentStopped = MutableStateFlow(false)
+    val isUrgentStopped: StateFlow<Boolean> = _isUrgentStopped.asStateFlow()
+    private val _showUrgentDialog = MutableStateFlow(false)
+    val showUrgentDialog: StateFlow<Boolean> = _showUrgentDialog.asStateFlow()
+
+    fun dismissUrgentDialog() { _showUrgentDialog.value = false }
+
+    private fun stopForUrgentWarning(message: String?) {
+        if (!_isUrgentStopped.value) _showUrgentDialog.value = true
+        _isUrgentStopped.value = true
+        _urgentWarning.value = message?.takeIf { it.isNotBlank() }
+            ?: "請立即前往急診；情況危急請撥打 119。"
+        _inputText.value = ""
+        _showDecisionButtons.value = false
+        _showDoctorButton.value = false
+        cancelVoiceRecording()
+        stopVoicePlayback()
+    }
 
     private val _isHistoryReadOnly = MutableStateFlow(false)
     val isHistoryReadOnly: StateFlow<Boolean> = _isHistoryReadOnly.asStateFlow()
@@ -189,7 +213,7 @@ class ChatViewModel(
         }
     }
 
-    private fun historyReadOnly(): Boolean = _isHistoryReadOnly.value ||
+    private fun historyReadOnly(): Boolean = _isUrgentStopped.value || _isHistoryReadOnly.value ||
         (caseId ?: openedHistoryId)?.let { repository.getHistoryById(it)?.status == HistoryStatus.COMPLETED } == true
 
     fun onInputTextChanged(text: String) {
@@ -221,6 +245,8 @@ class ChatViewModel(
         _batchValidationError.value = null
         _chatError.value = null
         _urgentWarning.value = null
+        _isUrgentStopped.value = false
+        _showUrgentDialog.value = false
         repository.clearRecommendationFlow()
         _selectedVisitType.value?.let { repository.setActiveVisitType(it.apiValue) }
         repository.clearChatMessages()
@@ -244,6 +270,8 @@ class ChatViewModel(
         ttsSession = ttsSessionFactory()
         _inputText.value = ""
         val history = repository.loadHistoryIntoCurrentChat(historyId)
+        _isUrgentStopped.value = false
+        _showUrgentDialog.value = false
         _openedHistory.value = history
         openedHistoryId = history?.id
         activeHistoryId = history?.id ?: "hist_${System.currentTimeMillis()}"
@@ -285,6 +313,14 @@ class ChatViewModel(
                 if (generation != resumeGeneration || openedHistoryId != history.id) return@launch
                 check(resume.caseId == history.id) { "續接案件識別不一致。" }
                 if (!resume.canContinue) {
+                    val emergencyMessage = resume.warningMessage ?: history.chatMessages.lastOrNull {
+                        it.sender == MessageSender.AI && it.content.contains("119") &&
+                            (it.content.contains("急診") || it.content.contains("情況危急"))
+                    }?.content
+                    if (resume.warningRequired || resume.state.clarificationStatus == "urgent" ||
+                        emergencyMessage?.contains("119") == true) {
+                        stopForUrgentWarning(emergencyMessage)
+                    }
                     _historyResumeMessage.value = resume.warningMessage ?: "目前無法安全續接此案件，請重新開始問診。"
                     return@launch
                 }
@@ -812,8 +848,11 @@ class ChatViewModel(
         _currentBatchQuestion.value = null
         _batchAnswers.value = emptyMap()
         _batchValidationError.value = null
-        _urgentWarning.value = result.triage.warningMessage
-            ?.takeIf { result.triage.warningRequired }
+        if (result.requiresUrgentStop()) {
+            stopForUrgentWarning(result.triage.warningMessage ?: result.reply)
+        } else if (!_isUrgentStopped.value) {
+            _urgentWarning.value = null
+        }
         val responseVisitPlan = VisitPlan.fromApiValue(result.triageCase?.visitType)
         if (_selectedVisitType.value == null && responseVisitPlan != VisitPlan.UNKNOWN) {
             _selectedVisitType.value = responseVisitPlan

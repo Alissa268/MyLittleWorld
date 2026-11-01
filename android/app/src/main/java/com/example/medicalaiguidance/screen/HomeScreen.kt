@@ -40,6 +40,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.medicalaiguidance.R
 import com.example.medicalaiguidance.model.HistoryStatus
+import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import com.example.medicalaiguidance.navigation.Route
 import com.example.medicalaiguidance.service.MyAccessibilityService
 import com.example.medicalaiguidance.viewmodel.HomeViewModel
@@ -438,7 +439,11 @@ fun HomeScreen(
                 ) { history ->
                     RecordItem(
                         date = history.date,
-                        summary = if (history.status == HistoryStatus.UNCOMPLETED) "症狀評估中" else history.typeTitle,
+                        summary = when {
+                            history.hasUrgentSymptoms() -> "急迫症狀"
+                            history.status == HistoryStatus.UNCOMPLETED -> "症狀評估中"
+                            else -> history.typeTitle
+                        },
                         icon = if (history.status == HistoryStatus.COMPLETED) Icons.Filled.MedicalServices else Icons.Default.Psychology,
                         status = history.status,
                         onClick = { navController.navigate(Route.chatHistory(history.id)) }
