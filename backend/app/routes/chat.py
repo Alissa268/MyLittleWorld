@@ -609,19 +609,17 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.safety_positive_reported = False
     case.conversation_state.uncertainty_reasons = []
     case.conversation_state.next_information_needed = []
-    case.conversation_state.asked_clarification_intents = []
     case.conversation_state.pending_clarification_intent = None
     case.conversation_state.pending_clarification_question = None
-    case.conversation_state.clarification_evidence = {}
     case.conversation_state.department_status = "unresolved"
     case.conversation_state.candidate_departments = []
     case.conversation_state.department_uncertainty_reason = None
     case.conversation_state.department_next_information_needed = None
     case.conversation_state.department_next_question_intent = None
     case.conversation_state.semantic_official_links = []
-    # Clue questions restart from scratch; their duplicate check ignores pre-revision replies.
-    case.conversation_state.clue_questions_asked = 0
-    case.conversation_state.clue_concepts_asked = []
+    # Revision continues the case: answered questions, asked intents, clue answers and asked
+    # body parts are kept, so nothing already answered is asked again. Only the department
+    # decision and the turn budgets restart.
     case.conversation_state.clue_tiebreak_used = False
     case.conversation_state.clue_user_declined = False
     case.conversation_state.department_clue_offer = []
@@ -632,8 +630,6 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.safety_net_asked = False
     case.conversation_state.safety_net_choice = None
     case.conversation_state.body_part_question_source = None
-    case.conversation_state.body_part_questions_asked = []
-    case.conversation_state.revision_history_start = len(case.history_records)
     case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)
     case.conversation_state.clarification_reasons.pop("department", None)

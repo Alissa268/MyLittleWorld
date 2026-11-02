@@ -329,36 +329,28 @@ def test_backend_decision_counts_as_sufficient_but_ai_cannot_confirm():
 
 # --- Revision -----------------------------------------------------------------------------------
 
-def test_revision_clears_clue_fields_and_allows_the_same_clue_question_again():
+def test_revision_keeps_asked_clue_concepts_and_never_repeats_the_clue_question():
     case, body = dizzy_start("decide-revision")
     question = body["next_question"]
+    asked = list(case.conversation_state.clue_concepts_asked)
     chat_route._begin_revision(case)
     state = case.conversation_state
-    assert (state.clue_questions_asked, state.clue_concepts_asked, state.clue_tiebreak_used, state.clue_decision,
-            state.department_clue_offer, state.pending_clue_question_index, state.clue_reask_count) == (
-        0, [], False, None, [], None, 0)
-    assert state.revision_history_start == len(case.history_records)
+    assert (state.clue_questions_asked, state.clue_concepts_asked) == (1, asked)
+    assert (state.clue_tiebreak_used, state.clue_decision, state.department_clue_offer,
+            state.pending_clue_question_index, state.clue_reask_count) == (False, None, [], None, 0)
     case, body = turn(case, "還是頭暈", [symptom("頭暈", "頭暈")])
-    assert (body["next_question"], body["conversation_state"]["reply_source"]) == (question, "CLUE_TEMPLATE")
-    assert body["conversation_state"]["clue_questions_asked"] == 1
-
-
-def test_non_clue_duplicate_check_still_spans_the_whole_history():
-    case = TriageCase(case_id="decide-duplicate")
-    case.history_records = [Message(role="assistant", content="頭暈多久了？")]
-    case.conversation_state.revision_history_start = 1
-    assert conversation_service._repeated_question(
-        case, "頭暈多久了？", dialogue_act=None, explanation=None, safety_planning=False) == "duplicate_question"
-    assert conversation_service._repeated_question(
-        case, "頭暈多久了？", dialogue_act=None, explanation=None, safety_planning=False,
-        since=conversation_service._duplicate_window(case, True)) is None
+    assert body["next_question"] != question
+    assert {record.concept for record in asked} <= {
+        record["concept"] for record in body["conversation_state"]["clue_concepts_asked"]}
 
 
 # --- Old snapshots ------------------------------------------------------------------------------
 
 def test_old_snapshots_load_without_decision_fields():
-    state = ConversationState.model_validate({"turn_count": 4, "clue_questions_asked": 2})
-    assert (state.clue_decision, state.revision_history_start) == (None, 0)
+    # revision_history_start was dropped; snapshots that still carry it must load.
+    state = ConversationState.model_validate(
+        {"turn_count": 4, "clue_questions_asked": 2, "revision_history_start": 3})
+    assert state.clue_decision is None
     record = ClueDecisionRecord.model_validate({"kind": "decide"})
     assert (record.reason, record.dept_id, record.tied_dept_ids) == ("", None, [])
 

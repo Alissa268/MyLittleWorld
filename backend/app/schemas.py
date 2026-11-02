@@ -398,8 +398,6 @@ class ConversationState(BaseModel):
     pending_clue_question_index: Optional[int] = None
     clue_reask_count: int = Field(default=0, ge=0)
     clue_decision: Optional[ClueDecisionRecord] = None
-    # history_records length at the latest revision; clue duplicate checks start here.
-    revision_history_start: int = Field(default=0, ge=0)
     # Safety net: the one-time turn-8 question and the patient's answer; revision resets both.
     safety_net_asked: bool = False
     safety_net_choice: Optional[Literal["family_medicine", "continue"]] = None

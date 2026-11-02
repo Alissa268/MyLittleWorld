@@ -445,18 +445,13 @@ def _valid_explanation(value: object) -> bool:
     )
 
 
-def _asked_before(case: TriageCase, question: str, since: int = 0) -> bool:
+def _asked_before(case: TriageCase, question: str) -> bool:
     """Displayed replies may prefix an explanation line; compare the question itself too."""
     question = question.strip()
     return any(
         item.role == "assistant" and (item.content == question or item.content.endswith("\n" + question))
-        for item in case.history_records[since:]
+        for item in case.history_records
     )
-
-
-def _duplicate_window(case: TriageCase, clue_question: bool) -> int:
-    """Clue questions restart after a revision cleared their records; other questions never do."""
-    return case.conversation_state.revision_history_start if clue_question else 0
 
 
 def _explained_question(case: TriageCase) -> str | None:
@@ -466,7 +461,7 @@ def _explained_question(case: TriageCase) -> str | None:
 
 
 def _repeated_question(case: TriageCase, question: str, *, dialogue_act: str | None,
-                       explanation: object, safety_planning: bool, since: int = 0) -> str | None:
+                       explanation: object, safety_planning: bool) -> str | None:
     """Shared duplicate rule: only a validly explained restatement of the explained question may repeat."""
     question = question.strip()
     if (dialogue_act == "request_explanation" and _valid_explanation(explanation)
@@ -475,7 +470,7 @@ def _repeated_question(case: TriageCase, question: str, *, dialogue_act: str | N
     # The safety screen always restates the full question (continue_safety_check).
     if safety_planning:
         return None
-    if _asked_before(case, question, since):
+    if _asked_before(case, question):
         return "duplicate_question"
     return None
 
@@ -542,8 +537,7 @@ def _question_rejection(case: TriageCase, proposal: object, required_intent: str
     if re.search(r"剛才問題|上一個追問", question):
         return "generic_retry"
     repeated = _repeated_question(case, question, dialogue_act=dialogue_act,
-                                  explanation=proposal.get("explanation"), safety_planning=safety_planning,
-                                  since=_duplicate_window(case, clue is not None))
+                                  explanation=proposal.get("explanation"), safety_planning=safety_planning)
     if repeated:
         return repeated
     if not safety_planning and _asks_filled_duration(case, intent, question):
@@ -1106,8 +1100,7 @@ def advance_conversation(
                  or suggestion.intent == state.department_next_question_intent)
         ))
         and not _repeated_question(case, suggestion.question or "", dialogue_act=state.last_dialogue_act,
-                                   explanation=suggestion.explanation, safety_planning=False,
-                                   since=_duplicate_window(case, bool(suggestion.clue_concepts)))
+                                   explanation=suggestion.explanation, safety_planning=False)
         and not _asks_filled_duration(case, suggestion.intent, suggestion.question)
     )
     if valid_question:

@@ -403,18 +403,23 @@ def test_pending_answer_malformed_enum_fails_closed(field, value):
     assert adapter._pending_answer_from_ai(item, pending_intent=INTENT, user_sources=["不懂"]) is None
 
 
-def test_explicit_revision_releases_answered_intent_dedupe_only_through_backend():
+def test_revision_continues_the_case_and_never_reasks_an_answered_question():
     case = clinical_case()
+    case.history_records += [Message(role="assistant", content=FOCUSED), Message(role="user", content="房子在轉")]
     case.conversation_state.clarification_evidence[INTENT] = "房子在轉"
     route._begin_revision(case)
+    assert case.conversation_state.clarification_evidence == {INTENT: "房子在轉"}
+    assert INTENT in case.conversation_state.asked_clarification_intents
     case.conversation_state.department_status = "ambiguous"
     case.conversation_state.department_next_question_intent = INTENT
-    provider = AsyncMock(return_value=json.dumps(plan()))
+    tinnitus = "耳鳴是單邊還是兩邊都有？"
+    provider = AsyncMock(side_effect=[json.dumps(plan()), json.dumps(plan(tinnitus, "tinnitus_side"))])
     with patch.object(cs, "complete_runtime_json", provider):
-        suggestion = asyncio.run(cs.request_clarification(case, ["更新資訊"]))
-    cs.advance_conversation(case, suggestion, user_sources=["更新資訊"], current_extractions=[])
-    assert case.triage.next_question == FOCUSED
-    assert case.conversation_state.pending_clarification_intent == INTENT
+        suggestion = asyncio.run(cs.request_clarification(case, ["我還有耳鳴"]))
+    cs.advance_conversation(case, suggestion, user_sources=["我還有耳鳴"], current_extractions=[])
+    assert suggestion.rejection_reason == "intent_already_answered"
+    assert case.triage.next_question == tinnitus
+    assert case.conversation_state.pending_clarification_intent == "tinnitus_side"
 
 
 def test_second_a1_missing_information_need_rejected_then_repaired():
@@ -889,3 +894,4 @@ def test_control_safety_explanations_remain_bounded_by_existing_turn_cap(runtime
     assert result["conversation_state"]["confirmed"] is False
     assert result["next_question"] is None
     department.assert_not_awaited()
+
