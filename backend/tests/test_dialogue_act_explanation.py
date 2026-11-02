@@ -293,7 +293,7 @@ def test_explained_earlier_question_is_still_duplicate(runtime):
     planner.return_value = explained(question=EARLIER)
     result = ask_explanation(client, interpreter, case)
     assert result["conversation_state"]["question_rejection_reason"] == "duplicate_question"
-    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+    assert result["reply"] == cs.SAFETY_NET_QUESTION
 
 
 @pytest.mark.parametrize("dialogue_act", ["answer", None])
@@ -402,4 +402,4 @@ def test_simplified_question_is_rejected(runtime):
     state = result["conversation_state"]
     assert planner.await_count == 2
     assert state["question_rejection_reason"] == "simplified_chinese_output"
-    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
+    assert result["reply"] == cs.SAFETY_NET_QUESTION

@@ -165,8 +165,9 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
                 )
                 self.assertFalse(capture_pending_answer(case, suggestion, [text]))
                 advance_conversation(case, suggestion, user_sources=[text], current_extractions=[])
-                self.assertEqual(case.conversation_state.pending_clarification_intent, "severity")
+                # The answer is never accepted; with department and safety settled the turn moves on.
                 self.assertEqual(case.conversation_state.clarification_evidence, {})
+                self.assertEqual(case.triage.next_question, conversation_service.AVAILABILITY_QUESTION)
 
     async def test_duplicate_or_multi_question_is_rejected(self):
         case = pending_case()
@@ -189,7 +190,7 @@ class Phase41ClarificationTest(unittest.IsolatedAsyncioTestCase):
                     self.assertIsNone(suggestion.question)
                 advance_conversation(case, suggestion, user_sources=[text], current_extractions=[])
                 self.assertNotEqual(case.triage.next_question, question)
-                self.assertEqual(case.conversation_state.pending_clarification_intent, "severity")
+                self.assertNotIn("severity", case.conversation_state.clarification_evidence)
 
     async def test_new_detail_without_ai_question_preserves_evidence_and_reports_technical_failure(self):
         case = pending_case()

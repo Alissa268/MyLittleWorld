@@ -21,7 +21,7 @@ EXPLANATION = "突然開始是指頭痛在很短時間內變得很明顯，這�
 
 
 @pytest.mark.parametrize("success", [True, False])
-def test_safety_explanation_has_ai_question_or_technical_failure(runtime, success):
+def test_safety_explanation_has_ai_question_or_fixed_explanation(runtime, success):
     client, interpreter, planner, department = runtime
     case = TriageCase(case_id=f"cleanup-explanation-{success}")
     case.patient_input.symptom = "頭痛"
@@ -40,8 +40,8 @@ def test_safety_explanation_has_ai_question_or_technical_failure(runtime, succes
     assert state["clarification_status"] == "safety_check"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
     # The AI question is never shown during the safety screen; the full checklist always is.
-    assert result["reply"] == (f"{EXPLANATION}\n{CHECKLIST}" if success else cs.TECHNICAL_CLARIFICATION_REPLY)
-    assert state["reply_source"] == ("AI_PLANNER" if success else "TECHNICAL_FALLBACK")
+    assert result["reply"] == f"{EXPLANATION if success else cs.SAFETY_EXPLANATION_FALLBACK}\n{CHECKLIST}"
+    assert state["reply_source"] == ("AI_PLANNER" if success else "SAFETY_CONTROLLED_FALLBACK")
     assert planner.await_count == (1 if success else 2)
     department.assert_not_awaited()
 
@@ -64,7 +64,7 @@ def test_unclear_medical_safety_answer_still_uses_three_attempt_cap(runtime):
     department.assert_not_awaited()
 
 
-def test_safety_explanation_provider_failure_repairs_once_then_technical(runtime):
+def test_safety_explanation_provider_failure_repairs_once_then_fixed_explanation(runtime):
     client, interpreter, planner, department = runtime
     case = TriageCase(case_id="cleanup-explanation-timeout")
     cs._enter_safety_check(case)
@@ -76,8 +76,8 @@ def test_safety_explanation_provider_failure_repairs_once_then_technical(runtime
     planner.side_effect = TimeoutError("offline timeout")
     result = client.post("/chat", json={"case_id": case.case_id, "message": text}).json()
     assert planner.await_count == 2
-    assert result["reply"] == cs.TECHNICAL_CLARIFICATION_REPLY
-    assert result["conversation_state"]["reply_source"] == "TECHNICAL_FALLBACK"
+    assert result["reply"] == f"{cs.SAFETY_EXPLANATION_FALLBACK}\n{CHECKLIST}"
+    assert result["conversation_state"]["reply_source"] == "SAFETY_CONTROLLED_FALLBACK"
     assert result["conversation_state"]["question_repair_attempted"] is True
     assert result["conversation_state"]["safety_answer_attempts"] == 0
     department.assert_not_awaited()

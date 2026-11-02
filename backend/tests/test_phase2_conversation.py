@@ -304,7 +304,9 @@ class Phase2ConversationTest(unittest.TestCase):
                 self.assertEqual(result["triage_case"]["patient_input"]["symptom"], "頭暈")
                 self.assertIsNone(result["triage_case"]["patient_input"]["duration"])
                 self.assertTrue(result["needMoreInfo"])
-                self.assertEqual(result["next_question"], conversation_service.TECHNICAL_CLARIFICATION_REPLY)
+                # Only a provider failure asks to resend; a bad reply gets a way forward instead.
+                self.assertEqual(result["next_question"], conversation_service.TECHNICAL_CLARIFICATION_REPLY
+                                 if isinstance(plan, Exception) else conversation_service.STUCK_OPEN_QUESTION)
 
     def test_ai_cannot_set_workflow_or_complete_blank_case(self):
         result, _, _, department = self.post(

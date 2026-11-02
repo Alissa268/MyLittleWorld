@@ -24,7 +24,7 @@ logger = logging.getLogger(__name__)
 SAFETY_ANSWER_CAP = 3
 SAFETY_NET_PENDING_INTENT = "safety_net_choice"
 SAFETY_NET_QUESTION = "目前還沒辦法確定要看哪一科，要繼續描述，還是先掛家庭醫學科？"
-SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap"})
+SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap", "user_declined_no_candidates"})
 BODY_PART_PENDING_INTENT = "symptom_body_part"
 
 
@@ -52,7 +52,12 @@ AVAILABILITY_DATE_QUESTION = "那最近哪幾天比較方便？都可以的話�
 AVAILABILITY_QUESTION_LIMIT = 2
 AVAILABILITY_DIMENSIONS = ("date", "session")
 UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測科別；請改用手動選科或洽醫院掛號服務。"
-TECHNICAL_CLARIFICATION_REPLY = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
+# Only for provider failures, where sending the message again can help.
+TECHNICAL_CLARIFICATION_REPLY = "系統剛剛沒有回應，請再傳一次剛才的訊息。"
+# The provider answered but no planner question was usable: offer a way forward instead of a retry.
+STUCK_OPEN_QUESTION = "可以再多說一點嗎？例如哪裡不舒服、從什麼時候開始、有多嚴重。"
+SAFETY_EXPLANATION_FALLBACK = "這題是想確認您有沒有需要馬上去急診的狀況；如果都沒有，回答「沒有」就可以。"
+_PROVIDER_FAILURES = frozenset({"provider_timeout", "provider_failure"})
 FAMILY_MEDICINE_UNAVAILABLE_REPLY = "資訊不足，無法判斷科別。請改用手動選科或洽醫院掛號服務。"
 DEPARTMENT_EVIDENCE_REPLY ="已記錄目前症狀，但正式科別資料仍不足以確認建議科別。您可以補充新的症狀資訊，或返回就診類型選擇「快速查詢」自行選科。"
 _INTENT_PATTERN = re.compile(r"[a-z][a-z0-9_]{2,63}\Z")
@@ -942,8 +947,8 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
         if _valid_explanation(suggestion.explanation):
             question = f"{suggestion.explanation.strip()}\n{question}"
     elif state.safety_answer_validation == "request_explanation":
-        question = TECHNICAL_CLARIFICATION_REPLY
-        state.reply_source = "TECHNICAL_FALLBACK"
+        question = f"{SAFETY_EXPLANATION_FALLBACK}\n{question}"
+        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     else:
         question = f"{SAFETY_RETRY_REPLY}\n{question}"
         state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
@@ -1034,20 +1039,7 @@ def advance_conversation(
     )
     if sufficient:
         if safety_screen_resolved(case) and state.department_status == "resolved":
-            if not availability_settled(case, availability_changed=availability_changed):
-                _ask_availability(case)
-                return
-            _release_availability_pending(case)
-            state.clarification_status = "sufficient"
-            state.uncertainty_reasons = []
-            state.next_information_needed = []
-            state.last_question_key = None
-            state.is_complete = True
-            case.triage.need_more_info = False
-            case.triage.next_question = None
-            case.triage.is_final = True
-            case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
-            state.reply_source = "CONFIRMATION"
+            _complete_or_ask_availability(case, availability_changed=availability_changed)
             return
 
     # A changed department or safety state takes the turn back from the availability question.
@@ -1117,6 +1109,9 @@ def advance_conversation(
         state.next_information_needed = [suggestion.information_need] if suggestion.information_need else []
         state.reply_source = suggestion.reply_source
         question = _with_explanation(suggestion, question)
+    elif suggestion is not None and suggestion.rejection_reason not in _PROVIDER_FAILURES:
+        _recover_stuck_turn(case, availability_changed=availability_changed)
+        return
     else:
         question = TECHNICAL_CLARIFICATION_REPLY
         reason = "clarification_generation_failed"
@@ -1137,6 +1132,59 @@ def advance_conversation(
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append(f"自然對話澄清中：{reason}")
+
+
+def _complete_or_ask_availability(case: TriageCase, *, availability_changed: bool) -> None:
+    state = case.conversation_state
+    if not availability_settled(case, availability_changed=availability_changed):
+        _ask_availability(case)
+        return
+    _release_availability_pending(case)
+    state.clarification_status = "sufficient"
+    state.uncertainty_reasons = []
+    state.next_information_needed = []
+    state.last_question_key = None
+    state.is_complete = True
+    case.triage.need_more_info = False
+    case.triage.next_question = None
+    case.triage.is_final = True
+    case.triage.reasons.append("症狀資訊已通過 Backend 澄清完成條件；掛號偏好不是醫療完成門檻。")
+    state.reply_source = "CONFIRMATION"
+
+
+def _recover_stuck_turn(case: TriageCase, *, availability_changed: bool) -> None:
+    """The provider answered but no question was usable (e.g. a repeat): never tell the patient
+    to retry, since the planner would propose the same thing. Move forward with a fixed step."""
+    state = case.conversation_state
+    logger.info("clarification stuck case_id=%s rejection_reason=%s department_status=%s",
+                case.case_id, state.question_rejection_reason, state.department_status)
+    # The safety screen opens only once the symptom has details, so ask for them.
+    if not safety_screen_resolved(case):
+        _ask_stuck_open_question(case)
+        return
+    if state.department_status == "resolved":
+        _complete_or_ask_availability(case, availability_changed=availability_changed)
+        return
+    # A patient who already chose to continue is not asked again; the hard turn cap bounds the loop.
+    if state.safety_net_choice == "continue":
+        _ask_stuck_open_question(case)
+        return
+    state.pending_clue_question_index = None
+    _ask_safety_net_question(case)
+
+
+def _ask_stuck_open_question(case: TriageCase) -> None:
+    """A pending question keeps its ownership; only a grounded answer releases it."""
+    state = case.conversation_state
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = [state.department_uncertainty_reason or "目前仍缺少可區分症狀的細節"]
+    state.last_question_key = None
+    state.reply_source = "STUCK_FALLBACK"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = STUCK_OPEN_QUESTION
+    case.triage.is_final = False
+    case.triage.reasons.append("無可用的追問題目，改問固定的開放式問題。")
 
 
 def has_accepted_time_preferences(case: TriageCase) -> bool:

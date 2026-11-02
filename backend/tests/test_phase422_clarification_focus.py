@@ -8,6 +8,7 @@ import pytest
 
 from app.schemas import Message, SemanticExtraction, TriageCase
 from app.services.conversation_service import (
+    SAFETY_NET_PENDING_INTENT,
     SAFETY_NET_QUESTION,
     ClarificationSuggestion,
     advance_conversation,
@@ -93,7 +94,7 @@ def test_valid_same_intent_planner_followup_is_accepted():
     assert case.conversation_state.next_information_needed == ["腰側疼痛的位置"]
 
 
-def test_invalid_provider_followup_reports_technical_failure_without_internal_leak():
+def test_invalid_provider_followup_asks_fixed_question_without_internal_leak():
     case = ambiguous_flank_case()
     proposal = {
         "status": "clarification_needed",
@@ -117,7 +118,7 @@ def test_invalid_provider_followup_reports_technical_failure_without_internal_le
     )
 
     question = case.triage.next_question or ""
-    assert question == "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
+    assert question == SAFETY_NET_QUESTION
     assert INTERNAL_REASON not in question
     assert "上一個澄清面向仍需確認" not in question
     assert "科別仍不確定" not in question
@@ -138,8 +139,8 @@ def test_duplicate_provider_question_does_not_invent_normal_chat_fallback():
     advance_conversation(case, suggestion, user_sources=["不太確定"], current_extractions=[])
 
     assert case.triage.next_question != FLANK_QUESTION
-    assert case.triage.next_question == "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
-    assert case.conversation_state.pending_clarification_intent == "flank_pain"
+    assert case.triage.next_question == SAFETY_NET_QUESTION
+    assert case.conversation_state.pending_clarification_intent == SAFETY_NET_PENDING_INTENT
 
 
 @pytest.mark.parametrize("answer_status", ["partial", "unclear"])

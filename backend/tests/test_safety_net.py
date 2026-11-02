@@ -238,3 +238,36 @@ def test_declining_before_the_safety_screen_is_complete_never_routes_to_family_m
     interpreter.return_value = json.dumps(payload, ensure_ascii=False)
     result = post(client, case, "不想回答")
     assert result["conversation_state"]["clue_decision"] is None and result["department_result"] is None
+
+
+def test_declining_routes_to_family_medicine_even_when_the_symptom_is_not_verbatim(runtime):
+    # The patient said 刺刺的有點痛; the case holds the normalized 子宮刺痛, which is not in any message.
+    client, interpreter, _, _ = runtime
+    case = ambiguous_case(10, case_id="safety-net-decline-normalized")
+    case.patient_input.symptom = "子宮刺痛"
+    case.conversation_state.safety_net_asked = True
+    case.conversation_state.safety_net_choice = "continue"
+    save_case(case)
+    respond(interpreter)
+    payload = json.loads(interpreter.return_value)
+    payload["dialogue_act"] = dict(act="decline_further_questions", source_text="我要先掛號", confidence=0.95)
+    interpreter.return_value = json.dumps(payload, ensure_ascii=False)
+    result = post(client, case, "我說我要先掛號")
+    assert_family_medicine_confirmation(result, "user_declined_no_candidates")
+
+
+def test_stuck_turn_after_choosing_continue_asks_an_open_question_not_a_retry(runtime):
+    client, interpreter, planner, _ = runtime
+    case = ambiguous_case(ASK + 1)
+    case.conversation_state.safety_net_asked = True
+    case.conversation_state.safety_net_choice = "continue"
+    save_case(case)
+    planner.return_value = "{broken"
+    result = stall(client, interpreter, case)
+    assert result["next_question"] == cs.STUCK_OPEN_QUESTION
+    assert result["conversation_state"]["reply_source"] == "STUCK_FALLBACK"
+
+
+def test_registration_requests_are_described_to_the_turn_interpreter():
+    prompt = adapter._build_symptom_collection_prompt(ambiguous_case(3, case_id="safety-net-prompt"), ["我要先掛號"])
+    assert "「先決定掛號」" in prompt and "「我要先掛號」" in prompt

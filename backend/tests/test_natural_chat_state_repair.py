@@ -16,7 +16,9 @@ from test_phase7_natural_safety import runtime, respond, evidence, pending, rout
 
 FOCUSED = "我想確認頭暈的感受，是周圍在旋轉，還是快昏倒、眼前發黑？"
 INTENT = "dizziness_quality"
-TECHNICAL = "目前暫時無法可靠產生下一個問診問題，請稍後再試。"
+TECHNICAL = cs.TECHNICAL_CLARIFICATION_REPLY
+# The provider answered but nothing was usable: the patient gets a way forward, not a retry.
+STUCK = cs.SAFETY_NET_QUESTION
 
 
 def plan(question=FOCUSED, intent=INTENT):
@@ -198,14 +200,14 @@ def test_invalid_question_repaired_once_with_structured_reason():
         assert key in repair
 
 
-def test_invalid_repair_is_transparent_technical_failure_not_normal_retry():
+def test_invalid_repair_is_stuck_fallback_not_normal_retry():
     case = clinical_case()
     provider = AsyncMock(return_value=json.dumps(plan("你確診了，現在要掛哪個科別？")))
     with patch.object(cs, "complete_runtime_json", provider):
         suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
     assert provider.await_count == 2
-    assert case.triage.next_question == TECHNICAL
+    assert case.triage.next_question == STUCK
     assert not case.conversation_state.confirmed
     assert case.conversation_state.department_status == "ambiguous"
     assert case.semantic_extractions == []
@@ -221,8 +223,8 @@ def test_answered_intent_different_wording_cannot_be_reasked():
     cs.advance_conversation(case, suggestion, user_sources=["我說過了"], current_extractions=[])
     assert suggestion.question is None
     assert suggestion.rejection_reason == "intent_already_answered"
-    assert case.conversation_state.pending_clarification_intent is None
-    assert case.triage.next_question == TECHNICAL
+    assert case.conversation_state.pending_clarification_intent == cs.SAFETY_NET_PENDING_INTENT
+    assert case.triage.next_question == STUCK
 
 
 @pytest.mark.parametrize("question", [
@@ -391,7 +393,7 @@ def test_malformed_and_untrusted_planner_never_gain_state_authority(invalid):
     with patch.object(cs, "complete_runtime_json", provider):
         suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
-    assert case.triage.next_question == TECHNICAL
+    assert case.triage.next_question == STUCK
     assert not case.conversation_state.confirmed
     assert provider.await_count == 2
 
@@ -434,7 +436,7 @@ def test_second_a1_missing_information_need_rejected_then_repaired():
     assert suggestion.question == FOCUSED
 
 
-def test_second_a2_missing_need_after_repair_is_technical_failure():
+def test_second_a2_missing_need_after_repair_is_stuck_fallback():
     invalid = plan("可以再詳細說明一下嗎？")
     invalid.pop("information_needs")
     provider = AsyncMock(return_value=json.dumps(invalid))
@@ -443,8 +445,8 @@ def test_second_a2_missing_need_after_repair_is_technical_failure():
         suggestion = asyncio.run(cs.request_clarification(case, ["不懂"]))
     cs.advance_conversation(case, suggestion, user_sources=["不懂"], current_extractions=[])
     assert provider.await_count == 2
-    assert case.triage.next_question == TECHNICAL
-    assert case.conversation_state.reply_source == "TECHNICAL_FALLBACK"
+    assert case.triage.next_question == STUCK
+    assert case.conversation_state.reply_source == "SAFETY_NET_QUESTION"
     assert not case.conversation_state.confirmed
     assert case.conversation_state.department_status == "ambiguous"
 
