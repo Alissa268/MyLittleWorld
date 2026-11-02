@@ -59,6 +59,9 @@ def load_department_canonical_mapping(directory: Path = KNOWLEDGE_DIR) -> list[d
     mappings = json.loads(
         (directory / "department_canonical_mapping.json").read_text(encoding="utf-8")
     )["mappings"]
+    # A supplement may introduce departments verified against the live DB after Phase 3.
+    for supplement in sorted(directory.glob("supplemental_guidance_*.json")):
+        mappings.extend(json.loads(supplement.read_text(encoding="utf-8")).get("mappings", []))
     validate_department_canonical_mapping(mappings)
     return mappings
 

@@ -1,0 +1,42 @@
+"""Official Taipei VGH pediatric symptom pages (fid 6747-6750) route to 兒童內科 / 兒童腸胃科."""
+from app.schemas import Message, SemanticExtraction, TriageCase
+from app.services import department_reasoning_service as reasoning
+from app.services.department_knowledge import load_department_knowledge, resolve_department_names
+
+_, RECORDS = load_department_knowledge()
+ACTIVE = [
+    dict(dept_id=record["canonical_dept_id"], parent_dept=record["canonical_parent_dept"],
+         child_dept=record["canonical_child_dept"])
+    for record in {item["canonical_dept_id"]: item for item in RECORDS}.values()
+]
+RESOLUTIONS = resolve_department_names(RECORDS, ACTIVE)
+PEDIATRICS, PEDIATRIC_GI = 1320, 1322
+
+
+def literal_departments(text):
+    case = TriageCase(case_id="pediatric-literal")
+    case.history_records = [Message(role="user", content=text)]
+    case.semantic_extractions = [SemanticExtraction(
+        field="symptom", normalized_value=text, semantic_status="available", assertion="present",
+        confidence=0.95, source_text=text, extractor="ai",
+    )]
+    rows = reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)
+    return {row["knowledge_concept"]: row["dept_id"] for row in rows}
+
+
+def test_pediatric_departments_have_official_concepts():
+    by_department = {}
+    for record in RECORDS:
+        by_department.setdefault(record["canonical_dept_id"], set()).add(record["concept"])
+    assert by_department[PEDIATRICS] == {"小兒發燒", "小孩發燒", "熱痙攣"}
+    assert by_department[PEDIATRIC_GI] == {"牛奶過敏", "腸絞痛", "嬰兒哭鬧", "小兒便秘", "嬰兒便秘"}
+
+
+def test_child_wording_matches_pediatric_departments_literally():
+    assert literal_departments("小孩發燒")["小孩發燒"] == PEDIATRICS
+    assert literal_departments("嬰兒便秘")["嬰兒便秘"] == PEDIATRIC_GI
+
+
+def test_adult_wording_never_reaches_pediatric_departments():
+    for text in ("腹瀉", "便秘", "發燒", "腹脹"):
+        assert not {PEDIATRICS, PEDIATRIC_GI} & set(literal_departments(text).values()), text

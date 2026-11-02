@@ -54,6 +54,9 @@ def test_production_knowledge_has_exact_package_lineage(knowledge, mappings):
     ]
     supplement_sources = [item for supplement in supplements for item in supplement["sources"]]
     supplement_records = [item for supplement in supplements for item in supplement["records"]]
+    supplement_mappings = [item for supplement in supplements for item in supplement.get("mappings", [])]
+    assert mappings[-len(supplement_mappings):] == supplement_mappings
+    mappings = mappings[:-len(supplement_mappings)]
     extra_source_ids = {item["source_id"] for item in supplement_sources}
     assert [item for item in sources if item["source_id"] in extra_source_ids] == supplement_sources
     assert [item for item in records if item["source_id"] in extra_source_ids] == supplement_records
@@ -105,10 +108,11 @@ def test_production_knowledge_has_exact_package_lineage(knowledge, mappings):
 def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     sources, records = knowledge
 
-    # 18 original sources, the foot-pain supplement and four eye symptom pages.
-    assert len(sources) == 23
-    assert len(records) == 551
-    assert len(mappings) == 35
+    # 18 original sources, the foot-pain supplement, four eye and four pediatric symptom pages.
+    assert len(sources) == 27
+    assert len(records) == 559
+    # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB.
+    assert len(mappings) == 36
     assert len({source["source_id"] for source in sources}) == len(sources)
     assert {record["evidence_type"] for record in records} == {
         "direct_routing_evidence",
