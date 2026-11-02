@@ -31,8 +31,8 @@ CLUE_ANSWER_ORIGIN = "clue_answer"
 MAX_CLUE_CONCEPT_RECORDS = 30
 CLUE_INTENT_PREFIX = "department_clue_"
 # The official routing tables list symptoms and diseases together, so wording covers both.
-CLUE_TEMPLATE = "請問您有沒有以下情況，或以前曾被告知有：{}？"
-CLUE_REASK_TEMPLATE = "想再確認一次，請問您有沒有以下情況，或以前曾被告知有：{}？"
+CLUE_TEMPLATE = "請問有沒有以下情況，或以前曾被告知有：{}？"
+CLUE_REASK_TEMPLATE = "想再確認一次，請問有沒有以下情況，或以前曾被告知有：{}？"
 _SYMPTOM_FIELDS = {"symptom", "accompanying_symptoms"}
 # Sexually transmitted diseases, cancer diagnoses and pregnancy offend or frighten when asked
 # unprompted; they still route when the patient raises them.

@@ -152,7 +152,7 @@ def test_repair_failure_uses_backend_template_and_counts_one_question():
     suggestion, provider = plan(case, proposal("請問您有沒有眼睛痛？", ["眼睛痛"]), "not json")
     assert provider.await_count == 2
     assert suggestion.reply_source == "CLUE_TEMPLATE"
-    assert suggestion.question == "請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
+    assert suggestion.question == "請問有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
     assert (suggestion.intent, suggestion.clue_dept_id) == (FIRST, ENT)
     apply(case, suggestion)
     state = case.conversation_state
@@ -165,8 +165,8 @@ def test_templates_cover_current_and_previously_told_and_pass_question_guards():
     concepts = ["耳鳴", "聽力變化", "噁心"]
     template = clues.clue_template_question(concepts)
     reask = clues.clue_template_question(concepts[:2], reask=True)
-    assert template == "請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
-    assert reask == "想再確認一次，請問您有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化？"
+    assert template == "請問有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化、噁心？"
+    assert reask == "想再確認一次，請問有沒有以下情況，或以前曾被告知有：耳鳴、聽力變化？"
     # Proposed verbatim by the planner, both pass every existing question guard unchanged.
     suggestion, provider = plan(clue_case(), proposal(template, concepts))
     assert provider.await_count == 1 and suggestion.rejection_reason is None and suggestion.question == template

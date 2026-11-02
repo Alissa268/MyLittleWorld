@@ -123,3 +123,12 @@ def test_clue_prompt_asks_for_a_full_sentence_starting_with_qing_wen():
     spec = ClueQuestionSpec(clues.clue_intent(1), (), False, 3)
 
     assert "以「請問」開頭（例如「請問您有沒有…」），不要只列概念加「嗎」" in _clue_prompt(spec)
+
+
+def test_clue_prompt_asks_about_the_family_member_being_described():
+    # 2026-11-02: 「我小女兒感冒」 got the clue 「請問您是否有嗅覺喪失」.
+    spec = ClueQuestionSpec(clues.clue_intent(1), (), False, 3)
+
+    assert "若使用者在描述家人或他人的狀況" in _clue_prompt(spec)
+    assert "您" not in clues.clue_template_question(["嗅覺喪失"])
+    assert "您" not in clues.clue_template_question(["嗅覺喪失"], reask=True)
