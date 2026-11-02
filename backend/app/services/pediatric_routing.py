@@ -74,6 +74,8 @@ def validate_patient_profile(value: Any, user_sources: list[str]) -> dict | None
         return None
     subject, relation, age, source, confidence = (
         value[key] for key in ("subject", "relation_text", "age_text", "source_text", "confidence"))
+    # An empty string means "not said", like null.
+    relation, age = (None if text == "" else text for text in (relation, age))
     if (subject not in {"self", "other"} or not isinstance(source, str) or not source.strip()
             or not any(source.strip() in text for text in user_sources)
             or type(confidence) not in {int, float} or not math.isfinite(confidence)

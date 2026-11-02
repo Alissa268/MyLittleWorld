@@ -113,7 +113,8 @@ async def refine_case_with_ai(
         reference_date=time_preference_reference_date,
     )
     department_preference = validate_department_preference(data.get("department_preference"), user_sources)
-    patient_profile = validate_patient_profile(data.get("patient_profile"), user_sources)
+    profile_sources = [message.content for message in case.history_records if message.role == "user"]
+    patient_profile = validate_patient_profile(data.get("patient_profile"), profile_sources)
     repair_reason = _turn_interpretation_rejection_reason(
         data,
         pending_intent=pending_intent,
@@ -166,7 +167,7 @@ async def refine_case_with_ai(
             )
 
         department_preference = validate_department_preference(data.get("department_preference"), user_sources)
-        patient_profile = validate_patient_profile(data.get("patient_profile"), user_sources)
+        patient_profile = validate_patient_profile(data.get("patient_profile"), profile_sources)
         remaining_rejection = _turn_interpretation_rejection_reason(
             repair_data,
             pending_intent=pending_intent,
@@ -227,6 +228,10 @@ async def refine_case_with_ai(
     if time_preferences:
         apply_time_preferences(case.availability, time_preferences)
 
+    logger.info("patient profile case_id=%s present=%s accepted=%s subject=%s age_stated=%s",
+                case.case_id, data.get("patient_profile") is not None, patient_profile is not None,
+                patient_profile["subject"] if patient_profile else None,
+                bool(patient_profile and patient_profile["age_text"]))
     apply_patient_profile(case.conversation_state, patient_profile)
     if department_preference is not None:
         case.patient_input.requested_department_id = department_preference.dept_id
@@ -597,6 +602,10 @@ def _build_symptom_collection_prompt(
         if pending_intent == AVAILABILITY_PENDING_INTENT else [],
         "pending_safety_net_choice": pending_intent == SAFETY_NET_PENDING_INTENT,
     }
+    state = case.conversation_state
+    known_patient_profile = dict(
+        subject=state.patient_subject, relation_text=state.patient_relation_text, age_text=state.patient_age_text,
+    ) if state.patient_subject else None
     try:
         prompt_evidence_catalog = load_ttas_rules().prompt_evidence_catalog
     except TTASRuleLoadError:
@@ -650,7 +659,41 @@ def _build_symptom_collection_prompt(
 31. department_preference 預設為 null，只有本輪明確要求、指定或改指定科別才輸出；不得由症狀推論偏好，不可塞進 symptom。僅含 dept_id（整數）、department_name（同 ID 的正式名稱）、source_text（本輪連續逐字原文）、confidence（有限 0～1）。只能選下方 active SQL Department 中唯一存在的正式 ID/name pair；不得別名補救或發明 ID。這只是偏好，不能跳過安全檢查或決定科別結果、stage、confirmed。無候選或無明確要求時必須 null。
 目前 active SQL Department：
 {json.dumps(active_department_candidates(), ensure_ascii=False, indent=2)}
-32. patient_profile 預設為 null，只在本輪原文表達了「要看病的人（就診者）是誰」或就診者年齡時輸出。僅含 subject、relation_text、age_text、source_text、confidence。subject 為 self（使用者本人看病）或 other（替家人或他人描述病況）。relation_text 是 other 時對就診者的逐字稱呼（例如「小女兒」「我家寶寶」「我媽」），self 時必須 null。age_text 是「就診者本人」年齡或學齡的最短逐字原文（例如「7歲」「6個月大」「國小三年級」「高二」），不是其他人的年齡；沒說就 null。source_text 是本輪支持這個判斷的最短連續逐字原文，relation_text 與 age_text 都必須包含在其中；confidence 為有限 0～1。只依語意判斷誰在生病：「我是幼稚園老師，喉嚨痛」是 self 且 age_text=null（幼稚園是工作地點）；「我小孩感冒傳染給我，我現在咳嗽」是 self；「我女兒幫我掛號，我頭暈」是 self；「我小女兒感冒很多天」是 other、relation_text=「小女兒」。不得猜年齡，也不得由症狀推論年齡。
+32. patient_profile 記錄「要看病的人（就診者）」是誰與年齡。Backend 目前記錄的就診者：{json.dumps(known_patient_profile, ensure_ascii=False)}。本輪原文表達了就診者是誰或就診者年齡時，必須輸出；Backend 目前記錄為 null、而先前任一則使用者訊息已表達就診者是誰時，本輪也必須輸出（source_text 可取自那則先前使用者訊息）。都沒有時才是 null。僅含 subject、relation_text、age_text、source_text、confidence。subject 為 self（使用者本人看病）或 other（替家人或他人描述病況）。relation_text 是 other 時對就診者的逐字稱呼（例如「小女兒」「我家寶寶」「我媽」），self 時必須 null。age_text 是「就診者本人」年齡或學齡的最短逐字原文（例如「7歲」「6個月大」「國小三年級」「高二」），不是其他人的年齡；沒說就 null。source_text 是支持這個判斷的最短連續逐字使用者原文，relation_text 與 age_text 都必須包含在其中；confidence 為有限 0～1。只依語意判斷誰在生病：「我是幼稚園老師，喉嚨痛」是 self 且 age_text=null（幼稚園是工作地點）；「我小孩感冒傳染給我，我現在咳嗽」是 self；「我女兒幫我掛號，我頭暈」是 self；「我小女兒感冒很多天」是 other、relation_text=「小女兒」。不得猜年齡，也不得由症狀推論年齡。
+
+就診者正例（替家人描述病況）：
+current_user_text:「我兒子咳嗽好幾天了」
+{{
+  "semantic_extractions": [
+    {{
+      "field": "symptom",
+      "normalized_value": "咳嗽",
+      "semantic_status": "available",
+      "assertion": "present",
+      "confidence": 0.97,
+      "source_text": "咳嗽",
+      "needs_clarification": false,
+      "follow_up_reason": null
+    }}
+  ],
+  "pending_answer": null,
+  "ttas_evidence": [],
+  "time_preferences": [],
+  "dialogue_act": {{
+    "act": "new_information",
+    "source_text": "我兒子咳嗽好幾天了",
+    "confidence": 0.97
+  }},
+  "department_preference": null,
+  "prior_answer_reference": null,
+  "patient_profile": {{
+    "subject": "other",
+    "relation_text": "兒子",
+    "age_text": null,
+    "source_text": "我兒子咳嗽",
+    "confidence": 0.97
+  }}
+}}
 
 對話行為正例 A（要求解釋，不是 medical answer）：
 current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀況？」

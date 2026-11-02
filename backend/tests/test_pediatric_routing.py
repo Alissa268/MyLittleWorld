@@ -212,3 +212,31 @@ def test_volunteered_age_alone_is_new_information():
         suggestion = asyncio.run(adapter.refine_case_with_ai(case, user_sources=[text]))
     assert suggestion.interpretation_complete
     assert pediatric.patient_status(case.conversation_state) == "child"
+
+
+def test_a_later_turn_can_fill_the_patient_missed_on_the_first_turn():
+    # 2026-11-03 on 310: 「我兒子咳嗽」 asked the age on one run and not on another.
+    case = TriageCase(case_id="pediatric-late-profile")
+    first, second = "我兒子咳嗽", "有流鼻水"
+    case.history_records.append(Message(role="user", content=first))
+    data = dict(semantic_extractions=[dict(field="accompanying_symptoms", normalized_value=["流鼻水"],
+                                           source_text="流鼻水", semantic_status="available", confidence=0.98,
+                                           assertion="present")],
+                pending_answer=None, ttas_evidence=[], time_preferences=[], prior_answer_reference=None,
+                department_preference=None, patient_profile=profile("other", "兒子", "", "我兒子咳嗽"),
+                dialogue_act=dict(act="new_information", source_text=second, confidence=0.99))
+    with patch.object(adapter, "_ai_available", return_value=True), \
+            patch.object(adapter, "complete_prompt", AsyncMock(return_value=json.dumps(data, ensure_ascii=False))):
+        apply_user_message(case, second)
+        asyncio.run(adapter.refine_case_with_ai(case, user_sources=[second]))
+    assert pediatric.patient_status(case.conversation_state) == "ask"
+
+
+def test_prompt_shows_the_recorded_patient_and_a_filled_example():
+    case = TriageCase(case_id="pediatric-prompt")
+    pediatric.apply_patient_profile(case.conversation_state,
+                                    dict(subject="other", relation_text="兒子", age_text=None))
+    with patch.object(adapter, "active_department_candidates", return_value=[]):
+        prompt = adapter._build_symptom_collection_prompt(case, ["咳嗽"])
+    assert 'Backend 目前記錄的就診者：{"subject": "other", "relation_text": "兒子", "age_text": null}' in prompt
+    assert '"relation_text": "兒子"' in prompt
