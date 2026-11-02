@@ -34,6 +34,9 @@ CLUE_INTENT_PREFIX = "department_clue_"
 CLUE_TEMPLATE = "請問您有沒有以下情況，或以前曾被告知有：{}？"
 CLUE_REASK_TEMPLATE = "想再確認一次，請問您有沒有以下情況，或以前曾被告知有：{}？"
 _SYMPTOM_FIELDS = {"symptom", "accompanying_symptoms"}
+# Sexually transmitted diseases, cancer diagnoses and pregnancy offend or frighten when asked
+# unprompted; they still route when the patient raises them.
+_NEVER_ASK_MARKERS = ("愛滋", "梅毒", "淋病", "菜花", "披衣菌", "性病", "癌", "腫瘤", "惡性", "白血病", "懷孕")
 _CONCLUDED_ANSWERS = {"present", "absent"}
 
 DecisionKind = Literal["ask_clue", "decide", "tiebreak", "family_medicine", "defer_to_safety_net"]
@@ -87,6 +90,7 @@ def clue_concepts(
     their part in retrieval and scoring.
     A concept held only by ``non_target_dept_ids`` (the family-medicine end point) is never
     asked; other concepts keep those departments in ``dept_ids`` so scoring is unchanged.
+    Sensitive concepts (``never_ask_concept``) are never asked either.
     """
     non_target = set(non_target_dept_ids)
     concluded = {normalize_concept(item.concept) for item in asked if item.answer in _CONCLUDED_ANSWERS}
@@ -95,7 +99,7 @@ def clue_concepts(
     for record in records:
         dept_id = record["canonical_dept_id"]
         key = normalize_concept(record["concept"])
-        if dept_id not in candidates or key in mentioned or key in concluded:
+        if dept_id not in candidates or key in mentioned or key in concluded or never_ask_concept(key):
             continue
         entry = grouped.setdefault(key, {"names": set(), "depts": set(), "direct": False, "priority": None})
         entry["names"].add(record["concept"])
@@ -113,6 +117,12 @@ def clue_concepts(
             best_source_priority=entry["priority"], uncertain_before=key in inconclusive,
         ))
     return clues
+
+
+def never_ask_concept(concept: str) -> bool:
+    """STD, cancer and pregnancy concepts are matched from patient wording but never asked."""
+    key = normalize_concept(concept)
+    return any(marker in key for marker in _NEVER_ASK_MARKERS)
 
 
 DepartmentPriority = tuple[int, int]
