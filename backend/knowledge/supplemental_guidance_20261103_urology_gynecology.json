@@ -8,7 +8,7 @@
       "source_title": "臺北榮民總醫院｜症狀說明：乳房脹痛（建議就診科別）",
       "source_url": "https://www.vghtpe.gov.tw/vghtpe/Fpage.action?fid=6728",
       "retrieved_at": "2026-11-03",
-      "note": "官方頁面明列建議就診科別：家庭醫學科、乳房特別門診、婦產科（頁面最後更新 2016-06-07）；依使用者決定只收專科，不收家庭醫學科。乳房特別門診在 310 的對應（乳房疾病門診 1292 或乳醫中心門診 1262）待使用者決定，暫不收。"
+      "note": "官方頁面明列建議就診科別：家庭醫學科、乳房特別門診、婦產科（頁面最後更新 2016-06-07）；依使用者決定只收專科，不收家庭醫學科。乳房特別門診依臺中榮總症狀查詢（乳房疼痛、乳房分泌物列一般外科）對到既有一般外科。"
     },
     {
       "source_id": "vghtpe_symptom_hematuria_20261103",
@@ -63,7 +63,7 @@
       "retrieved_at": "2026-11-03",
       "evidence_text": "許多女性偶而會感到乳房腫脹，兒女性主要有六種類型的乳房脹痛",
       "fallback_for_vghtpe": false,
-      "notes": "乳房脹痛頁主題；乳房特別門診在 310 的對應待決定，先只收婦產科。"
+      "notes": "乳房脹痛頁主題；建議就診科別含婦產科。"
     },
     {
       "department_name": "婦產科",
@@ -87,6 +87,50 @@
       "evidence_text": "許多女性偶而會感到乳房腫脹，兒女性主要有六種類型的乳房脹痛",
       "fallback_for_vghtpe": false,
       "notes": "同頁原文用語。"
+    },
+    {
+      "department_name": "一般外科",
+      "official_department_labels": [
+        "一般外科"
+      ],
+      "concept": "乳房脹痛",
+      "evidence_type": "direct_routing_evidence",
+      "canonical_dept_id": 1290,
+      "canonical_parent_dept": "外科系",
+      "canonical_child_dept": "一般外科",
+      "mapping_method": "exact_app_name",
+      "source_id": "vghtpe_symptom_breast_swelling_20261103",
+      "source_hospital": "vghtpe",
+      "source_type": "symptom_department_guidance",
+      "source_title": "臺北榮民總醫院｜症狀說明：乳房脹痛（建議就診科別）",
+      "source_url": "https://www.vghtpe.gov.tw/vghtpe/Fpage.action?fid=6728",
+      "source_priority": 1,
+      "retrieved_at": "2026-11-03",
+      "evidence_text": "許多女性偶而會感到乳房腫脹，兒女性主要有六種類型的乳房脹痛",
+      "fallback_for_vghtpe": false,
+      "notes": "官方列「乳房特別門診」；臺中榮總症狀查詢 https://www.vghtc.gov.tw/SymptomQuery/605 將乳房疼痛、乳房分泌物列為一般外科，故對到既有一般外科。"
+    },
+    {
+      "department_name": "一般外科",
+      "official_department_labels": [
+        "一般外科"
+      ],
+      "concept": "乳房腫脹",
+      "evidence_type": "direct_routing_evidence",
+      "canonical_dept_id": 1290,
+      "canonical_parent_dept": "外科系",
+      "canonical_child_dept": "一般外科",
+      "mapping_method": "exact_app_name",
+      "source_id": "vghtpe_symptom_breast_swelling_20261103",
+      "source_hospital": "vghtpe",
+      "source_type": "symptom_department_guidance",
+      "source_title": "臺北榮民總醫院｜症狀說明：乳房脹痛（建議就診科別）",
+      "source_url": "https://www.vghtpe.gov.tw/vghtpe/Fpage.action?fid=6728",
+      "source_priority": 1,
+      "retrieved_at": "2026-11-03",
+      "evidence_text": "許多女性偶而會感到乳房腫脹，兒女性主要有六種類型的乳房脹痛",
+      "fallback_for_vghtpe": false,
+      "notes": "官方列「乳房特別門診」；臺中榮總症狀查詢 https://www.vghtc.gov.tw/SymptomQuery/605 將乳房疼痛、乳房分泌物列為一般外科，故對到既有一般外科。"
     },
     {
       "department_name": "腎臟科",

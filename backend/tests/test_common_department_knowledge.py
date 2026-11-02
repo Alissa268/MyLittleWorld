@@ -55,6 +55,10 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("手腳麻木") == {"神經內科", "神經外科"}
     assert literal_departments("解尿困難") == {"泌尿外科"}
     assert literal_departments("眼屎很多") == {"眼科"}
+    # 乳房特別門診 / 心臟血管外科 follow the Taichung VGH symptom table (breast pain → 一般外科;
+    # plain numbness is not a 心臟外科 symptom there), mapped onto existing departments.
+    assert literal_departments("乳房脹痛") == {"婦產科", "一般外科"}
+    assert literal_departments("周邊血管阻塞") == {"心臟外科"}
 
 
 def test_departments_awaiting_a_310_decision_are_not_mapped():

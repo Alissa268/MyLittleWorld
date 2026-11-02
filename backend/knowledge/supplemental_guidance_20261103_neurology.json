@@ -38,7 +38,7 @@
       "source_title": "臺北榮民總醫院｜症狀說明：麻痺（建議就診科別）",
       "source_url": "https://www.vghtpe.gov.tw/vghtpe/Fpage.action?fid=6729",
       "retrieved_at": "2026-11-03",
-      "note": "官方頁面明列建議就診科別：家庭醫學科、神經內科、神經外科、神經修復科、心臟血管外科（頁面最後更新 2016-06-07）；依使用者決定只收專科，不收家庭醫學科。神經修復科在 310 尚無對照；心臟血管外科在 310 可能是心臟外科 1285 或血管與主動脈 1311，待使用者決定，兩科暫不收。"
+      "note": "官方頁面明列建議就診科別：家庭醫學科、神經內科、神經外科、神經修復科、心臟血管外科（頁面最後更新 2016-06-07）；依使用者決定只收專科，不收家庭醫學科。神經修復科在 310 尚無對照，暫不收；心臟血管外科對到既有心臟外科，只收周邊血管原因。"
     }
   ],
   "records": [
@@ -307,6 +307,28 @@
       "evidence_text": "一般常造成手腳麻木的原因包括糖尿病、周邊血管阻塞症、頸椎或腰椎的病變",
       "fallback_for_vghtpe": false,
       "notes": "同頁原文用語。"
+    },
+    {
+      "department_name": "心臟外科",
+      "official_department_labels": [
+        "心臟外科"
+      ],
+      "concept": "周邊血管阻塞",
+      "evidence_type": "direct_routing_evidence",
+      "canonical_dept_id": 1285,
+      "canonical_parent_dept": "外科系",
+      "canonical_child_dept": "心臟外科",
+      "mapping_method": "exact_app_name",
+      "source_id": "vghtpe_symptom_numbness_20261103",
+      "source_hospital": "vghtpe",
+      "source_type": "symptom_department_guidance",
+      "source_title": "臺北榮民總醫院｜症狀說明：麻痺（建議就診科別）",
+      "source_url": "https://www.vghtpe.gov.tw/vghtpe/Fpage.action?fid=6729",
+      "source_priority": 1,
+      "retrieved_at": "2026-11-03",
+      "evidence_text": "一般常造成手腳麻木的原因包括糖尿病、周邊血管阻塞症、頸椎或腰椎的病變",
+      "fallback_for_vghtpe": false,
+      "notes": "官方列「心臟血管外科」，對到既有心臟外科（其知識庫概念皆為周邊血管症狀）；只收血管原因，不收一般「麻木」，因臺中榮總症狀查詢的「手腳會麻」不列心臟外科。"
     }
   ]
 }
