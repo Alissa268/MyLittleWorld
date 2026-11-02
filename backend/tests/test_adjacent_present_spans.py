@@ -50,10 +50,17 @@ def pairs(retrieved):
     return {(row["patient_source_text"], row["knowledge_concept"]) for row in retrieved}
 
 
+def compound(retrieved):
+    # 「背痛」alone has been an official concept since 2026-11-03 (Taipei VGH fid 6730);
+    # these tests are about the joined 腰酸背痛 anchor, so they look only at those rows.
+    return [row for row in retrieved if row["knowledge_concept"] == "腰酸背痛"]
+
+
 def test_split_compound_phrase_matches_whole_official_concept():
     case = split_back_pain()
     retrieved = literal(case)
-    assert pairs(retrieved) == {("腰酸背痛", "腰酸背痛")}
+    assert pairs(retrieved) == {("腰酸背痛", "腰酸背痛"), ("背痛", "背痛")}
+    retrieved = compound(retrieved)
     assert {row["childDept"] for row in retrieved} >= {"一般骨科", "神經內科", "神經外科", "復健醫學", "疼痛控制科"}
     assert {row["dept_id"] for row in retrieved} == {r["canonical_dept_id"] for r in lookup_concept("腰酸背痛", RECORDS)}
 
@@ -80,7 +87,7 @@ def test_split_compound_phrase_reaches_department_convergence_payload():
 
 def test_body_part_and_touching_symptom_match_whole_concept():
     case = interpreted(("下背痛", [item("body_part", "下背", "下背"), item("symptom", "疼痛", "痛")]))
-    assert pairs(literal(case)) == {("下背痛", "下背痛")}
+    assert pairs(literal(case)) == {("下背痛", "下背痛"), ("下背痛", "背痛")}
 
 
 def test_concept_already_covered_by_shorter_chain_is_not_reanchored():
@@ -98,7 +105,7 @@ def test_body_part_spans_alone_never_form_an_anchor():
 
 def test_non_touching_spans_are_not_joined():
     case = interpreted(("腰酸，背痛", [item("symptom", "腰酸", "腰酸"), item("accompanying_symptoms", "背痛", "背痛")]))
-    assert literal(case) == []
+    assert compound(literal(case)) == []
 
 
 def test_absent_or_uncertain_span_never_takes_part():
@@ -114,13 +121,13 @@ def test_current_absent_or_uncertain_concept_blocks_joined_anchor():
             ("周一開始腰酸背痛", [item("symptom", "腰酸", "腰酸"), item("accompanying_symptoms", "背痛", "背痛")]),
             ("應該不是腰酸背痛", [item("accompanying_symptoms", "腰酸背痛", "不是腰酸背痛", assertion=assertion)]),
         )
-        assert literal(case) == [], assertion
+        assert compound(literal(case)) == [], assertion
 
 
 def test_span_repeated_in_message_has_no_certain_position():
     case = interpreted(("腰酸背痛，腰酸到不行", [item("symptom", "腰酸", "腰酸"),
                                             item("accompanying_symptoms", "背痛", "背痛")]))
-    assert literal(case) == []
+    assert compound(literal(case)) == []
 
 
 def test_denied_compound_phrase_never_matches():
@@ -128,7 +135,7 @@ def test_denied_compound_phrase_never_matches():
     assert literal(case) == []
     case = interpreted(("沒有腰酸背痛", [item("symptom", "腰酸", "沒有腰酸", assertion="absent"),
                                        item("accompanying_symptoms", "背痛", "背痛")]))
-    assert literal(case) == []
+    assert compound(literal(case)) == []
 
 
 def _semantic(case, matches):
@@ -147,7 +154,7 @@ def _payload(prompt):
 
 def test_variant_character_split_phrase_offers_whole_anchor_to_semantic_retrieval():
     case = split_back_pain("周一開始腰痠背痛", first="腰痠")
-    assert literal(case) == []
+    assert compound(literal(case)) == []
     result, provider = _semantic(case, [dict(patient_source_text="腰痠背痛", knowledge_concept="腰酸背痛",
                                              confidence=.97)])
     retrieval, audit = (call.args[0] for call in provider.await_args_list)
@@ -204,8 +211,8 @@ def test_joined_match_leaves_part_evidence_and_fields_unchanged():
     case = split_back_pain()
     before = [e.model_dump() for e in case.semantic_extractions]
     evidence_before = service.accepted_semantic_evidence(case)
-    retrieved = literal(case)
-    assert all(row["patient_source_parts"] == ["腰酸", "背痛"] for row in retrieved)
+    retrieved = compound(literal(case))
+    assert retrieved and all(row["patient_source_parts"] == ["腰酸", "背痛"] for row in retrieved)
     assert [e.model_dump() for e in case.semantic_extractions] == before
     assert service.accepted_semantic_evidence(case) == evidence_before
     assert [(e["field"], e["source_text"]) for e in evidence_before if e["assertion"] == "present"] == [
