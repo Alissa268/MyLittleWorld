@@ -16,7 +16,7 @@ from app.schemas import (
 from app.services import department_clues as clues
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
-from app.services.conversation_service import safety_screen_resolved
+from app.services.conversation_service import body_part_question, safety_screen_resolved
 from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
 )
@@ -93,8 +93,12 @@ def validated_semantic_evidence_history(case: TriageCase) -> list[dict]:
 def effective_semantic_evidence(case: TriageCase) -> list[dict]:
     """Collapse validated evidence history into the latest current fact per key."""
     current: dict[tuple[str, ...], tuple[int, dict]] = {}
+    stored_part = (case.patient_input.body_part or "").strip()
     for position, evidence in enumerate(validated_semantic_evidence_history(case)):
         field = evidence["field"]
+        # A further body part kept only for subject checks never replaces the stored one here.
+        if field == "body_part" and stored_part and str(evidence["normalized_value"]).strip() != stored_part:
+            continue
         if field in _ASSERTED_MEDICAL_FIELDS:
             key = ("concept", field, normalize_concept(str(evidence["normalized_value"])))
         else:
@@ -385,6 +389,100 @@ def _contradicted_concepts(evidence: list[dict]) -> set[str]:
     }
 
 
+def _body_part_texts(case: TriageCase) -> set[str]:
+    """Every body part the patient stated in this case (history, not only the latest)."""
+    texts: set[str] = set()
+    for item in validated_semantic_evidence_history(case):
+        if item["field"] == "body_part" and item["semantic_status"] in {"available", "partial"}:
+            for value in (item["source_text"], item["normalized_value"]):
+                if isinstance(value, str) and value.strip():
+                    texts.add(value.strip())
+    return texts
+
+
+def _symptom_subject(case: TriageCase, source: str, parts: set[str]) -> tuple[str, set[str], int | None]:
+    """Where the body part of a symptom said without one comes from.
+
+    ``answer``: the reply to the body-part question about this source; ``message``: the same
+    patient message; ``question``: the assistant question it answered; else ``unknown``.
+    Returns the origin, the parts found there and the history index of that message.
+    """
+    records = case.history_records
+    question = body_part_question(source)
+    for index, message in enumerate(records):
+        if message.role == "assistant" and question in message.content:
+            reply = next((i for i in range(index + 1, len(records)) if records[i].role == "user"), None)
+            stated = {part for part in parts if reply is not None and part in records[reply].content}
+            if stated:
+                return "answer", stated, reply
+    for index, message in enumerate(records):
+        if message.role != "user" or source not in message.content:
+            continue
+        stated = {part for part in parts if part in message.content}
+        if stated:
+            return "message", stated, index
+        previous = next((records[i].content for i in range(index - 1, -1, -1) if records[i].role == "assistant"), "")
+        stated = {part for part in parts if part in previous}
+        if stated:
+            return "question", stated, index
+        break
+    return "unknown", set(), None
+
+
+def subject_filtered_evidence(case: TriageCase, rows: list[dict]) -> list[dict]:
+    """A symptom without its own body part may only add to departments the stated body part reached.
+
+    Once the patient stated a body part, a row whose source and concept name no body part
+    counts only for a department that a row naming a body part also reached. Exception: its
+    body part (same message, the question it answered, or the reply to the body-part
+    question) is stated in no other patient message, which makes it an independent complaint. When nothing remains and a source had no body part at all,
+    the next unasked one is stored for the fixed body-part question.
+    """
+    state = case.conversation_state
+    parts = _body_part_texts(case)
+    if not parts:
+        return rows
+    evidence = accepted_semantic_evidence(case)
+    symptoms = _present_sources(evidence)
+    # The chief complaint message and spans touching a stated body part carry their own part.
+    chief = next((message.content for message in case.history_records
+                  if message.role == "user" and any(source in message.content for source in symptoms)), "")
+    attached = {source for fragment, chain in adjacent_present_spans(_user_texts(case), evidence)
+                if any(part in parts for part in chain) for source in chain}
+
+    def names_part(row: dict) -> bool:
+        anchors = [row["patient_source_text"], row["knowledge_concept"], *row.get("patient_source_parts", [])]
+        return (row["patient_source_text"] in attached or row["patient_source_text"] in chief
+                or any(part in anchor for part in parts for anchor in anchors))
+
+    clue_rows = [row for row in rows if row.get("evidence_origin") == clues.CLUE_ANSWER_ORIGIN]
+    anchored = {row["dept_id"] for row in rows if row not in clue_rows and names_part(row)}
+    kept, unknown, dropped = list(clue_rows), [], []
+    for row in rows:
+        if row in clue_rows:
+            continue
+        if names_part(row) or row["dept_id"] in anchored:
+            kept.append(row)
+            continue
+        origin, stated, at = _symptom_subject(case, row["patient_source_text"], parts)
+        elsewhere = any(part in message.content for i, message in enumerate(case.history_records)
+                        if message.role == "user" and i != at for part in stated)
+        if origin != "unknown" and not elsewhere:
+            kept.append(row)
+            continue
+        dropped.append(row)
+        if origin == "unknown" and row["patient_source_text"] not in unknown:
+            unknown.append(row["patient_source_text"])
+    if dropped:
+        logger.info("subject filter case_id=%s dropped=%s", case.case_id,
+                    sorted({(row["dept_id"], row["patient_source_text"]) for row in dropped}))
+    if len(kept) == len(clue_rows):
+        state.body_part_question_source = next(
+            (source for source in unknown if source not in state.body_part_questions_asked), None,
+        )
+    return kept
+
+
 def _clue_priority(state, retrieved: list[dict], candidates: set[int], records: list[dict] | None) -> dict:
     """Target priority from scores, then the validated convergence candidates' order."""
     return clues.department_priority(
@@ -614,6 +712,7 @@ async def reason_about_departments(case: TriageCase) -> None:
     state.department_clue_offer = []
     state.department_clue_candidates = []
     state.clue_decision = None
+    state.body_part_question_source = None
     case.department_result = None
     try:
         active = fetch_active_departments()
@@ -641,6 +740,7 @@ async def reason_about_departments(case: TriageCase) -> None:
             state.clue_concepts_asked, records, resolutions,
             _contradicted_concepts(accepted_semantic_evidence(case)),
         ))
+        retrieved = subject_filtered_evidence(case, retrieved)
         if not retrieved:
             state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
             apply_clue_decision(case, [], [], active)

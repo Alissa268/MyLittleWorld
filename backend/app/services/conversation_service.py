@@ -25,6 +25,14 @@ SAFETY_ANSWER_CAP = 3
 SAFETY_NET_PENDING_INTENT = "safety_net_choice"
 SAFETY_NET_QUESTION = "目前還沒辦法確定要看哪一科，要繼續描述，還是先掛家庭醫學科？"
 SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap"})
+BODY_PART_PENDING_INTENT = "symptom_body_part"
+
+
+def body_part_question(source: str) -> str:
+    """Backend-owned fixed question for a symptom said without a body part."""
+    return f"請問您說的「{source}」是在哪個部位呢？"
+
+
 SAFETY_UNRESOLVED_REPLY = (
     "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
     "若情況緊急，請立即尋求緊急醫療協助。"
@@ -644,6 +652,13 @@ def capture_pending_answer(
     """Persist only a grounded, confident answer before candidate recomputation."""
     if case.conversation_state.pending_clarification_intent == SAFETY_NET_PENDING_INTENT:
         return _capture_safety_net_choice(case, suggestion, user_sources)
+    if case.conversation_state.pending_clarification_intent == BODY_PART_PENDING_INTENT:
+        # Any reply releases it; the body part itself arrives as ordinary extracted evidence.
+        if user_sources:
+            case.conversation_state.pending_clarification_intent = None
+            case.conversation_state.pending_clarification_question = None
+            case.conversation_state.next_information_needed = []
+        return False
     clue_index = clues.pending_clue_index(case.conversation_state)
     if clue_index is not None:
         return _capture_clue_answers(case, suggestion, user_sources, clue_index)
@@ -1048,6 +1063,11 @@ def advance_conversation(
     if state.turn_count >= settings.hard_turn_cap:
         _unresolved(case)
         return
+    if (state.body_part_question_source and state.department_status != "resolved"
+            and safety_screen_resolved(case) and state.pending_clue_question_index is None
+            and state.pending_clarification_intent is None):
+        _ask_body_part_question(case, state.body_part_question_source)
+        return
     # Stalled replies no longer end the case: consecutive_no_progress_turns never exceeds
     # turn_count, so a stalled case reaches this one-time question at the same turn.
     if (not state.safety_net_asked and state.turn_count >= settings.safety_net_ask_turn
@@ -1246,6 +1266,28 @@ def _ask_safety_net_question(case: TriageCase) -> None:
     case.triage.next_question = SAFETY_NET_QUESTION
     case.triage.is_final = False
     case.triage.reasons.append("多輪後仍無法區分科別，詢問一次要繼續描述或先掛家庭醫學科。")
+
+
+def _ask_body_part_question(case: TriageCase, source: str) -> None:
+    """Backend-owned fixed question, asked once per symptom source; any reply releases it."""
+    state = case.conversation_state
+    question = body_part_question(source)
+    state.body_part_questions_asked.append(source)
+    state.body_part_question_source = None
+    state.pending_clarification_intent = BODY_PART_PENDING_INTENT
+    state.pending_clarification_question = question
+    if BODY_PART_PENDING_INTENT not in state.asked_clarification_intents:
+        state.asked_clarification_intents.append(BODY_PART_PENDING_INTENT)
+    state.next_information_needed = []
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = ["症狀未說明部位"]
+    state.last_question_key = None
+    state.reply_source = "BODY_PART_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = question
+    case.triage.is_final = False
+    case.triage.reasons.append("症狀未說明部位，且只有這個症狀指向其他科別，先詢問部位。")
 
 
 def _enter_safety_check(case: TriageCase) -> None:

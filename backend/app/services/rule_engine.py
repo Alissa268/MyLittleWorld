@@ -116,7 +116,14 @@ def apply_semantic_extractions(
             and extraction.assertion == "present"
             and _is_new_symptom_concept(case, extraction, accepted_extractions)
         )
-        if duplicate_candidate and not additional_symptom:
+        # A further stated body part never replaces the stored one either; it stays evidence
+        # so a later symptom's own body part is not mistaken for the first one.
+        additional_body_part = bool(
+            duplicate_candidate
+            and extraction.field == "body_part"
+            and _is_new_body_part(case, extraction, accepted_extractions)
+        )
+        if duplicate_candidate and not (additional_symptom or additional_body_part):
             _log_ai_apply_decision(case, extraction, False, "duplicate_existing_value")
             continue
         value_valid = (
@@ -174,7 +181,7 @@ def apply_semantic_extractions(
                 )
             _log_ai_apply_decision(case, extraction, False, reason)
             continue
-        if additional_symptom:
+        if additional_symptom or additional_body_part:
             accepted_extractions.append(extraction)
             _log_ai_apply_decision(case, extraction, True, None)
             continue
@@ -211,6 +218,18 @@ def _is_new_symptom_concept(
         if item.field == "symptom" and item.assertion == "present"
     )
     return bool(concept) and concept not in known
+
+
+def _is_new_body_part(
+    case: TriageCase, extraction: SemanticExtraction, pending: list[SemanticExtraction],
+) -> bool:
+    value = str(extraction.normalized_value or "").strip()
+    known = {(case.patient_input.body_part or "").strip()}
+    known.update(
+        str(item.normalized_value or "").strip()
+        for item in (*case.semantic_extractions, *pending) if item.field == "body_part"
+    )
+    return bool(value) and value not in known
 
 
 def _field_has_value(case: TriageCase, field_name: str) -> bool:

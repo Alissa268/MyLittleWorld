@@ -631,6 +631,8 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.clue_decision = None
     case.conversation_state.safety_net_asked = False
     case.conversation_state.safety_net_choice = None
+    case.conversation_state.body_part_question_source = None
+    case.conversation_state.body_part_questions_asked = []
     case.conversation_state.revision_history_start = len(case.history_records)
     case.department_result = None
     case.conversation_state.field_statuses.pop("department", None)

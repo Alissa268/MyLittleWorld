@@ -403,6 +403,10 @@ class ConversationState(BaseModel):
     # Safety net: the one-time turn-8 question and the patient's answer; revision resets both.
     safety_net_asked: bool = False
     safety_net_choice: Optional[Literal["family_medicine", "continue"]] = None
+    # A symptom whose body part is unknown and which alone points away from the stated body part:
+    # set by department reasoning each turn; sources already asked are never asked again.
+    body_part_question_source: Optional[str] = None
+    body_part_questions_asked: List[str] = Field(default_factory=list)
     # Appointment availability asked once the department converged; revision keeps it.
     availability_status: Literal["not_asked", "asked", "answered", "unspecified"] = "not_asked"
     availability_question_attempts: int = Field(default=0, ge=0)
