@@ -7,6 +7,7 @@ from typing import Any
 from app.config import get_settings
 from app.schemas import TriageCase
 from app.services.chat_perf import record_ai_reply_outcome
+from app.services.pediatric_routing import DECISION_REASON as PEDIATRIC_DECISION_REASON
 
 logger = logging.getLogger(__name__)
 
@@ -70,6 +71,12 @@ def build_department_confirmation_reply(case: TriageCase) -> str:
     if decision is not None and decision.kind == "family_medicine":
         # The configured wording is used verbatim, never rewritten by AI.
         reply = f"{get_settings().family_medicine_fallback_message}請確認後取得推薦掛號方案。"
+        return f"{reply}\n{preference_summary}" if preference_summary else reply
+    if decision is not None and decision.reason == PEDIATRIC_DECISION_REASON:
+        reply = (
+            f"{basis}。就診者未滿 18 歲，依醫院就醫指引，兒童的各種症狀可先看兒科，"
+            f"因此目前建議您先看{department}。請確認後取得推薦掛號方案。"
+        )
         return f"{reply}\n{preference_summary}" if preference_summary else reply
     reply = (
         f"{basis}，這些情況較符合{department}的診療範圍，"

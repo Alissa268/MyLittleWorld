@@ -405,6 +405,13 @@ class ConversationState(BaseModel):
     # set by department reasoning each turn; sources already asked are never asked again.
     body_part_question_source: Optional[str] = None
     body_part_questions_asked: List[str] = Field(default_factory=list)
+    # Pediatric routing: who the patient is (validated turn-interpreter patient_profile), the
+    # one-time age question for an age-less 「我女兒」 and its reply.
+    patient_subject: Optional[Literal["self", "other"]] = None
+    patient_relation_text: Optional[str] = None
+    patient_age_text: Optional[str] = None
+    patient_age_question_asked: bool = False
+    patient_age_answer: Optional[str] = None
     # Appointment availability asked once the department converged; revision keeps it.
     availability_status: Literal["not_asked", "asked", "answered", "unspecified"] = "not_asked"
     availability_question_attempts: int = Field(default=0, ge=0)

@@ -14,6 +14,7 @@ from app.schemas import (
     TriageCase,
 )
 from app.services import department_clues as clues
+from app.services import pediatric_routing as pediatric
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.conversation_service import body_part_question, safety_screen_resolved
@@ -541,6 +542,14 @@ def apply_clue_decision(
     state = case.conversation_state
     if not safety_screen_resolved(case):
         return
+    if pediatric.patient_status(state) == "child":
+        dept_id = pediatric.pediatric_dept_id(clues.candidate_dept_ids(retrieved))
+        result = _live_department(active, dept_id, 1.0, "就診者未滿 18 歲，依醫院就醫指引先看兒科")
+        if result is not None:
+            _adopt_decision(case, result, ClueDecisionRecord(
+                kind="decide", reason=pediatric.DECISION_REASON, dept_id=result.dept_id,
+            ))
+            return
     ai_resolved = (case.department_result.dept_id
                    if state.department_status == "resolved" and case.department_result else None)
     if ai_resolved is None and (clues.pending_clue_index(state) is not None
@@ -571,19 +580,29 @@ def apply_clue_decision(
         if result is None:
             kind = "family_medicine_unavailable"
         dept_id = result.dept_id if result else None
-    state.clue_decision = ClueDecisionRecord(
+    record = ClueDecisionRecord(
         kind=kind, reason=decision.reason, dept_id=dept_id, tied_dept_ids=list(decision.tied_dept_ids),
     )
-    logger.info("clue decision case_id=%s kind=%s reason=%s dept_id=%s", case.case_id, kind, decision.reason, dept_id)
     if result is not None:
-        case.department_result = result
-        state.department_status = "resolved"
-        state.department_next_question_intent = None
-        state.pending_clarification_intent = None
-        state.pending_clarification_question = None
-        state.pending_clue_question_index = None
-        state.clue_reask_count = 0
-        state.next_information_needed = []
+        _adopt_decision(case, result, record)
+    else:
+        state.clue_decision = record
+        logger.info("clue decision case_id=%s kind=%s reason=%s dept_id=%s", case.case_id, kind, decision.reason, dept_id)
+
+
+def _adopt_decision(case: TriageCase, result: DepartmentResult, record: ClueDecisionRecord) -> None:
+    state = case.conversation_state
+    state.clue_decision = record
+    logger.info("clue decision case_id=%s kind=%s reason=%s dept_id=%s",
+                case.case_id, record.kind, record.reason, record.dept_id)
+    case.department_result = result
+    state.department_status = "resolved"
+    state.department_next_question_intent = None
+    state.pending_clarification_intent = None
+    state.pending_clarification_question = None
+    state.pending_clue_question_index = None
+    state.clue_reask_count = 0
+    state.next_information_needed = []
 
 
 def _clue_answers(case: TriageCase) -> list[dict]:

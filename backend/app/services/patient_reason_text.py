@@ -9,6 +9,7 @@ import re
 
 from app.config import get_settings
 from app.schemas import TimePreference, TriageCase
+from app.services.pediatric_routing import DECISION_REASON as PEDIATRIC_DECISION_REASON
 from app.services.schedule_filter import normalize_session, parse_date, row_matches_availability, weekday_label
 from app.services.specialty_scoring import SpecialtyScore
 from app.services.time_preference_service import DATE_KINDS, preference_matches_row
@@ -74,6 +75,9 @@ def _department_sentence(case: TriageCase, slot: dict) -> str:
             clauses.append(f"{'並' if said else '您'}表示有{_quote(confirmed)}")
         subject = "這些症狀" if len(said) + len(confirmed) > 1 else "此症狀"
         return f"{'，'.join(clauses)}，官方衛教資料將{subject}列在{child}，因此建議{child}。"
+    decision = state.clue_decision
+    if decision is not None and decision.reason == PEDIATRIC_DECISION_REASON:
+        return f"就診者未滿 18 歲，依醫院就醫指引，兒童的各種症狀可先看兒科，因此建議{child}。"
     if dept_id is not None and dept_id == get_settings().family_medicine_dept_id:
         return f"目前的症狀還無法明確分到單一專科，建議先看{child}，由醫師初步評估。"
     symptom = str(patient.symptom or patient.body_part or "").strip()

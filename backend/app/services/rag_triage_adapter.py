@@ -31,6 +31,7 @@ from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.department_clues import pending_clue_concepts
 from app.services.field_acceptance import ai_normalized_value_valid
 from app.services.department_preference_service import validate_department_preference, active_department_candidates
+from app.services.pediatric_routing import apply_patient_profile, validate_patient_profile
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
 from app.services.ttas_rule_loader import TTASRuleLoadError, load_ttas_rules
 from app.services.schedule_filter import TAIPEI_ZONE
@@ -112,6 +113,7 @@ async def refine_case_with_ai(
         reference_date=time_preference_reference_date,
     )
     department_preference = validate_department_preference(data.get("department_preference"), user_sources)
+    patient_profile = validate_patient_profile(data.get("patient_profile"), user_sources)
     repair_reason = _turn_interpretation_rejection_reason(
         data,
         pending_intent=pending_intent,
@@ -123,6 +125,7 @@ async def refine_case_with_ai(
         time_preferences=time_preferences,
         department_preference=department_preference,
         clue_concepts=clue_concepts,
+        patient_profile=patient_profile,
     )
 
     if repair_reason is not None:
@@ -163,6 +166,7 @@ async def refine_case_with_ai(
             )
 
         department_preference = validate_department_preference(data.get("department_preference"), user_sources)
+        patient_profile = validate_patient_profile(data.get("patient_profile"), user_sources)
         remaining_rejection = _turn_interpretation_rejection_reason(
             repair_data,
             pending_intent=pending_intent,
@@ -174,6 +178,7 @@ async def refine_case_with_ai(
             time_preferences=time_preferences,
             department_preference=department_preference,
             clue_concepts=clue_concepts,
+            patient_profile=patient_profile,
         )
         if remaining_rejection is not None:
             logger.warning(
@@ -222,6 +227,7 @@ async def refine_case_with_ai(
     if time_preferences:
         apply_time_preferences(case.availability, time_preferences)
 
+    apply_patient_profile(case.conversation_state, patient_profile)
     if department_preference is not None:
         case.patient_input.requested_department_id = department_preference.dept_id
         case.patient_input.requested_department_name = department_preference.department_name
@@ -290,18 +296,20 @@ def _turn_interpretation_rejection_reason(
     time_preferences: list[TimePreference],
     department_preference: DepartmentPreferenceInterpretation | None,
     clue_concepts: list[str] | None = None,
+    patient_profile: dict | None = None,
 ) -> str | None:
     """Reject structurally incomplete AI turns; never infer user semantics here."""
     required = {
         "semantic_extractions", "pending_answer", "ttas_evidence", "time_preferences",
         "dialogue_act", "prior_answer_reference", "department_preference",
     }
-    if set(data) != required:
+    # patient_profile is optional: an older or terse reply without it still parses.
+    if not required <= set(data) <= required | {"patient_profile"}:
         return "invalid_turn_interpretation_fields"
     if any(not isinstance(data[key], list) for key in (
         "semantic_extractions", "ttas_evidence", "time_preferences",
-    )) or any(data[key] is not None and not isinstance(data[key], dict) for key in (
-        "pending_answer", "prior_answer_reference", "department_preference",
+    )) or any(data.get(key) is not None and not isinstance(data[key], dict) for key in (
+        "pending_answer", "prior_answer_reference", "department_preference", "patient_profile",
     )):
         return "invalid_turn_interpretation_shape"
     dialogue_reason = _dialogue_act_rejection_reason(data.get("dialogue_act"), user_sources)
@@ -313,7 +321,7 @@ def _turn_interpretation_rejection_reason(
         return "correction_without_grounded_evidence"
     if dialogue_act.act == "new_information" and not (
         any(accepted(item.confidence, item.semantic_status) for item in semantic_extractions)
-        or ttas_evidence or time_preferences or department_preference is not None
+        or ttas_evidence or time_preferences or department_preference is not None or patient_profile is not None
     ):
         return "new_information_without_grounded_evidence"
     if pending_intent is not None and dialogue_act.act == "answer" and pending_answer is None:
@@ -550,7 +558,7 @@ def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_rea
         f" rejection_reason={rejection_reason}。"
         "請重新解析同一份 current_user_text；不要改寫患者事實，也不要控制 workflow。"
         "這次必須完整輸出 semantic_extractions、pending_answer、ttas_evidence、time_preferences、"
-        "dialogue_act、prior_answer_reference、department_preference 七個頂層欄位；不適用時用 [] 或 null，不得省略。"
+        "dialogue_act、prior_answer_reference、department_preference 七個頂層欄位，以及 patient_profile；不適用時用 [] 或 null，不得省略。"
         "若 dialogue_act=request_explanation，pending_answer 可以為 null，且不得捏造 medical evidence。"
         "若 rejection_reason=answer_without_concept_answers，pending_answer 必須依規則 15b 補上 concept_answers。"
         "若 dialogue_act=correction，必須輸出本輪逐字原文可支持的更正 evidence；"
@@ -637,11 +645,12 @@ def _build_symptom_collection_prompt(
   27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、decline_further_questions、unknown、off_topic。decline_further_questions 只用於使用者明確表示不想再回答問題、或已無法再提供更多資訊（例如「不想再回答了，直接幫我選科」「我真的說不出更多了」）；使用者表示想直接掛號、不要再問（例如「我要先掛號」「直接幫我掛號」「我想要掛號不要再問」）也是 decline_further_questions，即使句子以「我說」開頭也一樣：那是在重申要求，不是 claims_already_answered；單純回答「沒有」「不知道」某一題是 answer，不是 decline_further_questions。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
   28. 新增 prior_answer_reference，預設為 null。只有 dialogue_act=claims_already_answered、有 active pending intent 且不是 safety_screen 時，才可引用 prior_accepted_semantic_evidence 中真正回答該 pending question 的既有證據；只輸出 answered_intent、answer_source_text、answer_confidence。answered_intent 必須完全等於 pending intent，source 必須逐字等於一筆 prior accepted extraction 的 source_text，confidence 為 0 到 1。不得只引用 raw history、不得引用本輪剛抽的新證據、不得把 uncertain 當已回答；找不到可靠答案就保持 null。此 reference 不代表科別已收斂，也絕不可完成 safety screen。
   29. dialogue_act=correction 時，仍須逐欄抽出本輪直接支持的更正 evidence；若修正 medical concept，分別輸出舊概念的 grounded absent 與新概念的 grounded present，不得刪掉無關症狀。correction act 本身不會改值；Backend 只接受 grounded、高信心且 schema 合法的本輪欄位。不得輸出 revision_mode 或其他 workflow 指令。
-  30. 每次回覆都必須包含七個頂層欄位：semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act、prior_answer_reference、department_preference。沒有內容時分別使用 [] 或 null，不得省略。dialogue_act 一律必須輸出。
+  30. 每次回覆都必須包含八個頂層欄位：semantic_extractions、pending_answer、ttas_evidence、time_preferences、dialogue_act、prior_answer_reference、department_preference、patient_profile。沒有內容時分別使用 [] 或 null，不得省略。dialogue_act 一律必須輸出。
 
 31. department_preference 預設為 null，只有本輪明確要求、指定或改指定科別才輸出；不得由症狀推論偏好，不可塞進 symptom。僅含 dept_id（整數）、department_name（同 ID 的正式名稱）、source_text（本輪連續逐字原文）、confidence（有限 0～1）。只能選下方 active SQL Department 中唯一存在的正式 ID/name pair；不得別名補救或發明 ID。這只是偏好，不能跳過安全檢查或決定科別結果、stage、confirmed。無候選或無明確要求時必須 null。
 目前 active SQL Department：
 {json.dumps(active_department_candidates(), ensure_ascii=False, indent=2)}
+32. patient_profile 預設為 null，只在本輪原文表達了「要看病的人（就診者）是誰」或就診者年齡時輸出。僅含 subject、relation_text、age_text、source_text、confidence。subject 為 self（使用者本人看病）或 other（替家人或他人描述病況）。relation_text 是 other 時對就診者的逐字稱呼（例如「小女兒」「我家寶寶」「我媽」），self 時必須 null。age_text 是「就診者本人」年齡或學齡的最短逐字原文（例如「7歲」「6個月大」「國小三年級」「高二」），不是其他人的年齡；沒說就 null。source_text 是本輪支持這個判斷的最短連續逐字原文，relation_text 與 age_text 都必須包含在其中；confidence 為有限 0～1。只依語意判斷誰在生病：「我是幼稚園老師，喉嚨痛」是 self 且 age_text=null（幼稚園是工作地點）；「我小孩感冒傳染給我，我現在咳嗽」是 self；「我女兒幫我掛號，我頭暈」是 self；「我小女兒感冒很多天」是 other、relation_text=「小女兒」。不得猜年齡，也不得由症狀推論年齡。
 
 對話行為正例 A（要求解釋，不是 medical answer）：
 current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀況？」
@@ -656,7 +665,8 @@ current_user_text:「我有點搞不懂，你現在主要是想確認什麼狀�
     "confidence": 0.98
   }},
   "department_preference": null,
-  "prior_answer_reference": null
+  "prior_answer_reference": null,
+  "patient_profile": null
 }}
 
 對話行為正例 B（更正舊症狀，同時保留未被更正的新資訊）：
@@ -713,7 +723,8 @@ current_user_text:「我剛剛講錯了，主要不是頭暈，是頭痛，右�
     "confidence": 0.99
   }},
   "department_preference": null,
-  "prior_answer_reference": null
+  "prior_answer_reference": null,
+  "patient_profile": null
 }}
 
 時間偏好正例：
@@ -791,7 +802,8 @@ time_preferences 應輸出：
     "confidence": 0.98
   }},
   "department_preference": null,
-  "prior_answer_reference": null
+  "prior_answer_reference": null,
+  "patient_profile": null
 }}
 
 TTAS 正例（同一句可同時產生 semantic_extractions 與 ttas_evidence）：
@@ -836,7 +848,8 @@ current_user_text:「剛剛清潔劑濺到我的右眼，現在眼睛灼痛。�
     "confidence": 0.99
   }},
   "department_preference": null,
-  "prior_answer_reference": null
+  "prior_answer_reference": null,
+  "patient_profile": null
 }}
 
 TTAS 反例（不能從症狀倒推暴露原因）：
@@ -873,5 +886,6 @@ current_user_text:「我的右眼很痛。」
     "confidence": 0.99
   }},
   "department_preference": null,
-  "prior_answer_reference": null
+  "prior_answer_reference": null,
+  "patient_profile": null
 }}"""

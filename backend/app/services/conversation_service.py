@@ -14,6 +14,7 @@ from app.schemas import (
     SemanticExtraction, TriageCase,
 )
 from app.services import department_clues as clues
+from app.services import pediatric_routing as pediatric
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.field_acceptance import ai_normalized_value_valid
@@ -653,6 +654,14 @@ def capture_pending_answer(
     """Persist only a grounded, confident answer before candidate recomputation."""
     if case.conversation_state.pending_clarification_intent == SAFETY_NET_PENDING_INTENT:
         return _capture_safety_net_choice(case, suggestion, user_sources)
+    if case.conversation_state.pending_clarification_intent == pediatric.AGE_PENDING_INTENT:
+        # Any reply releases it once; an unusable reply (「不知道」) leaves the patient an adult.
+        if user_sources:
+            case.conversation_state.patient_age_answer = "".join(user_sources)
+            case.conversation_state.pending_clarification_intent = None
+            case.conversation_state.pending_clarification_question = None
+            case.conversation_state.next_information_needed = []
+        return False
     if case.conversation_state.pending_clarification_intent == BODY_PART_PENDING_INTENT:
         # Any reply releases it; the body part itself arrives as ordinary extracted evidence.
         if user_sources:
@@ -1022,6 +1031,9 @@ def advance_conversation(
             return
         _enter_safety_check(case)
         return
+    if _age_question_due(case):
+        _ask_age_question(case)
+        return
 
     decision = state.clue_decision.kind if state.clue_decision else None
     if decision == "family_medicine_unavailable":
@@ -1309,6 +1321,39 @@ def _ask_safety_net_question(case: TriageCase) -> None:
     case.triage.next_question = SAFETY_NET_QUESTION
     case.triage.is_final = False
     case.triage.reasons.append("多輪後仍無法區分科別，詢問一次要繼續描述或先掛家庭醫學科。")
+
+
+def _age_question_due(case: TriageCase) -> bool:
+    """Once the safety screen is done, an age-less 「我兒子」 gets one age question; never with a chosen department."""
+    state = case.conversation_state
+    patient = case.patient_input
+    return (
+        safety_screen_resolved(case) and not state.patient_age_question_asked
+        and state.pending_clarification_intent is None
+        and patient.requested_department_id is None and not patient.requested_department_name
+        and pediatric.patient_status(state) == "ask"
+    )
+
+
+def _ask_age_question(case: TriageCase) -> None:
+    """Backend-owned fixed question; any reply releases it and the age is read by code."""
+    state = case.conversation_state
+    question = pediatric.age_question(state)
+    state.patient_age_question_asked = True
+    state.pending_clarification_intent = pediatric.AGE_PENDING_INTENT
+    state.pending_clarification_question = question
+    if pediatric.AGE_PENDING_INTENT not in state.asked_clarification_intents:
+        state.asked_clarification_intents.append(pediatric.AGE_PENDING_INTENT)
+    state.next_information_needed = []
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = ["未滿 18 歲先看兒科，需確認就診者年齡"]
+    state.last_question_key = None
+    state.reply_source = "AGE_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = question
+    case.triage.is_final = False
+    case.triage.reasons.append("使用者描述家人但未說年齡，先詢問一次年齡以判斷是否看兒科。")
 
 
 def _ask_body_part_question(case: TriageCase, source: str) -> None:
