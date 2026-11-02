@@ -18,6 +18,7 @@ _SOURCE_POLICY = {
     ("vghtpe", "patient_education"): (2, {"ihealth.vghtpe.gov.tw"}),
     ("vghtpe", "clinic_service"): (2, {"wd.vghtpe.gov.tw"}),
     ("vghtc", "department_service"): (3, {"www.vghtc.gov.tw"}),
+    ("vghtc", "symptom_department_guidance"): (3, {"www.vghtc.gov.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",

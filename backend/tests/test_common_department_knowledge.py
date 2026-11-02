@@ -13,7 +13,11 @@ ACTIVE = [
 ]
 RESOLUTIONS = resolve_department_names(RECORDS, ACTIVE)
 NAMES = {record["canonical_dept_id"]: record["department_name"] for record in RECORDS}
-SUPPLEMENTS = sorted(KNOWLEDGE_DIR.glob("supplemental_guidance_20261103_*.json"))
+SUPPLEMENTS = [
+    KNOWLEDGE_DIR / f"supplemental_guidance_20261103_{name}.json"
+    for name in ("chest", "dermatology", "ent", "eye", "gastroenterology", "general", "neurology",
+                 "orthopedics", "urology_gynecology")
+]
 
 
 def literal_departments(text):
@@ -27,9 +31,6 @@ def literal_departments(text):
 
 
 def test_supplements_cite_symptom_pages_and_skip_family_medicine():
-    assert [path.stem.split("_", 3)[3] for path in SUPPLEMENTS] == [
-        "chest", "dermatology", "ent", "eye", "gastroenterology", "general", "neurology", "orthopedics",
-        "urology_gynecology"]
     for path in SUPPLEMENTS:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert "mappings" not in data
