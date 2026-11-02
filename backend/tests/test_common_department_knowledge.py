@@ -1,4 +1,4 @@
-"""Taipei VGH symptom pages for skin, GI, chest and orthopedic complaints (added 2026-11-03)."""
+"""Taipei VGH symptom pages for common complaints (fid 6698-6746, added 2026-11-03)."""
 import json
 
 from app.schemas import Message, SemanticExtraction, TriageCase
@@ -27,8 +27,9 @@ def literal_departments(text):
 
 
 def test_supplements_cite_symptom_pages_and_skip_family_medicine():
-    assert [path.stem.rsplit("_", 1)[1] for path in SUPPLEMENTS] == [
-        "chest", "dermatology", "gastroenterology", "orthopedics"]
+    assert [path.stem.split("_", 3)[3] for path in SUPPLEMENTS] == [
+        "chest", "dermatology", "ent", "eye", "gastroenterology", "general", "neurology", "orthopedics",
+        "urology_gynecology"]
     for path in SUPPLEMENTS:
         data = json.loads(path.read_text(encoding="utf-8"))
         assert "mappings" not in data
@@ -47,3 +48,15 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("喘不過氣") == {"胸腔內科", "心臟內科"}
     assert literal_departments("背痛") == {"骨科", "復健醫學", "神經外科"}
     assert literal_departments("關節酸痛") == {"骨科", "復健醫學", "過敏免疫風濕"}
+    assert literal_departments("喉嚨痛") == {"感染科", "喉科"}
+    assert literal_departments("流鼻血") == {"鼻科"}
+    assert literal_departments("耳朵疼痛") == {"耳科"}
+    assert literal_departments("天旋地轉") == {"神經內科"}
+    assert literal_departments("手腳麻木") == {"神經內科", "神經外科"}
+    assert literal_departments("解尿困難") == {"泌尿外科"}
+    assert literal_departments("眼屎很多") == {"眼科"}
+
+
+def test_departments_awaiting_a_310_decision_are_not_mapped():
+    names = {record["department_name"] for record in RECORDS}
+    assert not {"乳房特別門診", "神經修復科", "心臟血管外科", "耳鼻喉科"} & names

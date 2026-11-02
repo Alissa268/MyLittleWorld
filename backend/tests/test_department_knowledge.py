@@ -109,9 +109,9 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     sources, records = knowledge
 
     # 18 original sources, the foot-pain supplement, four eye and four pediatric symptom pages,
-    # and 21 skin / GI / chest / orthopedic symptom pages added 2026-11-03.
-    assert len(sources) == 48
-    assert len(records) == 643
+    # and 43 more symptom pages (skin, GI, chest, orthopedic, ENT, eye, neurology, urology...) added 2026-11-03.
+    assert len(sources) == 70
+    assert len(records) == 729
     # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB.
     assert len(mappings) == 36
     assert len({source["source_id"] for source in sources}) == len(sources)
