@@ -389,7 +389,7 @@ class BackPainConvergence:
         return json.dumps({"status": "ambiguous", "candidates": candidates}, ensure_ascii=False)
 
 
-def test_present_clue_with_new_holder_candidates_does_not_confirm_single_department():
+def test_present_clue_holder_that_misses_the_chief_complaint_stays_out():
     case, body = turn(new_case("decide-joint-pain"), "周一開始腰酸背痛", [symptom("腰酸背痛", "腰酸背痛")],
                       convergence=BackPainConvergence())
     state = case.conversation_state
@@ -400,13 +400,11 @@ def test_present_clue_with_new_holder_candidates_does_not_confirm_single_departm
     case, body = turn(case, "有關節疼", assertion=lambda name: "present" if name == "關節痛" else "absent",
                       convergence=BackPainConvergence())
     state = case.conversation_state
-    assert {ORTHO, RHEUMA} <= set(state.department_clue_candidates)
+    # 「關節痛」 is also a 風濕 concept, but 風濕 does not hold 「腰酸背痛」 (2026-11-03 chief complaint rule).
+    assert ORTHO in state.department_clue_candidates and RHEUMA not in state.department_clue_candidates
     assert state.clue_decision.kind == "ask_clue"
     assert state.department_status != "resolved" and body["department_result"] is None
-    pending = clues.pending_clue_concepts(state)
-    assert pending and state.clue_questions_asked == 2
-    assert any(len({record["canonical_dept_id"] for record in lookup_concept(name, RECORDS)} & {ORTHO, RHEUMA}) == 1
-               for name in pending)
+    assert clues.pending_clue_concepts(state) and state.clue_questions_asked == 2
 
 
 def test_present_concept_with_one_current_candidate_holder_still_confirms():

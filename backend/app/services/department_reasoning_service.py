@@ -432,6 +432,34 @@ def _symptom_subject(case: TriageCase, source: str, parts: set[str]) -> tuple[st
     return "unknown", set(), None
 
 
+def _chief_complaint(case: TriageCase, evidence: list[dict]) -> str:
+    """The first patient message holding a present symptom source, or ''."""
+    symptoms = _present_sources(evidence)
+    return next((message.content for message in case.history_records
+                 if message.role == "user" and any(source in message.content for source in symptoms)), "")
+
+
+def decision_candidates(case: TriageCase, retrieved: list[dict]) -> set[int]:
+    """Candidates that may be recommended: those the chief complaint reached, when any did.
+
+    A later symptom (例：掉頭髮 之後才說的「眼睛很乾」) still scores for departments that
+    also hold the chief complaint, but cannot bring in a department that does not see it.
+    Family medicine stays a candidate. With no chief-complaint department every candidate stays.
+    """
+    candidates = clues.candidate_dept_ids(retrieved)
+    family = get_settings().family_medicine_dept_id
+    chief = _chief_complaint(case, accepted_semantic_evidence(case))
+    reached = {row["dept_id"] for row in retrieved
+               if chief and row.get("evidence_origin") != clues.CLUE_ANSWER_ORIGIN
+               and row["patient_source_text"] in chief} - {family}
+    if not reached:
+        return candidates
+    off_complaint = candidates - reached - {family}
+    if off_complaint:
+        logger.info("chief complaint filter case_id=%s dropped=%s", case.case_id, sorted(off_complaint))
+    return candidates - off_complaint
+
+
 def subject_filtered_evidence(case: TriageCase, rows: list[dict]) -> list[dict]:
     """A symptom without its own body part may only add to departments the stated body part reached.
 
@@ -446,10 +474,8 @@ def subject_filtered_evidence(case: TriageCase, rows: list[dict]) -> list[dict]:
     if not parts:
         return rows
     evidence = accepted_semantic_evidence(case)
-    symptoms = _present_sources(evidence)
     # The chief complaint message and spans touching a stated body part carry their own part.
-    chief = next((message.content for message in case.history_records
-                  if message.role == "user" and any(source in message.content for source in symptoms)), "")
+    chief = _chief_complaint(case, evidence)
     attached = {source for fragment, chain in adjacent_present_spans(_user_texts(case), evidence)
                 if any(part in parts for part in chain) for source in chain}
 
@@ -515,11 +541,12 @@ def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict
     The offer holds only clues of the department the next question targets (see
     clue_target_department), concepts held by no other candidate first. Family medicine
     stays a candidate but is never a clue target; ranking reads the validated convergence
-    candidates, so call this after they are stored.
+    candidates, so call this after they are stored. Departments that do not hold the chief
+    complaint are left out (see decision_candidates).
     """
     state = case.conversation_state
     settings = get_settings()
-    candidates = clues.candidate_dept_ids(retrieved)
+    candidates = decision_candidates(case, retrieved)
     mentioned = clues.mentioned_concepts(retrieved, accepted_semantic_evidence(case))
     askable = clues.clue_concepts(records, candidates, mentioned, state.clue_concepts_asked,
                                   {settings.family_medicine_dept_id})
