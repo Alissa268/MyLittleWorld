@@ -108,7 +108,8 @@ def apply_ttas_evaluation(case: TriageCase, *, preserve_question: bool = True) -
         urgency_level=None,
         warning_required=warning,
         warning_message=(
-            "目前 TTAS 初步篩檢結果較急迫，請儘速由醫療人員評估；如症狀持續惡化請尋求緊急醫療協助。"
+            "初步篩檢結果顯示您的狀況可能較危急，線上問診無法判斷嚴重程度，因此不會繼續掛號導引。"
+            "請立即前往急診；情況危急請撥打 119。"
             if warning else None
         ),
         need_more_info=existing.need_more_info,

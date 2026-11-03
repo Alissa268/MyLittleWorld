@@ -52,8 +52,8 @@ logger = logging.getLogger(__name__)
 
 DEPARTMENT_CLARIFICATION_KEY = "department_clarification"
 URGENT_WARNING_FALLBACK = (
-    "目前初步急迫性篩檢結果較急迫，請儘速由醫療人員評估；"
-    "若症狀持續惡化，請立即尋求緊急醫療協助。"
+    "初步篩檢結果顯示您的狀況可能較危急，線上問診無法判斷嚴重程度，因此不會繼續掛號導引。"
+    "請立即前往急診；情況危急請撥打 119。"
 )
 
 
