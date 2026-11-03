@@ -5,9 +5,11 @@ from datetime import date
 from typing import Any
 
 from app.config import get_settings
-from app.schemas import TriageCase
+from app.schemas import TimePreference, TriageCase
 from app.services.chat_perf import record_ai_reply_outcome
 from app.services.pediatric_routing import DECISION_REASON as PEDIATRIC_DECISION_REASON
+from app.services.schedule_filter import WEEKDAY_LABELS
+from app.services.time_preference_service import DATE_KINDS, SESSION_VALUE, WEEKDAY_INDEX
 
 logger = logging.getLogger(__name__)
 
@@ -85,8 +87,20 @@ def build_department_confirmation_reply(case: TriageCase) -> str:
     return f"{reply}\n{preference_summary}" if preference_summary else reply
 
 
+_RANK_WORDS = ("優先", "其次", "再來")
+_WEEKDAYS_ONLY = frozenset({"monday", "tuesday", "wednesday", "thursday", "friday"})
+_WEEKEND_ONLY = frozenset({"saturday", "sunday"})
+
+
 def build_availability_preference_summary(case: TriageCase) -> str:
-    """Echo only concrete availability already stored on the case."""
+    """Echo only concrete availability already stored on the case.
+
+    Validated ``time_preferences`` show the backend-resolved dates (例「下週三早上」→
+    「11 月 11 日（週三）上午」), ranked choices and exclusions, so the patient can see
+    what the system understood before confirming.
+    """
+    if case.availability.time_preferences:
+        return _time_preference_summary(case)
     dates = [_format_preferred_date(value) for value in case.availability.preferred_dates]
     dates = [value for value in dates if value]
     days = [str(value).strip() for value in case.availability.preferred_days if str(value).strip()]
@@ -101,6 +115,88 @@ def build_availability_preference_summary(case: TriageCase) -> str:
     if sessions:
         return f"就醫時間偏好：{'、'.join(sessions)}時段。"
     return ""
+
+
+def _time_preference_summary(case: TriageCase) -> str:
+    preferences = case.availability.time_preferences
+    outcomes = case.conversation_state.availability_dimension_outcomes
+    wanted_dates = [item for item in preferences if item.relation != "exclude" and item.kind in DATE_KINDS]
+    wanted_sessions = [item for item in preferences if item.relation != "exclude" and item.kind not in DATE_KINDS]
+    excluded = _unique_labels(item for item in preferences if item.relation == "exclude")
+    has_date = any(item.kind in DATE_KINDS for item in preferences)
+    has_session = any(item.kind not in DATE_KINDS for item in preferences)
+
+    # One wanted date and one wanted session read as one time: 「11 月 11 日（週三）上午」.
+    combined = (len(wanted_dates) == len(wanted_sessions) == 1
+                and wanted_dates[0].relation == wanted_sessions[0].relation == "prefer")
+    parts: list[str] = []
+    if combined:
+        parts.append(_time_label(wanted_dates[0]) + _time_label(wanted_sessions[0]))
+    elif wanted_dates:
+        parts.append(_ranked_time_text(wanted_dates))
+    elif not has_date and outcomes.get("date") == "unrestricted":
+        parts.append("日期不限")
+    if excluded:
+        parts.append(f"{'、'.join(excluded)}不方便")
+    if wanted_sessions and not combined:
+        parts.append(f"時段{_ranked_time_text(wanted_sessions)}")
+    elif not has_session and outcomes.get("session") == "unrestricted":
+        parts.append("時段不限")
+    return f"就醫時間偏好：{'；'.join(parts)}。" if parts else ""
+
+
+def _ranked_time_text(items: list[TimePreference]) -> str:
+    """「週三」alone; 「週三優先，其次週二」 for ranked choices; 「也可以」 for acceptable ones."""
+    preferred = [item for item in items if item.relation == "prefer"]
+    acceptable = _unique_labels(item for item in items if item.relation == "acceptable")
+    if len(items) == 1 and preferred:
+        return _time_label(preferred[0])
+    texts: list[str] = []
+    for index, rank in enumerate(sorted({item.priority or 99 for item in preferred})):
+        labels = "、".join(_unique_labels(item for item in preferred if (item.priority or 99) == rank))
+        word = _RANK_WORDS[min(index, len(_RANK_WORDS) - 1)]
+        texts.append(f"{labels}{word}" if index == 0 else f"{word}{labels}")
+    if acceptable:
+        texts.append(f"{'、'.join(acceptable)}也可以")
+    return "，".join(texts)
+
+
+def _unique_labels(items) -> list[str]:
+    labels: list[str] = []
+    for item in items:
+        label = _time_label(item)
+        if label and label not in labels:
+            labels.append(label)
+    return labels
+
+
+def _time_label(item: TimePreference) -> str:
+    """Backend-resolved wording; the patient's own words only when nothing was resolved."""
+    if item.kind == "session":
+        return SESSION_VALUE.get(item.session or "", "")
+    if item.kind == "weekday":
+        return WEEKDAY_LABELS[WEEKDAY_INDEX[item.weekday]] if item.weekday else f"「{item.source_text}」"
+    if item.kind == "weekday_group":
+        group = set(item.weekdays)
+        if group == _WEEKDAYS_ONLY:
+            return "平日"
+        if group == _WEEKEND_ONLY:
+            return "週末"
+        return "、".join(WEEKDAY_LABELS[WEEKDAY_INDEX[day]]
+                        for day in sorted(group, key=WEEKDAY_INDEX.__getitem__))
+    dates = sorted(item.resolved_dates)
+    if not dates:
+        return f"「{item.source_text}」"
+    first, last = _format_date_with_weekday(dates[0]), _format_date_with_weekday(dates[-1])
+    return first if len(dates) == 1 else f"{first}到{last}"
+
+
+def _format_date_with_weekday(value: str) -> str:
+    try:
+        parsed = date.fromisoformat(value)
+    except ValueError:
+        return ""
+    return f"{parsed.month} 月 {parsed.day} 日（{WEEKDAY_LABELS[parsed.weekday()]}）"
 
 
 def build_no_schedule_message(case: TriageCase) -> str:
