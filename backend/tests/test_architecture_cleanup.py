@@ -58,8 +58,11 @@ def test_unclear_medical_safety_answer_still_uses_three_attempt_cap(runtime):
         result = client.post("/chat", json={"case_id": case.case_id, "message": "不知道"}).json()
         assert result["conversation_state"]["safety_answer_attempts"] == attempt
         assert not result["triage_case"]["patient_input"]["red_flags_checked"]
-        if attempt < 3:
+        if attempt == 1:
             assert result["reply"] == f"{cs.SAFETY_RETRY_REPLY}\n{CHECKLIST}"
+        elif attempt == 2:
+            # One more unclear answer stops the chat, so this retry says so first.
+            assert result["reply"] == f"{cs.SAFETY_LAST_ATTEMPT_REPLY}\n{CHECKLIST}"
     assert result["conversation_state"]["clarification_status"] == "unresolved"
     assert result["conversation_state"]["reply_source"] == "SAFETY_UNRESOLVED_STOP"
     assert result["reply"] == cs.SAFETY_UNRESOLVED_REPLY

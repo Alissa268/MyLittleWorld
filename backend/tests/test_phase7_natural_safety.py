@@ -111,8 +111,12 @@ def test_live_loop_restates_the_checklist_and_is_bounded_without_invented_negati
         assert result["triage_case"]["patient_input"]["red_flags"] == []
         assert result["conversation_state"]["confirmed"] is False
         if index < 2:
-            # The planner's focused question is never shown; the full checklist is restated.
-            assert result["next_question"] == QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
+            # The planner's focused question is never shown; the full checklist is restated,
+            # after a warning on the last retry.
+            assert result["next_question"] == (
+                QUESTION_TEXTS[RED_FLAG_QUESTION_KEY] if index == 0
+                else f"{conversation_service.SAFETY_LAST_ATTEMPT_REPLY}\n{QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]}"
+            )
     assert interpreter.await_count == 4
     assert result["conversation_state"]["safety_answer_attempts"] == 3
     assert result["conversation_state"]["clarification_status"] == "unresolved"

@@ -47,16 +47,23 @@ def companion_question(symptom: str | None, asked: int) -> str:
     return "最近還有沒有其他不舒服的地方？"
 
 
+# Says why the chat stops, so a patient who only chatted does not read it as a dangerous finding.
+# Android matches SAFETY_UNRESOLVED_MARKER in History.kt against it; no "119", which Android reads as urgent.
 SAFETY_UNRESOLVED_REPLY = (
-    "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；"
-    "若情況緊急，請立即尋求緊急醫療協助。"
+    "因為還沒能確認您是否有急迫症狀，系統不能繼續一般掛號導引。"
+    "若身體不適，請洽醫療人員協助評估；若情況緊急，請立即尋求緊急醫療協助。"
 )
 # A patient-reported positive safety answer stops at once; it asserts no TTAS level.
 SAFETY_POSITIVE_REPLY = (
     "您回報的狀況可能需要立即處理，線上問診無法判斷嚴重程度，因此不會繼續掛號導引。"
     "請立即前往急診；情況危急請撥打 119。"
 )
-SAFETY_RETRY_REPLY = "目前尚無法可靠理解這次安全回答。請說明上一個安全問題中您能確認的情況；不知道也可以直接說明。"
+SAFETY_RETRY_REPLY = "先回到剛剛的問題：以下狀況如果都沒有，回答「沒有」就可以。"
+# Shown on the retry after which one more unclear answer stops the chat.
+SAFETY_LAST_ATTEMPT_REPLY = "這題需要您回答「有」或「沒有」，系統才能繼續幫您找科別。"
+SAFETY_SYMPTOM_ACK_LIMIT = 3
+# Turns that do not count toward SAFETY_ANSWER_CAP; the hard turn cap still bounds them.
+_UNCOUNTED_SAFETY_VALIDATIONS = frozenset({"request_explanation", "symptom_added"})
 SAFETY_PENDING_INTENT = "safety_screen"
 AVAILABILITY_PENDING_INTENT = "appointment_availability"
 AVAILABILITY_QUESTION = "最近哪幾天、哪個時段比較方便看診？不方便的時間也可以告訴我；都可以的話直接說『都可以』。"
@@ -102,6 +109,12 @@ _GENERIC_CLARIFICATION_QUESTION = re.compile(
 
 def safety_screen_resolved(case: TriageCase) -> bool:
     return case.patient_input.red_flags_checked or bool(case.patient_input.red_flags)
+
+
+def safety_symptom_acknowledgement(sources: list[str]) -> str:
+    """Backend-owned line that echoes the symptoms a patient added instead of answering the screen."""
+    quoted = "、".join(f"「{source}」" for source in sources)
+    return f"已記下您說的{quoted}。繼續之前想先確認一件事，以下狀況如果都沒有，回答「沒有」就可以。"
 
 
 def safety_unresolved_stop(case: TriageCase) -> bool:
@@ -844,6 +857,7 @@ def capture_safety_screen_answer(
     suggestion: PendingAnswerInterpretation | None,
     user_sources: list[str],
     *, dialogue_act: DialogueActInterpretation | None = None,
+    current_extractions: list[SemanticExtraction] = (),
 ) -> bool:
     """Complete a negative safety screen from validated AI interpretation only."""
     state = case.conversation_state
@@ -855,6 +869,21 @@ def capture_safety_screen_answer(
         logger.info(
             "safety answer case_id=%s dialogue_act=request_explanation attempt_incremented=false "
             "reason=safety_request_explanation_no_attempt", case.case_id,
+        )
+        return False
+    answered = bool(
+        suggestion is not None and suggestion.answer_status in {"answered", "partial"}
+        and suggestion.answer_confidence >= ACCEPT_THRESHOLD
+    )
+    if (not answered and validated_dialogue_act(dialogue_act, user_sources) in {"new_information", "correction"}
+            and _safety_added_symptoms(current_extractions, user_sources)):
+        # The patient kept describing symptoms: no attempt, but TTAS evidence still marks a positive.
+        state.safety_answer_validation = "symptom_added"
+        if _safety_positive_answer(case, suggestion, user_sources):
+            state.safety_positive_reported = True
+        logger.info(
+            "safety answer case_id=%s dialogue_act=new_information attempt_incremented=false "
+            "reason=safety_symptom_added_no_attempt", case.case_id,
         )
         return False
     state.safety_answer_attempts += 1
@@ -956,6 +985,19 @@ def _safety_positive_answer(
     )
 
 
+def _safety_added_symptoms(extractions: list[SemanticExtraction], user_sources: list[str]) -> list[str]:
+    """Grounded medical spans from this turn, longest kept when one contains another."""
+    spans: list[str] = []
+    for item in extractions:
+        source = item.source_text.strip()
+        if (item.field in _MEDICAL_FIELDS and item.semantic_status in {"available", "partial"}
+                and item.confidence >= ACCEPT_THRESHOLD and source
+                and any(source in text for text in user_sources)
+                and not any(source in kept for kept in spans)):
+            spans = [kept for kept in spans if kept not in source] + [source]
+    return spans[:SAFETY_SYMPTOM_ACK_LIMIT]
+
+
 def _safety_unresolved(case: TriageCase) -> None:
     _unresolved(case)
     state = case.conversation_state
@@ -964,7 +1006,13 @@ def _safety_unresolved(case: TriageCase) -> None:
     state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
 
 
-def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion | None) -> None:
+def continue_safety_check(
+    case: TriageCase,
+    suggestion: ClarificationSuggestion | None,
+    *,
+    user_sources: list[str] = (),
+    current_extractions: list[SemanticExtraction] = (),
+) -> None:
     """Bound safety workflow retries without interpreting patient language."""
     state = case.conversation_state
     state.pending_clarification_intent = None
@@ -976,15 +1024,28 @@ def continue_safety_check(case: TriageCase, suggestion: ClarificationSuggestion 
         return
     # Always the full question: a focused single-item denial is partial and could never complete the screen.
     question = QUESTION_TEXTS[RED_FLAG_QUESTION_KEY]
-    if suggestion is not None and suggestion.intent == SAFETY_PENDING_INTENT:
+    added = (
+        _safety_added_symptoms(current_extractions, user_sources)
+        if state.safety_answer_validation == "symptom_added" else []
+    )
+    last_chance = (
+        state.safety_answer_validation not in _UNCOUNTED_SAFETY_VALIDATIONS
+        and state.safety_answer_attempts == SAFETY_ANSWER_CAP - 1
+    )
+    if added:
+        question = f"{safety_symptom_acknowledgement(added)}\n{question}"
+        state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+    elif suggestion is not None and suggestion.intent == SAFETY_PENDING_INTENT:
         state.reply_source = suggestion.reply_source
+        if last_chance:
+            question = f"{SAFETY_LAST_ATTEMPT_REPLY}\n{question}"
         if _valid_explanation(suggestion.explanation):
             question = f"{suggestion.explanation.strip()}\n{question}"
     elif state.safety_answer_validation == "request_explanation":
         question = f"{SAFETY_EXPLANATION_FALLBACK}\n{question}"
         state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     else:
-        question = f"{SAFETY_RETRY_REPLY}\n{question}"
+        question = f"{SAFETY_LAST_ATTEMPT_REPLY if last_chance else SAFETY_RETRY_REPLY}\n{question}"
         state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
     state.clarification_status = "safety_check"
     state.last_question_key = RED_FLAG_QUESTION_KEY
@@ -1017,7 +1078,7 @@ def advance_conversation(
         return
     state.turn_count += len(user_sources)
     if state.clarification_status == "safety_check" and not safety_screen_resolved(case):
-        continue_safety_check(case, suggestion)
+        continue_safety_check(case, suggestion, user_sources=user_sources, current_extractions=current_extractions)
         return
 
     clear_answered_pending(case)

@@ -23,7 +23,8 @@ import org.junit.Test
 
 @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class SafetyUnresolvedStopTest {
-    private val reply = "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；若情況緊急，請立即尋求緊急醫療協助。"
+    private val reply = "因為還沒能確認您是否有急迫症狀，系統不能繼續一般掛號導引。若身體不適，請洽醫療人員協助評估；若情況緊急，請立即尋求緊急醫療協助。"
+    private val legacyReply = "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估；若情況緊急，請立即尋求緊急醫療協助。"
     private fun response() = TriageResultDto(
         "safety_unresolved_test", null,
         ConversationStateDto(clarificationStatus = "unresolved", replySource = "SAFETY_UNRESOLVED_STOP"),
@@ -48,6 +49,8 @@ class SafetyUnresolvedStopTest {
         )
         assertTrue(history.hasUnresolvedSafety())
         assertFalse(history.hasUrgentSymptoms())
+        val legacy = history.copy(chatMessages = listOf(ChatMessage(content = legacyReply, sender = MessageSender.AI)))
+        assertTrue(legacy.hasUnresolvedSafety())
     }
 
     @Test fun unresolvedStopShowsDialogAndRemovesInput() = runTest {

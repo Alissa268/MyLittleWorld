@@ -257,6 +257,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         capture_safety_screen_answer(
             case, safety_interpretation, user_text_parts,
             dialogue_act=getattr(ai_suggestion, "dialogue_act", None),
+            current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
         )
         safety_completed_this_turn = bool(
             safety_check_turn
@@ -330,6 +331,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and semantic_ai_allowed
                     and case.conversation_state.clarification_status != "unresolved"
                     and (not safety_check_turn or safety_completed_this_turn or case.conversation_state.safety_answer_attempts < SAFETY_ANSWER_CAP)
+                    # The Backend acknowledges added symptoms with its own line; no planner call is needed.
+                    and not (safety_check_turn and case.conversation_state.safety_answer_validation == "symptom_added")
                     # Backend re-asks its fixed availability question; no planner call is needed.
                     and not awaiting_availability_answer(case)
                     # Nor for the fixed accompanying-symptom question of a single-department case.

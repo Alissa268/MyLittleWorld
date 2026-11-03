@@ -11,7 +11,7 @@ import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.network.MedicalApiException
 import com.example.medicalaiguidance.model.MessageSender
-import com.example.medicalaiguidance.model.SAFETY_UNRESOLVED_MARKER
+import com.example.medicalaiguidance.model.isSafetyUnresolvedReply
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.network.BatchAnswerDto
 import com.example.medicalaiguidance.network.QuestionItemDto
@@ -147,7 +147,7 @@ class ChatViewModel(
         _stopReason.value = reason
         _urgentWarning.value = message?.takeIf { it.isNotBlank() } ?: when (reason) {
             ChatStopReason.URGENT -> "請立即前往急診；情況危急請撥打 119。"
-            ChatStopReason.SAFETY_UNRESOLVED -> "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估。"
+            ChatStopReason.SAFETY_UNRESOLVED -> "因為還沒能確認您是否有急迫症狀，系統不能繼續一般掛號導引。請由醫療人員協助評估。"
         }
         _inputText.value = ""
         _showDecisionButtons.value = false
@@ -338,7 +338,7 @@ class ChatViewModel(
                         stopForUrgentWarning(emergencyMessage)
                     } else if (resume.state.replySource == SAFETY_UNRESOLVED_STOP) {
                         val unresolvedMessage = history.chatMessages.lastOrNull {
-                            it.sender == MessageSender.AI && it.content.contains(SAFETY_UNRESOLVED_MARKER)
+                            it.sender == MessageSender.AI && it.content.isSafetyUnresolvedReply()
                         }?.content
                         stopForUrgentWarning(unresolvedMessage, ChatStopReason.SAFETY_UNRESOLVED)
                     }
