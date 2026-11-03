@@ -47,7 +47,8 @@ internal object CancellationGuidance {
                 bottom = node.rect.bottom,
                 isEnabled = node.isEnabled,
                 isClickable = node.isClickable,
-                clickableAncestorSourceIndex = node.clickableAncestorIndex
+                clickableAncestorSourceIndex = node.clickableAncestorIndex,
+                viewIdResourceName = node.viewIdResourceName
             )
         }
         return CancellationAppointmentMatcher.match(snapshots)

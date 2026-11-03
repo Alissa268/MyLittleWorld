@@ -1305,6 +1305,14 @@ private fun String.withBoldDepartment() = buildAnnotatedString {
                 department.range.last + 1
             )
         }
+    Regex("已記錄您希望看[^，,。！？\\n]+")
+        .findAll(this@withBoldDepartment).forEach { confirmation ->
+            addStyle(
+                SpanStyle(fontWeight = FontWeight.ExtraBold),
+                confirmation.range.first,
+                confirmation.range.last + 1
+            )
+        }
 }
 
 @Composable

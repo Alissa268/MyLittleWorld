@@ -10,7 +10,8 @@ internal data class CancellationNodeSnapshot(
     val bottom: Int = 0,
     val isEnabled: Boolean = true,
     val isClickable: Boolean = false,
-    val clickableAncestorSourceIndex: Int? = null
+    val clickableAncestorSourceIndex: Int? = null,
+    val viewIdResourceName: String? = null
 )
 
 internal enum class CancellationMatchStatus {
@@ -33,7 +34,8 @@ internal object CancellationAppointmentMatcher {
 
     fun match(nodes: List<CancellationNodeSnapshot>): CancellationMatchResult {
         val actionableIndices = nodes
-            .filter { node -> node.isEnabled && node.hasExactCancelLabel() }
+            .filter { node -> node.isEnabled && (node.hasExactCancelLabel() ||
+                (node.isClickable && node.viewIdResourceName == "tw.com.bicom.VGHTPE:id/btnCancel")) }
             .mapNotNull { label -> label.clickTarget(nodes)?.sourceIndex }
             .distinct()
 

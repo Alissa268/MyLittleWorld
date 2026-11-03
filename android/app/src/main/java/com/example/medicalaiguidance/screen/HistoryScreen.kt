@@ -351,13 +351,16 @@ fun HistoryCardItem(
                 Box(
                     modifier = Modifier
                         .size(56.dp)
-                        .background(Color(0xFFF0F5F5), shape = CircleShape),
+                        .background(
+                            if (history.hasUrgentSymptoms() || history.hasUnresolvedSafety()) Color(0xFFFFF3E0) else Color(0xFFF0F5F5),
+                            shape = CircleShape
+                        ),
                     contentAlignment = Alignment.Center
                 ) {
                     Icon(
                         imageVector = if (isCompleted) Icons.Default.MedicalServices else Icons.Default.Psychology,
                         contentDescription = null,
-                        tint = primaryDark,
+                        tint = if (history.hasUrgentSymptoms() || history.hasUnresolvedSafety()) Color(0xFFE58A2A) else primaryDark,
                         modifier = Modifier.size(24.dp)
                     )
                 }
