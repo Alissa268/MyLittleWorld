@@ -504,6 +504,7 @@ class CaseResumeResult(BaseModel):
     last_question_key: Optional[str] = None
     question_batch: List[QuestionItem] = Field(default_factory=list)
     can_continue: bool = False
+    reply_source: Optional[str] = None
 
 
 class TriageResult(BaseModel):

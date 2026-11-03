@@ -1,4 +1,5 @@
 from app.schemas import CaseResumeResult, ConversationStage, QuestionItem, ResumeDepartment, TriageCase, VisitType
+from app.services.conversation_service import safety_unresolved_stop
 from app.services.question_specs import question_spec_for_field
 from app.services.rule_engine import QUESTION_TEXTS
 
@@ -47,4 +48,5 @@ def build_case_resume(case: TriageCase) -> CaseResumeResult:
         department_result=ResumeDepartment(dept_id=department.dept_id, parentDept=department.parentDept,
                                            childDept=department.childDept) if department else None,
         next_question=question, last_question_key=key, question_batch=batch, can_continue=can_continue,
+        reply_source="SAFETY_UNRESOLVED_STOP" if safety_unresolved_stop(case) else state.reply_source,
     )

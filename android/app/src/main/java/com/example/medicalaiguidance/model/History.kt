@@ -79,3 +79,10 @@ internal fun resolveHistorySummary(summary: String, messages: List<ChatMessage>)
 internal fun History.hasUrgentSymptoms(): Boolean =
     (listOf(summaryText) + chatMessages.filter { it.sender == MessageSender.AI }.map { it.content })
         .any { it.contains("119") && (it.contains("急診") || it.contains("情況危急")) }
+
+/** Words in the backend's SAFETY_UNRESOLVED_REPLY; keep in sync with conversation_service.py. */
+internal const val SAFETY_UNRESOLVED_MARKER = "無法可靠確認急迫症狀"
+
+internal fun History.hasUnresolvedSafety(): Boolean =
+    (listOf(summaryText) + chatMessages.filter { it.sender == MessageSender.AI }.map { it.content })
+        .any { it.contains(SAFETY_UNRESOLVED_MARKER) }

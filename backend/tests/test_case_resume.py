@@ -52,6 +52,7 @@ def test_resume_is_read_only_minimal_and_does_not_refresh_ttl(monkeypatch):
         "case_id", "visit_type", "stage", "confirmed", "awaiting_confirmation", "department_status",
         "clarification_status", "red_flags_checked", "red_flags_status", "warning_required", "warning_message",
         "department_result", "next_question", "last_question_key", "question_batch", "can_continue",
+        "reply_source",
     }
     assert "PRIVATE" not in response.text
     assert case.model_dump(mode="json") == before
@@ -117,6 +118,19 @@ def test_unknown_batch_key_fails_closed_and_urgent_never_resumes_registration():
     case.conversation_state.clarification_status = "urgent"
     case.triage.warning_required = True
     assert client.get("/chat/unsafe/resume").json()["can_continue"] is False
+
+
+def test_safety_unresolved_resume_carries_stop_marker():
+    case = case_store.create_case("safety_unresolved")
+    case.visit_type = VisitType.INITIAL
+    case.conversation_state.clarification_status = "unresolved"
+    case.conversation_state.reply_source = "SAFETY_CONTROLLED_FALLBACK"
+    client = TestClient(app)
+    body = client.get("/chat/safety_unresolved/resume").json()
+    assert (body["can_continue"], body["reply_source"]) == (False, "SAFETY_UNRESOLVED_STOP")
+    # A department-unresolved case already passed the safety screen and is not a safety stop.
+    case.patient_input.red_flags_checked = True
+    assert client.get("/chat/safety_unresolved/resume").json()["reply_source"] == "SAFETY_CONTROLLED_FALLBACK"
 
 
 def test_peek_snapshot_cannot_mutate_stored_case():

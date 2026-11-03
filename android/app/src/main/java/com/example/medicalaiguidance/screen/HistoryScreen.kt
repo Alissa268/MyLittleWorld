@@ -3,6 +3,7 @@
 import androidx.compose.animation.animateColorAsState
 import com.example.medicalaiguidance.model.resolveHistorySummary
 import com.example.medicalaiguidance.model.historyDisplayDate
+import com.example.medicalaiguidance.model.hasUnresolvedSafety
 import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
@@ -367,6 +368,7 @@ fun HistoryCardItem(
                     Text(
                         text = when {
                             history.hasUrgentSymptoms() -> "急迫症狀"
+                            history.hasUnresolvedSafety() -> "無法確認急迫症狀"
                             isCompleted -> history.typeTitle
                             else -> "症狀評估中"
                         },

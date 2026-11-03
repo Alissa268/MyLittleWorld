@@ -11,6 +11,7 @@ import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryStatus
 import com.example.medicalaiguidance.network.MedicalApiException
 import com.example.medicalaiguidance.model.MessageSender
+import com.example.medicalaiguidance.model.SAFETY_UNRESOLVED_MARKER
 import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.network.BatchAnswerDto
 import com.example.medicalaiguidance.network.QuestionItemDto
@@ -44,6 +45,14 @@ internal fun TriageResultDto.requiresUrgentStop(): Boolean =
         listOfNotNull(reply, triage.warningMessage).any {
             it.contains("119") && (it.contains("急診") || it.contains("情況危急"))
         }
+
+internal const val SAFETY_UNRESOLVED_STOP = "SAFETY_UNRESOLVED_STOP"
+
+/** The backend could not confirm the emergency screen; the chat stops like an urgent stop. */
+internal fun TriageResultDto.requiresSafetyUnresolvedStop(): Boolean =
+    conversationState.replySource == SAFETY_UNRESOLVED_STOP
+
+enum class ChatStopReason { URGENT, SAFETY_UNRESOLVED }
 
 internal fun currentQuestionAnswer(question: QuestionItemDto?, answer: String): BatchAnswerDto? =
     question?.let { current ->
@@ -127,14 +136,19 @@ class ChatViewModel(
     val isUrgentStopped: StateFlow<Boolean> = _isUrgentStopped.asStateFlow()
     private val _showUrgentDialog = MutableStateFlow(false)
     val showUrgentDialog: StateFlow<Boolean> = _showUrgentDialog.asStateFlow()
+    private val _stopReason = MutableStateFlow(ChatStopReason.URGENT)
+    val stopReason: StateFlow<ChatStopReason> = _stopReason.asStateFlow()
 
     fun dismissUrgentDialog() { _showUrgentDialog.value = false }
 
-    private fun stopForUrgentWarning(message: String?) {
+    private fun stopForUrgentWarning(message: String?, reason: ChatStopReason = ChatStopReason.URGENT) {
         if (!_isUrgentStopped.value) _showUrgentDialog.value = true
         _isUrgentStopped.value = true
-        _urgentWarning.value = message?.takeIf { it.isNotBlank() }
-            ?: "請立即前往急診；情況危急請撥打 119。"
+        _stopReason.value = reason
+        _urgentWarning.value = message?.takeIf { it.isNotBlank() } ?: when (reason) {
+            ChatStopReason.URGENT -> "請立即前往急診；情況危急請撥打 119。"
+            ChatStopReason.SAFETY_UNRESOLVED -> "目前無法可靠確認急迫症狀，不能繼續一般掛號導引。請由醫療人員協助評估。"
+        }
         _inputText.value = ""
         _showDecisionButtons.value = false
         _showDoctorButton.value = false
@@ -247,6 +261,7 @@ class ChatViewModel(
         _urgentWarning.value = null
         _isUrgentStopped.value = false
         _showUrgentDialog.value = false
+        _stopReason.value = ChatStopReason.URGENT
         repository.clearRecommendationFlow()
         _selectedVisitType.value?.let { repository.setActiveVisitType(it.apiValue) }
         repository.clearChatMessages()
@@ -272,6 +287,7 @@ class ChatViewModel(
         val history = repository.loadHistoryIntoCurrentChat(historyId)
         _isUrgentStopped.value = false
         _showUrgentDialog.value = false
+        _stopReason.value = ChatStopReason.URGENT
         _openedHistory.value = history
         openedHistoryId = history?.id
         activeHistoryId = history?.id ?: "hist_${System.currentTimeMillis()}"
@@ -320,6 +336,11 @@ class ChatViewModel(
                     if (resume.warningRequired || resume.state.clarificationStatus == "urgent" ||
                         emergencyMessage?.contains("119") == true) {
                         stopForUrgentWarning(emergencyMessage)
+                    } else if (resume.state.replySource == SAFETY_UNRESOLVED_STOP) {
+                        val unresolvedMessage = history.chatMessages.lastOrNull {
+                            it.sender == MessageSender.AI && it.content.contains(SAFETY_UNRESOLVED_MARKER)
+                        }?.content
+                        stopForUrgentWarning(unresolvedMessage, ChatStopReason.SAFETY_UNRESOLVED)
                     }
                     _historyResumeMessage.value = resume.warningMessage ?: "目前無法安全續接此案件，請重新開始問診。"
                     return@launch
@@ -850,6 +871,8 @@ class ChatViewModel(
         _batchValidationError.value = null
         if (result.requiresUrgentStop()) {
             stopForUrgentWarning(result.triage.warningMessage ?: result.reply)
+        } else if (result.requiresSafetyUnresolvedStop()) {
+            stopForUrgentWarning(result.reply, ChatStopReason.SAFETY_UNRESOLVED)
         } else if (!_isUrgentStopped.value) {
             _urgentWarning.value = null
         }

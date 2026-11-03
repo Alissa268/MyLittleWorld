@@ -99,6 +99,7 @@ import com.example.medicalaiguidance.model.History
 import com.example.medicalaiguidance.model.HistoryRecommendation
 import com.example.medicalaiguidance.model.historyDisplayDate
 import com.example.medicalaiguidance.model.historyDisplaySession
+import com.example.medicalaiguidance.model.hasUnresolvedSafety
 import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import com.example.medicalaiguidance.model.recommendationCategory
 import com.example.medicalaiguidance.model.MessageSender
@@ -107,6 +108,7 @@ import com.example.medicalaiguidance.model.VisitPlan
 import com.example.medicalaiguidance.navigation.Route
 import com.example.medicalaiguidance.util.AudioPlayer
 import com.example.medicalaiguidance.util.SystemTextSpeaker
+import com.example.medicalaiguidance.viewmodel.ChatStopReason
 import com.example.medicalaiguidance.viewmodel.ChatViewModel
 import java.util.Locale
 import kotlinx.coroutines.delay
@@ -144,6 +146,8 @@ fun ChatScreen(
     val urgentWarning by viewModel.urgentWarning.collectAsState()
     val isUrgentStopped by viewModel.isUrgentStopped.collectAsState()
     val showUrgentDialog by viewModel.showUrgentDialog.collectAsState()
+    val stopReason by viewModel.stopReason.collectAsState()
+    val stopTitle = if (stopReason == ChatStopReason.SAFETY_UNRESOLVED) "無法確認急迫症狀" else "急迫症狀提醒"
     val isHistoryReadOnly by viewModel.isHistoryReadOnly.collectAsState()
     val openedHistory by viewModel.openedHistory.collectAsState()
     val canRetryHistoryResume by viewModel.canRetryHistoryResume.collectAsState()
@@ -184,7 +188,7 @@ fun ChatScreen(
             shape = RoundedCornerShape(24.dp),
             containerColor = Color.White,
             title = {
-                Text("急迫症狀提醒", color = urgentRed, fontSize = 20.sp, fontWeight = FontWeight.Bold)
+                Text(stopTitle, color = urgentRed, fontSize = 20.sp, fontWeight = FontWeight.Bold)
             },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
@@ -529,11 +533,12 @@ fun ChatScreen(
                 }
                 urgentWarning?.let { warning ->
                     item(key = "urgent_warning") {
-                        UrgentWarningCard(warning = warning)
+                        UrgentWarningCard(title = stopTitle, warning = warning)
                     }
                 }
                 val historySnapshot = openedHistory
-                val hasUrgentHistory = isUrgentStopped || historySnapshot?.hasUrgentSymptoms() == true
+                val hasUrgentHistory = isUrgentStopped || historySnapshot?.hasUrgentSymptoms() == true ||
+                    historySnapshot?.hasUnresolvedSafety() == true
                 if (historySnapshot != null && !hasUrgentHistory &&
                     (isHistoryReadOnly || historySnapshot.selectedRecommendationId != null)) {
                     item(key = "completed_history_${historySnapshot.id}") {
@@ -621,7 +626,8 @@ fun ChatScreen(
         // ---- 使用者輸入框 Input bar (floating overlay at bottom) ----
         if (isUrgentStopped) {
             Text(
-                "本次問診已停止，請依急迫症狀提醒就醫。",
+                if (stopReason == ChatStopReason.SAFETY_UNRESOLVED) "本次問診已停止，請由醫療人員協助評估。"
+                else "本次問診已停止，請依急迫症狀提醒就醫。",
                 color = primaryDark,
                 fontSize = 14.sp,
                 fontWeight = FontWeight.Bold,
@@ -953,7 +959,7 @@ private fun HistoryRecommendation.displayHistoryTime(): String =
     ).joinToString(" ").ifBlank { "未保存時段" }
 
 @Composable
-private fun UrgentWarningCard(warning: String) {
+private fun UrgentWarningCard(title: String, warning: String) {
     Column(
         modifier = Modifier
             .fillMaxWidth()
@@ -971,7 +977,7 @@ private fun UrgentWarningCard(warning: String) {
                 tint = Color(0xFFB45F06),
                 modifier = Modifier.size(22.dp)
             )
-            Text("急迫症狀提醒", color = Color(0xFFB45F06), fontSize = 18.sp, fontWeight = FontWeight.Bold)
+            Text(title, color = Color(0xFFB45F06), fontSize = 18.sp, fontWeight = FontWeight.Bold)
         }
         Spacer(modifier = Modifier.height(6.dp))
         Text(warning, color = Color(0xFF704214), fontSize = 15.sp, lineHeight = 22.sp)

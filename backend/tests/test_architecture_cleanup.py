@@ -61,6 +61,8 @@ def test_unclear_medical_safety_answer_still_uses_three_attempt_cap(runtime):
         if attempt < 3:
             assert result["reply"] == f"{cs.SAFETY_RETRY_REPLY}\n{CHECKLIST}"
     assert result["conversation_state"]["clarification_status"] == "unresolved"
+    assert result["conversation_state"]["reply_source"] == "SAFETY_UNRESOLVED_STOP"
+    assert result["reply"] == cs.SAFETY_UNRESOLVED_REPLY
     department.assert_not_awaited()
 
 

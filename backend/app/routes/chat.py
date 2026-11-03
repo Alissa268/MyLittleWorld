@@ -34,6 +34,7 @@ from app.services.conversation_service import (
     request_clarification,
     safety_net_family_medicine_reason,
     safety_screen_resolved,
+    safety_unresolved_stop,
     settle_unanswered_clue_question,
     validated_dialogue_act,
 )
@@ -448,6 +449,9 @@ async def chat(req: ChatRequest) -> TriageResult:
         decision = case.conversation_state.clue_decision
         if case.conversation_state.safety_positive_reported:
             case.conversation_state.reply_source = "SAFETY_POSITIVE_STOP"
+        elif safety_unresolved_stop(case):
+            # Android stops the chat on this marker, like an urgent stop.
+            case.conversation_state.reply_source = "SAFETY_UNRESOLVED_STOP"
         reply = (
             SAFETY_POSITIVE_REPLY if case.conversation_state.safety_positive_reported else
             SAFETY_UNRESOLVED_REPLY if not safety_screen_resolved(case) else

@@ -145,6 +145,7 @@ def test_open_safety_screen_never_asks_or_routes_to_family_medicine(runtime):
     result = stall(client, interpreter, case)
     assert result["conversation_state"]["clarification_status"] == "unresolved"
     assert result["reply"] == cs.SAFETY_UNRESOLVED_REPLY
+    assert result["conversation_state"]["reply_source"] == "SAFETY_UNRESOLVED_STOP"
     assert result["department_result"] is None and result["conversation_state"]["clue_decision"] is None
 
 

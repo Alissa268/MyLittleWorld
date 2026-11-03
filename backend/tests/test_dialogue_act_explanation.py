@@ -330,7 +330,7 @@ def test_repeated_safety_explanations_still_stop_at_hard_turn_cap(runtime):
             assert state["clarification_status"] == "safety_check"
             assert result["reply"] == f"{SAFETY_EXPLANATION}\n{CHECKLIST}"
     assert state["clarification_status"] == "unresolved"
-    assert state["reply_source"] == "SAFETY_CONTROLLED_FALLBACK"
+    assert state["reply_source"] == "SAFETY_UNRESOLVED_STOP"
     assert not result["triage_case"]["patient_input"]["red_flags_checked"]
 
 

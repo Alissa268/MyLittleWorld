@@ -104,6 +104,16 @@ def safety_screen_resolved(case: TriageCase) -> bool:
     return case.patient_input.red_flags_checked or bool(case.patient_input.red_flags)
 
 
+def safety_unresolved_stop(case: TriageCase) -> bool:
+    """The case ended because the emergency screen could not be answered reliably."""
+    state = case.conversation_state
+    return (
+        state.clarification_status == "unresolved"
+        and not state.safety_positive_reported
+        and not safety_screen_resolved(case)
+    )
+
+
 @dataclass(frozen=True)
 class ClarificationSuggestion:
     status: str

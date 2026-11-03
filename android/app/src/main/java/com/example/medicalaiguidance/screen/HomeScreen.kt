@@ -40,6 +40,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import androidx.navigation.NavHostController
 import com.example.medicalaiguidance.R
 import com.example.medicalaiguidance.model.HistoryStatus
+import com.example.medicalaiguidance.model.hasUnresolvedSafety
 import com.example.medicalaiguidance.model.hasUrgentSymptoms
 import com.example.medicalaiguidance.navigation.Route
 import com.example.medicalaiguidance.service.MyAccessibilityService
@@ -441,6 +442,7 @@ fun HomeScreen(
                         date = history.date,
                         summary = when {
                             history.hasUrgentSymptoms() -> "急迫症狀"
+                            history.hasUnresolvedSafety() -> "無法確認急迫症狀"
                             history.status == HistoryStatus.UNCOMPLETED -> "症狀評估中"
                             else -> history.typeTitle
                         },
