@@ -280,29 +280,46 @@ def department_scores(
 
     Synonyms matched from one text piece score once; absent answers never subtract.
     A present concept credits every current candidate holding it in ``records``.
+    A text piece that restates a present clue answer for a department (it matched that
+    clue's concept, or it lies inside the answer's source text) scores only through the
+    question: 病人答「有耳鳴」時 Turn Interpreter 另外抽出的「耳鳴」不會再加 1 分。
     """
     texts: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
     questions: dict[int, set[int]] = {dept_id: set() for dept_id in candidates}
-    joined: list[dict] = []
-    for item in retrieved:
-        if item["dept_id"] in texts and item.get("evidence_origin") != CLUE_ANSWER_ORIGIN:
-            if item.get("patient_source_parts"):
-                joined.append(item)
-            else:
-                texts[item["dept_id"]].add(item["patient_source_text"])
-    # A joined fragment never adds a point beyond the text pieces it is made of.
-    covered = {dept_id: set(found) for dept_id, found in texts.items()}
-    for item in sorted(joined, key=lambda row: row["patient_source_text"]):
-        pieces = {item["patient_source_text"], *item["patient_source_parts"]}
-        if not pieces & covered[item["dept_id"]]:
-            texts[item["dept_id"]].add(item["patient_source_text"])
-        covered[item["dept_id"]] |= pieces
+    answered_concepts: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
+    answered_sources: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
     for record in asked:
         if record.answer != "present":
             continue
         for dept_id in answered_concept_departments(record, records):
             if dept_id in questions:
                 questions[dept_id].add(record.question_index)
+                answered_concepts[dept_id].add(normalize_concept(record.concept))
+                if (record.answer_source_text or "").strip():
+                    answered_sources[dept_id].add(record.answer_source_text.strip())
+    restated: dict[int, set[str]] = {dept_id: set() for dept_id in candidates}
+    joined: list[dict] = []
+    for item in retrieved:
+        dept_id = item.get("dept_id")
+        if dept_id not in texts or item.get("evidence_origin") == CLUE_ANSWER_ORIGIN:
+            continue
+        source = item["patient_source_text"]
+        if (normalize_concept(item.get("knowledge_concept") or "") in answered_concepts[dept_id]
+                or any(source in answer for answer in answered_sources[dept_id])):
+            restated[dept_id].add(source)
+        if item.get("patient_source_parts"):
+            joined.append(item)
+        else:
+            texts[dept_id].add(source)
+    for dept_id, found in restated.items():
+        texts[dept_id] -= found
+    # A joined fragment never adds a point beyond the text pieces it is made of.
+    covered = {dept_id: texts[dept_id] | restated[dept_id] for dept_id in candidates}
+    for item in sorted(joined, key=lambda row: row["patient_source_text"]):
+        pieces = {item["patient_source_text"], *item["patient_source_parts"]}
+        if not pieces & covered[item["dept_id"]]:
+            texts[item["dept_id"]].add(item["patient_source_text"])
+        covered[item["dept_id"]] |= pieces
     return {dept_id: len(texts[dept_id]) + len(questions[dept_id]) for dept_id in candidates}
 
 

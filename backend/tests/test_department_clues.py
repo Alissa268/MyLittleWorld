@@ -111,6 +111,43 @@ def test_three_present_concepts_in_one_question_score_once():
     assert clues.department_scores([hit(ENT, "頭暈")], {ENT}, history) == {ENT: 2}
 
 
+def answered(concept, dept_id, index, source):
+    return ClueConceptRecord(concept=concept, dept_id=dept_id, question_index=index, answer="present",
+                             answer_source_text=source)
+
+
+def test_symptom_restating_a_present_clue_answer_scores_once():
+    # 病人答「有耳鳴」，Turn Interpreter 又把「耳鳴」抽成症狀：耳科只靠題號得 1 分。
+    retrieved = [hit(ENT, "頭暈"), hit(ENT, "耳鳴", "耳鳴"),
+                 hit(ENT, "有耳鳴", "耳鳴", evidence_origin=clues.CLUE_ANSWER_ORIGIN)]
+    assert clues.department_scores(retrieved, {ENT}, [answered("耳鳴", ENT, 1, "有耳鳴")]) == {ENT: 1 + 1}
+
+
+def test_synonym_inside_the_clue_answer_does_not_score_again():
+    retrieved = [hit(ENT, "頭暈"), hit(ENT, "耳朵嗡嗡叫", "耳朵異音")]
+    history = [answered("耳鳴", ENT, 1, "有，耳朵嗡嗡叫")]
+    assert clues.department_scores(retrieved, {ENT}, history) == {ENT: 1 + 1}
+
+
+def test_extra_symptom_in_a_clue_answer_still_scores():
+    retrieved = [hit(ENT, "頭暈"), hit(ENT, "耳鳴", "耳鳴"), hit(ENT, "噁心", "噁心")]
+    history = [answered("耳鳴", ENT, 1, "有耳鳴")]
+    assert clues.department_scores(retrieved, {ENT}, history) == {ENT: 1 + 1 + 1}
+
+
+def test_restated_answer_still_scores_for_a_department_the_question_did_not_credit():
+    retrieved = [hit(ENT, "耳鳴", "耳鳴"), hit(NEURO, "耳鳴", "腦鳴")]
+    history = [answered("耳鳴", ENT, 1, "耳鳴")]
+    assert clues.department_scores(retrieved, {ENT, NEURO}, history) == {ENT: 1, NEURO: 1}
+
+
+def test_joined_fragment_holding_a_restated_answer_does_not_score_again():
+    retrieved = [hit(ENT, "頭暈"), hit(ENT, "耳鳴", "耳鳴"),
+                 hit(ENT, "耳鳴頭脹", "耳鳴頭脹", patient_source_parts=["耳鳴", "頭脹"])]
+    history = [answered("耳鳴", ENT, 1, "有耳鳴")]
+    assert clues.department_scores(retrieved, {ENT}, history) == {ENT: 1 + 1}
+
+
 def test_question_limit_selects_highest_score():
     result = decide(questions_asked=5, scores={ENT: 3, NEURO: 1, CARDIO: 1})
     assert (result.kind, result.dept_id, result.reason) == ("decide", ENT, "question_limit")

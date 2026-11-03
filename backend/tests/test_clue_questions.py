@@ -431,6 +431,17 @@ def test_two_bare_yes_answers_score_two_for_the_department():
     assert scores[ENT] == 1 + 2
 
 
+def test_clue_answer_also_extracted_as_a_symptom_scores_once():
+    case = kb_case(record("耳鳴", 1, "present", "有耳鳴"))
+    case.history_records[1] = Message(role="user", content="有耳鳴")
+    case.semantic_extractions.append(extraction("耳鳴", "耳鳴"))
+    retrieved = converge(case)["retrieved_official_evidence"]
+    assert any(item["patient_source_text"] == "耳鳴" and not item.get("evidence_origin") for item in retrieved)
+    scores = clues.department_scores(retrieved, clues.candidate_dept_ids(retrieved),
+                                     case.conversation_state.clue_concepts_asked, RECORDS)
+    assert scores[ENT] == 1 + 1
+
+
 def test_specialty_only_kb_concept_is_not_offered():
     assert {r["evidence_type"] for r in RECORDS if r["concept"] == "拉皮"} == {"department_specialty_evidence"}
     holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "拉皮")
