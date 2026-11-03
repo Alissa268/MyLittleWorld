@@ -28,7 +28,10 @@ def test_pediatric_departments_have_official_concepts():
     by_department = {}
     for record in RECORDS:
         by_department.setdefault(record["canonical_dept_id"], set()).add(record["concept"])
-    assert by_department[PEDIATRICS] == {"小兒發燒", "小孩發燒", "熱痙攣"}
+    # 2026-11-03 ihealth pages that send a child to 兒童醫學部 add child-only disease names.
+    assert by_department[PEDIATRICS] == {
+        "小兒發燒", "小孩發燒", "熱痙攣", "川崎症", "兒童夜尿症", "兒童夜尿", "喉骨軟化症", "新生兒鎖骨骨折",
+    }
     assert by_department[PEDIATRIC_GI] == {"牛奶過敏", "腸絞痛", "嬰兒哭鬧", "小兒便秘", "嬰兒便秘"}
 
 

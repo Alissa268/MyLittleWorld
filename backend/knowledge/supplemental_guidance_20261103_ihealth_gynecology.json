@@ -52,7 +52,7 @@
         "婦女醫學部"
       ],
       "concept": "子宮內膜異位症",
-      "evidence_type": "direct_routing_evidence",
+      "evidence_type": "department_specialty_evidence",
       "canonical_dept_id": 1319,
       "canonical_parent_dept": "婦幼",
       "canonical_child_dept": "婦產科",
@@ -66,7 +66,7 @@
       "retrieved_at": "2026-11-03",
       "evidence_text": "續發性經痛：指過去無經痛病史，因骨盆腔內生殖系統疾病，如子宮肌瘤、子宮內膜異位症與腫瘤等而引起的經期疼痛",
       "fallback_for_vghtpe": false,
-      "notes": "頁面寫明「請至婦產科門診就醫」。"
+      "notes": "頁面寫明「請至婦產科門診就醫」；病名只計分、不出題。"
     },
     {
       "department_name": "婦產科",
@@ -98,7 +98,7 @@
         "婦女醫學部"
       ],
       "concept": "子宮肌瘤",
-      "evidence_type": "direct_routing_evidence",
+      "evidence_type": "department_specialty_evidence",
       "canonical_dept_id": 1319,
       "canonical_parent_dept": "婦幼",
       "canonical_child_dept": "婦產科",
@@ -112,7 +112,7 @@
       "retrieved_at": "2026-11-03",
       "evidence_text": "有上述症狀並不一定是子宮肌瘤，若您有上述症狀，請至婦產科門診就醫",
       "fallback_for_vghtpe": false,
-      "notes": "頁面寫明「請至婦產科門診就醫」。"
+      "notes": "頁面寫明「請至婦產科門診就醫」；病名只計分、不出題。"
     },
     {
       "department_name": "婦產科",

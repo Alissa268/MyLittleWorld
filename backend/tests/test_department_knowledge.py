@@ -112,9 +112,9 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     # and 43 more symptom pages (skin, GI, chest, orthopedic, ENT, eye, neurology, urology...) added 2026-11-03,
     # then the Taichung symptom table and five Taipei department pages (psychiatry, colorectal, ortho, dental, thoracic),
     # then the rest of the Taichung symptom table for every department but psychiatry (same source, 262 records)
-    # and two ihealth gynecology pages (8 records).
-    assert len(sources) == 78
-    assert len(records) == 1152
+    # and two ihealth gynecology pages (8 records), then 142 more ihealth pages that name a clinic (181 records).
+    assert len(sources) == 220
+    assert len(records) == 1333
     # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB.
     assert len(mappings) == 36
     assert len({source["source_id"] for source in sources}) == len(sources)
