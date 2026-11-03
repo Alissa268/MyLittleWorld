@@ -115,9 +115,9 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     # and two ihealth gynecology pages (8 records), then 142 more ihealth pages that name a clinic (181 records).
     # 2026-11-04: Kaohsiung VGH 「該看哪一科?」 (262 records), Pingtung VGH 「該看哪一科?」 (93 records),
     # the Fenglin and Yuli branch clinic tables (52 records), the MND military hospital symptom table (226 records),
-    # 雙和醫院 (118 records), 亞東醫院 and 義大醫院 (205 records), 新光醫院 (92 records).
-    assert len(sources) == 229
-    assert len(records) == 2381
+    # 雙和醫院 (118 records), 亞東醫院 and 義大醫院 (205 records), 新光醫院 (92 records), 國泰醫院 (87 records).
+    assert len(sources) == 230
+    assert len(records) == 2468
     # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB;
     # 2026-11-04 adds 手外科, 職業醫學科, 新生兒科暨健兒門診, 兒童泌尿暨兒童外科, 矯正牙科, 兒童牙科
     # from the 310 APP department list.
@@ -127,7 +127,7 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
         "direct_routing_evidence",
         "department_specialty_evidence",
     }
-    assert all(record["source_hospital"] in {"vghtpe", "vghtc", "vghks", "ptvgh", "vgh_branch", "mnd_military", "mohw_shh", "femh", "edah", "skh"} for record in records)
+    assert all(record["source_hospital"] in {"vghtpe", "vghtc", "vghks", "ptvgh", "vgh_branch", "mnd_military", "mohw_shh", "femh", "edah", "skh", "cgh"} for record in records)
     assert all(record["source_url"].startswith("https://") for record in records)
     assert all(record["source_id"] != "app_sql_inventory_2026_09_29" for record in records)
 
