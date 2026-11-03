@@ -65,6 +65,20 @@ class RagTriageSuggestion:
     department_preference: DepartmentPreferenceInterpretation | None = None
 
 
+def _log_time_preferences(case_id: str, proposed: object, accepted: list[TimePreference]) -> None:
+    """One line per turn with time data: what the AI proposed was accepted, with its rank."""
+    if not proposed and not accepted:
+        return
+    logger.info(
+        "time preferences case_id=%s proposed=%s accepted=%s",
+        case_id, len(proposed) if isinstance(proposed, list) else 0,
+        json.dumps([dict(kind=item.kind, relation=item.relation, priority=item.priority,
+                         target=item.weekday or item.session or item.weekdays or item.date_value or item.week_offset,
+                         dates=item.resolved_dates, source=item.source_text) for item in accepted],
+                   ensure_ascii=False),
+    )
+
+
 async def refine_case_with_ai(
     case: TriageCase, *, user_sources: list[str] | None = None,
 ) -> RagTriageSuggestion | None:
@@ -112,6 +126,7 @@ async def refine_case_with_ai(
         user_sources=user_sources,
         reference_date=time_preference_reference_date,
     )
+    _log_time_preferences(case.case_id, data.get("time_preferences"), time_preferences)
     department_preference = validate_department_preference(data.get("department_preference"), user_sources)
     profile_sources = [message.content for message in case.history_records if message.role == "user"]
     patient_profile = validate_patient_profile(data.get("patient_profile"), profile_sources)
@@ -774,12 +789,12 @@ current_user_text:「我剛剛講錯了，主要不是頭暈，是頭痛，右�
 }}
 
 時間偏好正例：
-current_user_text:「這週都不行，最好下週二，不然下週三，其他平日也可以。上午不行，下午最好。」
-time_preferences 應輸出：
+current_user_text:「這週都不行，下週一或下週四都可以，下週四比較好，其他平日也可以。上午不行，下午最好。」
+time_preferences 應輸出（priority 依意思決定，不是依說出的先後：這句先說下週一，但下週四比較好，所以下週四是 1）：
 [
   {{"kind":"relative_week","relation":"exclude","priority":null,"week_offset":0,"source_text":"這週都不行","confidence":0.99}},
-  {{"kind":"relative_weekday","relation":"prefer","priority":1,"week_offset":1,"weekday":"tuesday","source_text":"最好下週二","confidence":0.99}},
-  {{"kind":"relative_weekday","relation":"prefer","priority":2,"week_offset":1,"weekday":"wednesday","source_text":"不然下週三","confidence":0.99}},
+  {{"kind":"relative_weekday","relation":"prefer","priority":1,"week_offset":1,"weekday":"thursday","source_text":"下週四比較好","confidence":0.99}},
+  {{"kind":"relative_weekday","relation":"prefer","priority":2,"week_offset":1,"weekday":"monday","source_text":"下週一","confidence":0.99}},
   {{"kind":"weekday_group","relation":"acceptable","priority":3,"weekdays":["monday","tuesday","wednesday","thursday","friday"],"source_text":"其他平日也可以","confidence":0.98}},
   {{"kind":"session","relation":"exclude","priority":null,"session":"morning","source_text":"上午不行","confidence":0.99}},
   {{"kind":"session","relation":"prefer","priority":1,"session":"afternoon","source_text":"下午最好","confidence":0.99}}

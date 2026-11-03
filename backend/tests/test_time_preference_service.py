@@ -153,8 +153,11 @@ def test_turn_interpreter_prompt_contains_complete_time_preference_example():
     prompt = rag_triage_adapter._build_symptom_collection_prompt(case, [COMPLEX_TEXT])
     example = prompt.split("時間偏好正例：", 1)[1].split("此 AI 輸出不可包含", 1)[0]
     assert '"kind":"relative_week"' in example
-    assert '"weekday":"tuesday"' in example
-    assert '"weekday":"wednesday"' in example
+    # The ranked days are said in the opposite order of their priority, so the AI learns to
+    # read the meaning; 310 twice got 「最好下週三不然下週二」 back as 週二 first.
+    assert '"priority":1,"week_offset":1,"weekday":"thursday"' in example
+    assert '"priority":2,"week_offset":1,"weekday":"monday"' in example
+    assert "最好下週二" not in example
     assert '"kind":"weekday_group"' in example
     assert '"session":"morning"' in example
     assert '"session":"afternoon"' in example

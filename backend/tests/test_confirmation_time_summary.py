@@ -1,7 +1,9 @@
 """Confirmation reply echoes validated time_preferences as backend-resolved dates (問題 14)."""
 from datetime import date
 
-from app.schemas import DepartmentResult, TriageCase
+import logging
+
+from app.schemas import DepartmentResult, Message, SemanticExtraction, TriageCase
 from app.services import rag_triage_adapter
 from app.services.ai_reply_generator import build_availability_preference_summary, build_department_confirmation_reply
 from app.services.time_preference_service import validate_and_resolve_time_preferences
@@ -105,3 +107,42 @@ def test_turn_interpreter_prompt_treats_a_bare_weekday_as_every_week():
     prompt = rag_triage_adapter._build_symptom_collection_prompt(TriageCase(case_id="bare-weekday"), ["最好週三"])
     assert "沒有「這／本／下／下下」等字的星期幾" in prompt
     assert "必須用 kind=weekday，不得當成本週的 relative_weekday" in prompt
+
+
+def body_part(value):
+    return SemanticExtraction(field="body_part", normalized_value=value, source_text=value,
+                              semantic_status="available", confidence=0.95, extractor="ai")
+
+
+def test_confirmation_lists_every_stated_body_part_in_order():
+    # 310：「我的屁股好痛」…「我的大腿有點酸」，確認句只寫了「不適部位「大腿」」。
+    case = TriageCase(case_id="body-parts")
+    case.history_records = [Message(role="user", content="我的屁股好痛"), Message(role="user", content="我的大腿有點酸")]
+    case.patient_input.symptom = "屁股好痛"
+    case.patient_input.body_part = "大腿"
+    case.semantic_extractions = [body_part("屁股"), body_part("大腿")]
+    case.department_result = DepartmentResult(dept_id=1298, parentDept="外科系", childDept="一般骨科", confidence=0.9)
+    reply = build_department_confirmation_reply(case)
+    assert "症狀「屁股好痛」、不適部位「屁股、大腿」" in reply
+
+
+def test_stored_body_part_without_evidence_still_shows():
+    case = TriageCase(case_id="body-part-stored")
+    case.patient_input.symptom = "頭痛"
+    case.patient_input.body_part = "頭"
+    case.department_result = DepartmentResult(dept_id=1274, parentDept="神經醫學中心", childDept="神經內科", confidence=0.9)
+    assert "不適部位「頭」" in build_department_confirmation_reply(case)
+
+
+def test_accepted_time_preferences_are_logged_with_their_rank(caplog):
+    text = "最好下週三不然下週二"
+    case = TriageCase(case_id="time-log")
+    case.history_records = [Message(role="user", content=text)]
+    raw = [pref("relative_weekday", "prefer", "最好下週三", 1, week_offset=1, weekday="wednesday"),
+           pref("relative_weekday", "prefer", "不然下週二", 2, week_offset=1, weekday="tuesday")]
+    accepted = validate_and_resolve_time_preferences(raw, user_sources=[text], reference_date=TUESDAY)
+    with caplog.at_level(logging.INFO, logger=rag_triage_adapter.logger.name):
+        rag_triage_adapter._log_time_preferences(case.case_id, raw, accepted)
+    line = next(record.getMessage() for record in caplog.records if "time preferences" in record.getMessage())
+    assert "case_id=time-log proposed=2" in line
+    assert '"priority": 1, "target": "wednesday", "dates": ["2026-11-11"], "source": "最好下週三"' in line

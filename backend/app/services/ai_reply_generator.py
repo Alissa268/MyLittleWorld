@@ -23,9 +23,9 @@ def build_department_confirmation_reply(case: TriageCase) -> str:
     symptom = _clean_case_text(patient.symptom)
     if symptom:
         evidence.append(f"症狀「{symptom}」")
-    body_part = _clean_case_text(patient.body_part)
-    if body_part:
-        evidence.append(f"不適部位「{body_part}」")
+    body_parts = _stated_body_parts(case)
+    if body_parts:
+        evidence.append(f"不適部位「{'、'.join(body_parts)}」")
     duration = _clean_case_text(patient.duration)
     if duration:
         evidence.append(f"持續時間「{duration}」")
@@ -85,6 +85,30 @@ def build_department_confirmation_reply(case: TriageCase) -> str:
         f"因此目前建議您先看{department}。請確認後取得推薦掛號方案。"
     )
     return f"{reply}\n{preference_summary}" if preference_summary else reply
+
+
+MAX_BODY_PARTS = 3
+
+
+def _stated_body_parts(case: TriageCase) -> list[str]:
+    """Every body part the patient stated, in the order said (例「屁股、大腿」).
+
+    patient_input.body_part keeps one value, which a later message can replace, so the
+    confirmation once showed only 「大腿」 for 「我的屁股好痛」…「我的大腿有點酸」.
+    """
+    # Deferred: department_reasoning_service imports conversation_service, which this module serves.
+    from app.services.department_reasoning_service import validated_semantic_evidence_history
+
+    parts: list[str] = []
+    for item in validated_semantic_evidence_history(case):
+        if item["field"] == "body_part" and item["semantic_status"] in {"available", "partial"}:
+            value = _clean_case_text(item["normalized_value"])
+            if value and value not in parts:
+                parts.append(value)
+    stored = _clean_case_text(case.patient_input.body_part)
+    if stored and stored not in parts:
+        parts.insert(0, stored)
+    return parts[:MAX_BODY_PARTS]
 
 
 _RANK_WORDS = ("優先", "其次", "再來")
