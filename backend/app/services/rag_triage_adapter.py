@@ -320,8 +320,11 @@ def _turn_interpretation_rejection_reason(
     dialogue_reason = _dialogue_act_rejection_reason(data.get("dialogue_act"), user_sources)
     if dialogue_reason is not None:
         return dialogue_reason
-    if dialogue_act.act == "correction" and not any(
-        _is_accepted_clinical_evidence(item) for item in semantic_extractions
+    # A correction may change the visit time or the department, not only a symptom
+    # (例：修訂後「我想要下週三不然就下週二」).
+    if dialogue_act.act == "correction" and not (
+        any(_is_accepted_clinical_evidence(item) for item in semantic_extractions)
+        or time_preferences or department_preference is not None
     ):
         return "correction_without_grounded_evidence"
     if dialogue_act.act == "new_information" and not (

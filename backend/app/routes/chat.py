@@ -25,6 +25,7 @@ from app.services.conversation_service import (
     SAFETY_ANSWER_CAP,
     adopt_safety_net_family_medicine,
     advance_conversation,
+    ask_revision_detail_question,
     awaiting_availability_answer,
     capture_pending_answer,
     capture_prior_answer_reference,
@@ -80,6 +81,9 @@ async def chat(req: ChatRequest) -> TriageResult:
         prior_medical_facts = _clinical_progress_facts(case)
         availability_pending_before = awaiting_availability_answer(case)
         prior_availability_facts = _availability_facts(case)
+        requested_department_before = _requested_department(case)
+        # The first message after the 「我想修改」 button (an auto revision carries its own content).
+        explicit_revision_turn = case.conversation_state.last_question_key == "revision"
         prior_user_sources = [item.content for item in case.history_records if item.role == "user"]
         _apply_visit_type(case, req.visit_type)
         settings = get_settings()
@@ -306,10 +310,21 @@ async def chat(req: ChatRequest) -> TriageResult:
                     if not prior_captured:
                         capture_pending_answer(case, pending_interpretation, user_text_parts)
                     clear_answered_pending(case)
+                # After 「我想修改」, a message that changes no symptom, time or department (or
+                # could not be understood) asks what to change instead of re-confirming or retrying.
+                revision_detail_due = bool(
+                    explicit_revision_turn
+                    and has_user_input
+                    and case.conversation_state.last_dialogue_act != "decline_further_questions"
+                    and _symptom_facts(_clinical_progress_facts(case)) == _symptom_facts(prior_medical_facts)
+                    and _availability_facts(case) == prior_availability_facts
+                    and _requested_department(case) == requested_department_before
+                )
                 department_reasoning_allowed = bool(
                     has_user_input
                     and turn_interpretation_complete
                     and (not safety_check_turn or safety_completed_this_turn)
+                    and not revision_detail_due
                 )
                 # An availability answer with no new symptom keeps the department already decided;
                 # re-running convergence on unchanged evidence could reopen it.
@@ -322,7 +337,9 @@ async def chat(req: ChatRequest) -> TriageResult:
                     with perf.measure("department_detection"), ai_phase("department_detection"):
                         await reason_about_departments(case)
                 # After department recomputation, so a decision this turn is not overwritten.
-                safety_net_reason = safety_net_family_medicine_reason(case, user_text_parts)
+                safety_net_reason = (
+                    None if revision_detail_due else safety_net_family_medicine_reason(case, user_text_parts)
+                )
                 if safety_net_reason:
                     adopt_safety_net_family_medicine(case, safety_net_reason)
                 clarification_planning_allowed = bool(
@@ -337,6 +354,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and not awaiting_availability_answer(case)
                     # Nor for the fixed accompanying-symptom question of a single-department case.
                     and not companion_question_due(case)
+                    and not revision_detail_due
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
@@ -349,14 +367,17 @@ async def chat(req: ChatRequest) -> TriageResult:
                             ),
                             dialogue_act=getattr(ai_suggestion, "dialogue_act", None),
                         )
-                advance_conversation(
-                    case,
-                    suggestion,
-                    user_sources=user_text_parts,
-                    current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
-                    made_progress=bool(_clinical_progress_facts(case) - prior_medical_facts),
-                    availability_changed=_availability_facts(case) != prior_availability_facts,
-                )
+                if revision_detail_due:
+                    ask_revision_detail_question(case, user_text_parts)
+                else:
+                    advance_conversation(
+                        case,
+                        suggestion,
+                        user_sources=user_text_parts,
+                        current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
+                        made_progress=bool(_clinical_progress_facts(case) - prior_medical_facts),
+                        availability_changed=_availability_facts(case) != prior_availability_facts,
+                    )
                 if not has_user_input and not safety_check_turn and not case.history_records:
                     case.conversation_state.last_question_key = "symptom"
                     case.conversation_state.reply_source = "INITIAL_PROMPT"
@@ -593,6 +614,10 @@ def _clinical_progress_facts(case: TriageCase) -> set[tuple[str, ...]]:
     if safety_screen_resolved(case):
         facts.add(("safety", "resolved"))
     return facts
+
+
+def _requested_department(case: TriageCase) -> tuple:
+    return (case.patient_input.requested_department_id, case.patient_input.requested_department_name)
 
 
 def _symptom_facts(facts: set[tuple[str, ...]]) -> set[tuple[str, ...]]:

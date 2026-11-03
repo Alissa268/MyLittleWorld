@@ -77,6 +77,8 @@ UNRESOLVED_REPLY = "目前仍無法可靠釐清症狀，系統不會替你猜測
 TECHNICAL_CLARIFICATION_REPLY = "系統剛剛沒有回應，請再傳一次剛才的訊息。"
 # The provider answered but no planner question was usable: offer a way forward instead of a retry.
 STUCK_OPEN_QUESTION = "可以再多說一點嗎？例如哪裡不舒服、從什麼時候開始、有多嚴重。"
+# Asked once when the first message after 「我想修改」 changes nothing (例「我想要更改日期跟時段」).
+REVISION_DETAIL_QUESTION = "請直接告訴我要改成什麼，例如「改成下週四下午」「改看皮膚科」，或補充新的症狀。"
 SAFETY_EXPLANATION_FALLBACK = "這題是想確認您有沒有需要馬上去急診的狀況；如果都沒有，回答「沒有」就可以。"
 _PROVIDER_FAILURES = frozenset({"provider_timeout", "provider_failure"})
 FAMILY_MEDICINE_UNAVAILABLE_REPLY = "資訊不足，無法判斷科別。請改用手動選科或洽醫院掛號服務。"
@@ -105,6 +107,18 @@ _GENERIC_CLARIFICATION_QUESTION = re.compile(
     r"(?:請|可以|能否|可否)?(?:再)?(?:詳細)?(?:說明|補充|描述)(?:一下|目前情況)?(?:嗎)?[？?。]?|"
     r"(?:請|可以|能否|可否)?(?:再)?換個方式(?:說明|描述)(?:一下)?(?:嗎)?[？?。]?"
 )
+
+
+def requested_department_adopted(case: TriageCase) -> bool:
+    """reason_about_departments adopted the patient's validated department request (例「我想要直接掛婦產科」).
+
+    Like a Backend clue decision it completes the case once the safety screen is done, so
+    the planner never adds questions (起因：修訂後 AI 改問「疼痛的程度」「下週二還是下週三」).
+    """
+    result = case.department_result
+    requested = case.patient_input.requested_department_id
+    return (case.conversation_state.department_status == "resolved" and result is not None
+            and requested is not None and result.dept_id == requested)
 
 
 def safety_screen_resolved(case: TriageCase) -> bool:
@@ -1124,9 +1138,11 @@ def advance_conversation(
         _family_medicine_unavailable(case)
         return
     # A Backend clue decision counts as sufficient; the safety and grounding gates still apply.
-    backend_decided = decision in {"decide", "family_medicine"} and state.department_status == "resolved"
+    clue_decided = decision in {"decide", "family_medicine"} and state.department_status == "resolved"
     # The safety-net route needs the completed safety screen (checked when adopted), not this turn's grounding.
-    safety_net_routed = backend_decided and state.clue_decision.reason in SAFETY_NET_REASONS
+    safety_net_routed = clue_decided and state.clue_decision.reason in SAFETY_NET_REASONS
+    # So does the patient's validated department request: no clue or planner question follows it.
+    backend_decided = clue_decided or requested_department_adopted(case)
     # An availability turn follows a medically sufficient turn; the gates below still apply.
     availability_turn = state.availability_status == "asked"
     sufficient = (
@@ -1272,6 +1288,26 @@ def _recover_stuck_turn(case: TriageCase, *, availability_changed: bool) -> None
         return
     state.pending_clue_question_index = None
     _ask_safety_net_question(case)
+
+
+def ask_revision_detail_question(case: TriageCase, user_sources: list[str]) -> None:
+    """The patient asked to revise but said nothing to change yet: ask what to change, once.
+
+    Replaces both a stale re-confirmation and the 「系統剛剛沒有回應」 reply for a turn the
+    Turn Interpreter could not ground (例「我想要更改日期跟時段」 with no new time).
+    """
+    state = case.conversation_state
+    state.turn_count += len(user_sources)
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = ["病人要修改，但還沒說要改成什麼"]
+    state.next_information_needed = []
+    state.last_question_key = "revision_detail"
+    state.reply_source = "REVISION_DETAIL_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = REVISION_DETAIL_QUESTION
+    case.triage.is_final = False
+    case.triage.reasons.append("修訂後第一句沒有可更新的內容，改問要修改什麼。")
 
 
 def _ask_stuck_open_question(case: TriageCase) -> None:
