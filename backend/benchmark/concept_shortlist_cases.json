@@ -42,7 +42,7 @@
   {"patient_text": "天花板在轉", "acceptable_concepts": ["天旋地轉", "房子會轉", "眩暈"]},
   {"patient_text": "看東西模模糊糊", "acceptable_concepts": ["視力模糊"]},
   {"patient_text": "看東西有兩個影子", "acceptable_concepts": ["東西看成兩個", "複視"]},
-  {"patient_text": "眼前有黑點飄來飄去", "acceptable_concepts": ["飛蚊症"]},
+  {"patient_text": "眼前有黑點飄來飄去", "acceptable_concepts": ["飛蚊症", "眼前有小黑影"]},
   {"patient_text": "眼睛很乾", "acceptable_concepts": ["乾眼症", "眼乾", "眼睛乾澀"]},
   {"patient_text": "眼皮垂下來", "acceptable_concepts": ["眼瞼下垂"]},
   {"patient_text": "眼睛怕光", "acceptable_concepts": ["光敏感", "刺眼", "畏光"]},
