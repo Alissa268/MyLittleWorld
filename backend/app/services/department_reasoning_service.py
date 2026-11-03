@@ -13,6 +13,7 @@ from app.schemas import (
     CandidateDepartment, CandidateDepartmentEvidence, ClueDecisionRecord, DepartmentResult, SemanticOfficialLink,
     TriageCase,
 )
+from app.services import concept_shortlist
 from app.services import department_clues as clues
 from app.services import pediatric_routing as pediatric
 from app.services.ai_service import complete_runtime_json
@@ -242,6 +243,11 @@ async def retrieve_semantic_official_evidence(
     catalog = sorted({record["concept"] for record in records if record["canonical_dept_id"] in resolved})
     if not present_sources or not catalog:
         return []
+    # Only the concepts closest to the patient's words go to the AI, so the prompt
+    # does not grow with the knowledge base; without the local model, the whole catalog.
+    catalog = await concept_shortlist.shortlist(
+        sorted(present_sources | _present_normalized_values(evidence)), catalog,
+    ) or catalog
     prompt = (
         "你只做官方知識詞彙的語意檢索，不決定科別、診斷或流程。"
         "依 accepted_semantic_evidence 中的症狀、部位、伴隨情況與否定證據，"
@@ -337,6 +343,16 @@ async def retrieve_semantic_official_evidence(
 
 
 _MAX_SEMANTIC_LINKS = 50
+
+
+def _present_normalized_values(evidence: list[dict]) -> set[str]:
+    values = set()
+    for item in evidence:
+        if (item["field"] in _ASSERTED_MEDICAL_FIELDS and item["assertion"] == "present"
+                and item["semantic_status"] in {"available", "partial"}):
+            value = item["normalized_value"]
+            values.update(v for v in (value if isinstance(value, list) else [value]) if isinstance(v, str))
+    return values
 
 
 def _present_sources(evidence: list[dict]) -> set[str]:

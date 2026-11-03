@@ -13,7 +13,9 @@ from app.routes.followup import router as followup_router
 from app.routes.reference import router as reference_router
 from app.routes.schedules import router as schedules_router
 from app.db import DatabaseUnavailableError
+from app.services import concept_shortlist
 from app.services.ai_service import initialize_ai
+from app.services.department_knowledge import load_department_knowledge
 from app.services.tts_cache import tts_cache
 from app.services.voice_perf import VoicePerfMiddleware
 
@@ -65,6 +67,18 @@ def on_startup() -> None:
         initialize_ai()
     except Exception as exc:
         logger.warning("AI initialization failed during startup; API fallback remains available: %s", exc)
+
+
+@app.on_event("startup")
+def prepare_concept_shortlist() -> None:
+    # Blocks startup on purpose: the first run downloads the model before
+    # "Application startup complete", so the first patient never waits for it.
+    try:
+        _sources, records = load_department_knowledge()
+    except Exception as exc:
+        logger.warning("Knowledge base failed to load; concept shortlist stays off: %s", exc)
+        return
+    concept_shortlist.warm_up(sorted({record["concept"] for record in records}))
 
 
 @app.on_event("startup")

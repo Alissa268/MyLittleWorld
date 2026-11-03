@@ -9,3 +9,4 @@ google-genai>=1.0.0
 cerebras-cloud-sdk>=1.0.0
 python-multipart>=0.0.9
 requests>=2.34.2
+fastembed>=0.9.1

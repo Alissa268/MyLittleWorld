@@ -54,6 +54,10 @@ class Settings(BaseSettings):
     # 安全網（docs/修改計畫.md Phase 2「防止 AI 無限聊」）：UX 防呆，不是醫療規則；以使用者訊息輪數計
     safety_net_ask_turn: int = Field(default=8, ge=1, alias="SAFETY_NET_ASK_TURN")
     hard_turn_cap: int = Field(default=20, ge=1, alias="HARD_TURN_CAP")
+    # 語意比對前先挑症狀詞用的本地模型（app/services/concept_shortlist.py）；設成空字串＝停用，改送整份清單
+    concept_embedding_model: str = Field(
+        default="jinaai/jina-embeddings-v2-base-zh", alias="CONCEPT_EMBEDDING_MODEL",
+    )
     embedding_model: str = Field(default="BAAI/bge-m3", alias="EMBEDDING_MODEL")
     deploy_mode: str = Field(default="local", alias="DEPLOY_MODE")
     disable_local_embedding: bool = Field(default=False, alias="DISABLE_LOCAL_EMBEDDING")

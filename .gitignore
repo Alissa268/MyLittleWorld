@@ -44,3 +44,6 @@ test_input.wav
 
 backend/.venv/
 .venv/
+
+# 找症狀詞用的本地模型與詞向量（後端啟動時自動下載／計算）
+backend/.model_cache/
