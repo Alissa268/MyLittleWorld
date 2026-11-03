@@ -24,7 +24,8 @@ def test_specialty_complaints_reach_their_department():
     assert literal_departments("我很焦慮") == {"一般內科", "精神科"}
     # 鳳林分院 lists 痔瘡 under 一般外科 too (2026-11-04).
     assert literal_departments("痔瘡在痛") == {"直腸外科", "一般外科"}
-    assert literal_departments("便血") == {"胃腸肝膽科", "直腸外科"}
+    # 三軍總醫院 lists 便血 under 一般外科 too (MND open data, 2026-11-04).
+    assert literal_departments("便血") == {"胃腸肝膽科", "直腸外科", "一般外科"}
     assert literal_departments("腳踝扭傷") == {"骨科"}
     assert literal_departments("手骨折") == {"骨科"}
     assert literal_departments("牙周病") == {"牙科"}

@@ -20,7 +20,7 @@ from app.schemas import ConversationState
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 
 PEDIATRICS_DEPT_ID = 1320
-PEDIATRIC_SUBSPECIALTY_DEPT_IDS = frozenset({1246, 1322})
+PEDIATRIC_SUBSPECIALTY_DEPT_IDS = frozenset({1246, 1318, 1322})
 ADULT_AGE = 18
 AGE_PENDING_INTENT = "patient_age"
 DECISION_REASON = "pediatric_default"

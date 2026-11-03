@@ -45,7 +45,8 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("皮膚癢") >= {"皮膚科"}
     # 高雄榮總「該看哪一科?」lists 蕁麻疹 under 一般內科 too (2026-11-04).
     assert literal_departments("身上起蕁麻疹") == {"皮膚科", "過敏免疫風濕", "一般內科"}
-    assert literal_departments("最近一直腹脹") == {"胃腸肝膽科"}
+    # 三軍總醫院 lists 腹脹 under 大腸直腸外科 too (MND open data, 2026-11-04).
+    assert literal_departments("最近一直腹脹") == {"胃腸肝膽科", "直腸外科"}
     assert literal_departments("胃灼熱") == {"胃腸肝膽科"}
     assert literal_departments("喘不過氣") == {"胸腔內科", "心臟內科"}
     assert literal_departments("背痛") == {"骨科", "復健醫學", "神經外科"}

@@ -23,6 +23,8 @@ _SOURCE_POLICY = {
     ("ptvgh", "symptom_department_guidance"): (5, {"www.ptvgh.gov.tw"}),
     # The VGH branch hospitals follow the four VGHs.
     ("vgh_branch", "symptom_department_guidance"): (6, {"org.vghtpe.gov.tw"}),
+    # Public hospitals come after the VGH system: the military hospitals' symptom table is MND open data.
+    ("mnd_military", "symptom_department_guidance"): (7, {"www.mnd.gov.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",

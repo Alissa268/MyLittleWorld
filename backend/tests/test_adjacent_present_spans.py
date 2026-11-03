@@ -59,7 +59,8 @@ def compound(retrieved):
 def test_split_compound_phrase_matches_whole_official_concept():
     case = split_back_pain()
     retrieved = literal(case)
-    assert pairs(retrieved) == {("腰酸背痛", "腰酸背痛"), ("背痛", "背痛")}
+    # 「腰酸」 alone is an official 復健科 concept since 2026-11-04 (三軍總醫院, MND open data).
+    assert pairs(retrieved) == {("腰酸背痛", "腰酸背痛"), ("背痛", "背痛"), ("腰酸", "腰酸")}
     retrieved = compound(retrieved)
     assert {row["childDept"] for row in retrieved} >= {"一般骨科", "神經內科", "神經外科", "復健醫學", "疼痛控制科"}
     assert {row["dept_id"] for row in retrieved} == {r["canonical_dept_id"] for r in lookup_concept("腰酸背痛", RECORDS)}
@@ -112,7 +113,8 @@ def test_absent_or_uncertain_span_never_takes_part():
     for assertion in ("absent", "uncertain"):
         case = interpreted(("腰酸背痛", [item("symptom", "腰酸", "腰酸"),
                                        item("accompanying_symptoms", "背痛", "背痛", assertion=assertion)]))
-        assert literal(case) == [], assertion
+        # Only the present 「腰酸」 matches, on its own (an official concept since 2026-11-04).
+        assert pairs(literal(case)) == {("腰酸", "腰酸")}, assertion
 
 
 def test_current_absent_or_uncertain_concept_blocks_joined_anchor():
