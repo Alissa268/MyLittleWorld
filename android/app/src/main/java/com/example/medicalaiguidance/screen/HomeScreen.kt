@@ -448,6 +448,7 @@ fun HomeScreen(
                         },
                         icon = if (history.status == HistoryStatus.COMPLETED) Icons.Filled.MedicalServices else Icons.Default.Psychology,
                         status = history.status,
+                        isSafetyWarning = history.hasUrgentSymptoms() || history.hasUnresolvedSafety(),
                         onClick = { navController.navigate(Route.chatHistory(history.id)) }
                     )
                     Spacer(modifier = Modifier.height(14.dp))
@@ -576,6 +577,7 @@ fun RecordItem(
     summary: String,
     icon: ImageVector,
     status: HistoryStatus,
+    isSafetyWarning: Boolean = false,
     onClick: () -> Unit
 ) {
     val isUncompleted = status == HistoryStatus.UNCOMPLETED
@@ -598,13 +600,13 @@ fun RecordItem(
         Box(
             modifier = Modifier
                 .size(52.dp)
-                .background(Color(0xFFF0F5F5), shape = CircleShape),
+                .background(if (isSafetyWarning) Color(0xFFFFF3E0) else Color(0xFFF0F5F5), shape = CircleShape),
             contentAlignment = Alignment.Center
         ) {
             Icon(
                 imageVector = icon,
                 contentDescription = null,
-                tint = Color(0xFF036A6D),
+                tint = if (isSafetyWarning) Color(0xFFE58A2A) else Color(0xFF036A6D),
                 modifier = Modifier.size(26.dp)
             )
         }

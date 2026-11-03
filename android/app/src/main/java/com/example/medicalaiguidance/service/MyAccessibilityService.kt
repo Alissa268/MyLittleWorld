@@ -1430,7 +1430,8 @@ class MyAccessibilityService : AccessibilityService() {
                         isClickable = node.isClickable,
                         clickableAncestorIndex = nearestClickableAncestorIndex,
                         isEditable = node.isEditable,
-                        isVisibleToUser = node.isVisibleToUser
+                        isVisibleToUser = node.isVisibleToUser,
+                        viewIdResourceName = node.viewIdResourceName
                     )
                 )
             }
@@ -1558,7 +1559,7 @@ class MyAccessibilityService : AccessibilityService() {
             rect,
             message,
             messageAtTop = guidanceSession.guidanceType == GuidanceType.CANCELLATION &&
-                    cancellationConfirmationVisible && !awaitingCancellationResult
+                    (cancellationListReached || cancellationConfirmationVisible) && !awaitingCancellationResult
         )
     }
 
@@ -1642,7 +1643,8 @@ data class NodeData(
     val isClickable: Boolean = false,
     val clickableAncestorIndex: Int? = null,
     val isEditable: Boolean = false,
-    val isVisibleToUser: Boolean = true
+    val isVisibleToUser: Boolean = true,
+    val viewIdResourceName: String? = null
 )
 
 private enum class ReservationSection {

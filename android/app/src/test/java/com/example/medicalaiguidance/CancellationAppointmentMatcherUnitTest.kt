@@ -9,6 +9,40 @@ import org.junit.Test
 
 class CancellationAppointmentMatcherUnitTest {
     @Test
+    fun hospitalCancelButtonWithNoLabelIsFoundByExactResourceId() {
+        val button = node(8, "", top = 1297, bottom = 1432, clickable = true)
+            .copy(viewIdResourceName = "tw.com.bicom.VGHTPE:id/btnCancel")
+        val result = CancellationAppointmentMatcher.match(listOf(button))
+        assertEquals(CancellationMatchStatus.SINGLE_CANCELLABLE, result.status)
+        assertEquals(listOf(8), result.sourceIndices)
+    }
+
+    @Test
+    fun resourceIdDoesNotAcceptDisabledNonClickableOrOtherAppButtons() {
+        val button = node(8, "", top = 10, clickable = true)
+            .copy(viewIdResourceName = "tw.com.bicom.VGHTPE:id/btnCancel")
+        for (invalid in listOf(
+            button.copy(isEnabled = false),
+            button.copy(isClickable = false),
+            button.copy(viewIdResourceName = "other.app:id/btnCancel"),
+            button.copy(viewIdResourceName = "tw.com.bicom.VGHTPE:id/btnCalendar"),
+            button.copy(text = "已取消")
+        )) {
+            assertEquals(CancellationMatchStatus.NONE_CANCELLABLE,
+                CancellationAppointmentMatcher.match(listOf(invalid)).status)
+        }
+    }
+
+    @Test
+    fun twoUnlabelledHospitalButtonsRemainSeparateChoices() {
+        val button = node(8, "", top = 10, clickable = true)
+            .copy(viewIdResourceName = "tw.com.bicom.VGHTPE:id/btnCancel")
+        val result = CancellationAppointmentMatcher.match(listOf(button, button.copy(sourceIndex = 9)))
+        assertEquals(CancellationMatchStatus.MULTIPLE_CANCELLABLE, result.status)
+        assertEquals(listOf(8, 9), result.sourceIndices)
+    }
+
+    @Test
     fun exactCancelAndAlreadyCancelledMatchesOnlyExactCancel() {
         val result = CancellationAppointmentMatcher.match(
             listOf(
