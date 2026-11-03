@@ -41,6 +41,8 @@ class Settings(BaseSettings):
     )
     # 線索題收斂（docs/修改計畫.md 第 9 節「線索題收斂」）
     clue_question_limit: int = Field(default=5, ge=1, le=10, alias="CLUE_QUESTION_LIMIT")
+    # 兩科以上候選時，問滿這麼多題線索題才定科（AI 已收斂也要等）
+    clue_min_questions: int = Field(default=3, ge=0, le=10, alias="CLUE_MIN_QUESTIONS")
     clue_concepts_per_question: int = Field(default=3, ge=1, le=5, alias="CLUE_CONCEPTS_PER_QUESTION")
     clue_planner_concept_limit: int = Field(default=10, ge=1, le=20, alias="CLUE_PLANNER_CONCEPT_LIMIT")
     # Canonical KB/DB id, validated against live Department rows like resolve_department_names.

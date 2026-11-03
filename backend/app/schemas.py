@@ -327,11 +327,13 @@ class ClueConceptRecord(BaseModel):
 
 class ClueDecisionRecord(BaseModel):
     # Diagnostic record of this turn's department_clues.decide() result.
-    kind: Literal["ask_clue", "decide", "tiebreak", "family_medicine", "family_medicine_unavailable",
-                  "defer_to_safety_net"]
+    kind: Literal["ask_clue", "ask_companion", "decide", "tiebreak", "family_medicine",
+                  "family_medicine_unavailable", "defer_to_safety_net"]
     reason: str = ""
     dept_id: Optional[int] = None
     tied_dept_ids: List[int] = Field(default_factory=list)
+    # ask_companion only: patient text pieces that scored when the decision was made.
+    scored_sources: List[str] = Field(default_factory=list)
 
 
 class ClueOffer(BaseModel):
@@ -405,6 +407,10 @@ class ConversationState(BaseModel):
     # set by department reasoning each turn; sources already asked are never asked again.
     body_part_question_source: Optional[str] = None
     body_part_questions_asked: List[str] = Field(default_factory=list)
+    # A single target department: the open 「還有其他不舒服嗎」 question, asked again only when
+    # the previous answer added scored patient text (companion_question_sources is the snapshot).
+    companion_questions_asked: int = Field(default=0, ge=0)
+    companion_question_sources: List[str] = Field(default_factory=list)
     # Pediatric routing: who the patient is (validated turn-interpreter patient_profile), the
     # one-time age question for an age-less 「我女兒」 and its reply.
     patient_subject: Optional[Literal["self", "other"]] = None

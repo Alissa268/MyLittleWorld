@@ -17,7 +17,9 @@ from app.services import department_clues as clues
 from app.services import pediatric_routing as pediatric
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
-from app.services.conversation_service import body_part_question, safety_screen_resolved
+from app.services.conversation_service import (
+    COMPANION_PENDING_INTENT, COMPANION_QUESTION_LIMIT, body_part_question, safety_screen_resolved,
+)
 from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
 )
@@ -493,11 +495,27 @@ def _clue_priority(state, retrieved: list[dict], candidates: set[int], records: 
     )
 
 
+def _clue_target(state, retrieved: list[dict], candidates: set[int], records: list[dict] | None,
+                 askable: list[clues.ClueConcept]) -> int | None:
+    """The department the next clue question asks about, among those with an askable clue."""
+    scores = clues.department_scores(retrieved, candidates, state.clue_concepts_asked, records)
+    ranked = clues.ranked_targets(candidates, scores, [item.dept_id for item in state.candidate_departments],
+                                  {get_settings().family_medicine_dept_id})
+    held = {dept_id for clue in askable for dept_id in clue.dept_ids}
+    return clues.clue_target_department(
+        [dept_id for dept_id in ranked if dept_id in held],
+        clues.asked_question_counts(state.clue_concepts_asked, candidates, records),
+        clues.clue_confirmed_departments(state.clue_concepts_asked, candidates, records),
+    )
+
+
 def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict]) -> list[clues.ClueConcept]:
     """Persist the Backend-ranked askable clues of all retrieved candidates; return every askable clue.
 
-    Family medicine stays a candidate but is never a clue target; ranking reads the
-    validated convergence candidates, so call this after they are stored.
+    The offer holds only clues of the department the next question targets (see
+    clue_target_department), concepts held by no other candidate first. Family medicine
+    stays a candidate but is never a clue target; ranking reads the validated convergence
+    candidates, so call this after they are stored.
     """
     state = case.conversation_state
     settings = get_settings()
@@ -506,8 +524,13 @@ def store_clue_offer(case: TriageCase, records: list[dict], retrieved: list[dict
     askable = clues.clue_concepts(records, candidates, mentioned, state.clue_concepts_asked,
                                   {settings.family_medicine_dept_id})
     state.department_clue_candidates = sorted(candidates)
+    target = _clue_target(state, retrieved, candidates, records, askable)
+    if target is not None:
+        offered, priority = [clue for clue in askable if target in clue.dept_ids], {target: (0, 0)}
+    else:
+        offered, priority = askable, _clue_priority(state, retrieved, candidates, records)
     state.department_clue_offer = clues.clue_offer(clues.rank_clue_concepts(
-        askable, settings.clue_planner_concept_limit, _clue_priority(state, retrieved, candidates, records),
+        offered, settings.clue_planner_concept_limit, priority,
     ))
     return askable
 
@@ -552,11 +575,14 @@ def apply_clue_decision(
             return
     ai_resolved = (case.department_result.dept_id
                    if state.department_status == "resolved" and case.department_result else None)
-    if ai_resolved is None and (clues.pending_clue_index(state) is not None
-                                or state.last_dialogue_act == "request_explanation"):
+    pending = (clues.pending_clue_index(state) is not None
+               or state.pending_clarification_intent == COMPANION_PENDING_INTENT
+               or state.last_dialogue_act == "request_explanation")
+    if ai_resolved is None and pending:
         return
     settings = get_settings()
     candidates = set(state.department_clue_candidates)
+    sources = clues.scored_patient_sources(retrieved)
     decision = clues.decide(
         ai_resolved_dept_id=ai_resolved, candidates=candidates,
         scores=clues.department_scores(retrieved, candidates, state.clue_concepts_asked, records),
@@ -568,7 +594,20 @@ def apply_clue_decision(
         # advance_conversation counts this turn's message afterwards, as the safety-net check sees it.
         turn_limit_reached=(not state.safety_net_asked
                             and state.turn_count + 1 >= settings.safety_net_ask_turn),
+        min_questions=settings.clue_min_questions,
+        asked_counts=clues.asked_question_counts(state.clue_concepts_asked, candidates, records),
+        # Asked again only when the previous answer added scored patient text.
+        companion_due=(state.companion_questions_asked < COMPANION_QUESTION_LIMIT
+                       and (state.companion_questions_asked == 0
+                            or not set(sources) <= set(state.companion_question_sources))),
     )
+    if decision.kind not in {"decide", "family_medicine"} and ai_resolved is not None:
+        # The convergence AI's resolution waits for the clue questions (or the companion question).
+        state.department_status = "ambiguous"
+        case.department_result = None
+        ai_resolved = None
+        if pending:
+            return
     kind, dept_id, result = decision.kind, decision.dept_id, None
     if kind == "decide" and dept_id == ai_resolved:
         result = case.department_result
@@ -582,6 +621,7 @@ def apply_clue_decision(
         dept_id = result.dept_id if result else None
     record = ClueDecisionRecord(
         kind=kind, reason=decision.reason, dept_id=dept_id, tied_dept_ids=list(decision.tied_dept_ids),
+        scored_sources=sources if kind == "ask_companion" else [],
     )
     if result is not None:
         _adopt_decision(case, result, record)

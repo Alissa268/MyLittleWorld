@@ -27,11 +27,24 @@ SAFETY_NET_PENDING_INTENT = "safety_net_choice"
 SAFETY_NET_QUESTION = "目前還沒辦法確定要看哪一科，要繼續描述，還是先掛家庭醫學科？"
 SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap", "user_declined_no_candidates"})
 BODY_PART_PENDING_INTENT = "symptom_body_part"
+# Only one target department: an open question can surface symptoms pointing elsewhere.
+COMPANION_PENDING_INTENT = "other_discomfort"
+COMPANION_QUESTION_LIMIT = 2
+COMPANION_FOLLOWUP_QUESTION = "還有其他不舒服的地方嗎？沒有的話直接說「沒有」就可以。"
 
 
 def body_part_question(source: str) -> str:
     """Backend-owned fixed question for a symptom said without a body part."""
     return f"請問您說的「{source}」是在哪個部位呢？"
+
+
+def companion_question(symptom: str | None, asked: int) -> str:
+    """Backend-owned fixed accompanying-symptom question; it reads for the patient or a relative."""
+    if asked:
+        return COMPANION_FOLLOWUP_QUESTION
+    if symptom:
+        return f"除了「{symptom}」，最近還有沒有其他不舒服的地方？"
+    return "最近還有沒有其他不舒服的地方？"
 
 
 SAFETY_UNRESOLVED_REPLY = (
@@ -662,8 +675,8 @@ def capture_pending_answer(
             case.conversation_state.pending_clarification_question = None
             case.conversation_state.next_information_needed = []
         return False
-    if case.conversation_state.pending_clarification_intent == BODY_PART_PENDING_INTENT:
-        # Any reply releases it; the body part itself arrives as ordinary extracted evidence.
+    if case.conversation_state.pending_clarification_intent in {BODY_PART_PENDING_INTENT, COMPANION_PENDING_INTENT}:
+        # Any reply releases it; a body part or new symptom arrives as ordinary extracted evidence.
         if user_sources:
             case.conversation_state.pending_clarification_intent = None
             case.conversation_state.pending_clarification_question = None
@@ -1068,6 +1081,9 @@ def advance_conversation(
             and state.pending_clarification_intent is None):
         _ask_body_part_question(case, state.body_part_question_source)
         return
+    if companion_question_due(case):
+        _ask_companion_question(case)
+        return
     # Stalled replies no longer end the case: consecutive_no_progress_turns never exceeds
     # turn_count, so a stalled case reaches this one-time question at the same turn.
     if (not state.safety_net_asked and state.turn_count >= settings.safety_net_ask_turn
@@ -1354,6 +1370,45 @@ def _ask_age_question(case: TriageCase) -> None:
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append("使用者描述家人但未說年齡，先詢問一次年齡以判斷是否看兒科。")
+
+
+def companion_question_due(case: TriageCase) -> bool:
+    """decide() asked for the accompanying-symptom question and nothing else is pending.
+
+    A decision kept from an earlier turn (department reasoning did not run) is not acted on again.
+    """
+    state = case.conversation_state
+    decision = state.clue_decision
+    return bool(
+        decision is not None and decision.kind == "ask_companion"
+        and state.companion_questions_asked < COMPANION_QUESTION_LIMIT
+        and (state.companion_questions_asked == 0
+             or not set(decision.scored_sources) <= set(state.companion_question_sources))
+        and state.department_status != "resolved" and safety_screen_resolved(case)
+        and state.pending_clarification_intent is None
+    )
+
+
+def _ask_companion_question(case: TriageCase) -> None:
+    """Backend-owned fixed question; any reply releases it and new symptoms are re-scored."""
+    state = case.conversation_state
+    question = companion_question(case.patient_input.symptom, state.companion_questions_asked)
+    state.companion_questions_asked += 1
+    state.companion_question_sources = list(state.clue_decision.scored_sources) if state.clue_decision else []
+    state.pending_clarification_intent = COMPANION_PENDING_INTENT
+    state.pending_clarification_question = question
+    if COMPANION_PENDING_INTENT not in state.asked_clarification_intents:
+        state.asked_clarification_intents.append(COMPANION_PENDING_INTENT)
+    state.next_information_needed = []
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = ["只有一個候選科別，先確認有沒有其他不舒服"]
+    state.last_question_key = None
+    state.reply_source = "COMPANION_QUESTION"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = question
+    case.triage.is_final = False
+    case.triage.reasons.append("症狀只對到一個科別，定科前先問一次有沒有其他不舒服。")
 
 
 def _ask_body_part_question(case: TriageCase, source: str) -> None:

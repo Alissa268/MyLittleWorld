@@ -120,6 +120,11 @@ def test_present_answer_to_unique_clue_asks_confirmation_of_that_department():
                  if len({item["canonical_dept_id"] for item in lookup_concept(record.concept, RECORDS)}) == 1)
     assert len(first.dept_ids) == 1
     case, body = turn(case, "有", assertion=lambda name: "present" if name == first.concept else "absent")
+    # 2026-11-03: two or more target departments need clue_min_questions (3) before deciding.
+    assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
+    for _ in range(2):
+        case, body = turn(case, "沒有", assertion="absent")
+    assert case.conversation_state.clue_questions_asked == 3
     decision = body["conversation_state"]["clue_decision"]
     assert (decision["kind"], decision["reason"], decision["dept_id"]) == (
         "decide", "clue_confirmed_single_department", first.dept_ids[0])
@@ -127,16 +132,17 @@ def test_present_answer_to_unique_clue_asks_confirmation_of_that_department():
     assert body["reply"].endswith(CONFIRM_PROMPT) and body["department_result"]["childDept"] in body["reply"]
 
 
-def test_five_absent_answers_decide_the_highest_score():
+def test_three_absent_answers_decide_the_leading_department():
+    # 2026-11-03: a leader strictly ahead settles at clue_min_questions once the challenger had no present answer.
     case, _ = turn(new_case("decide-limit"), "頭暈還有耳鳴",
                    [symptom("頭暈", "頭暈"), symptom("耳鳴", "耳鳴", "accompanying_symptoms")])
-    for _ in range(4):
+    for _ in range(2):
         case, body = turn(case, "沒有", assertion="absent")
         assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
-    assert case.conversation_state.clue_questions_asked == 5
+    assert case.conversation_state.clue_questions_asked == 3
     case, body = turn(case, "沒有", assertion="absent")
     decision = body["conversation_state"]["clue_decision"]
-    assert (decision["kind"], decision["reason"], decision["dept_id"]) == ("decide", "question_limit", ENT)
+    assert (decision["kind"], decision["reason"], decision["dept_id"]) == ("decide", "leader_confirmed", ENT)
     assert_waiting_confirmation(body, ENT)
 
 
@@ -177,12 +183,21 @@ def test_family_medicine_unavailable_is_terminal_and_invents_nothing():
     assert body["department_result"] is None and body["next_question"] is None
 
 
-def test_ai_resolved_candidate_goes_straight_to_confirmation():
-    _, body = turn(new_case("decide-ai"), "頭暈還有耳鳴",
-                   [symptom("頭暈", "頭暈"), symptom("耳鳴", "耳鳴", "accompanying_symptoms")],
-                   convergence=Convergence(resolve_ent=True))
+def test_ai_resolved_candidate_waits_for_the_minimum_clue_questions():
+    # 2026-11-03: the convergence AI's resolution no longer skips the clue questions.
+    convergence = Convergence(resolve_ent=True)
+    case, body = turn(new_case("decide-ai"), "頭暈還有耳鳴",
+                      [symptom("頭暈", "頭暈"), symptom("耳鳴", "耳鳴", "accompanying_symptoms")],
+                      convergence=convergence)
+    state = body["conversation_state"]
+    assert (state["clue_decision"]["kind"], state["department_status"]) == ("ask_clue", "ambiguous")
+    assert body["department_result"] is None and state["clue_questions_asked"] == 1
+    for _ in range(2):
+        case, body = turn(case, "沒有", assertion="absent", convergence=convergence)
+        assert body["conversation_state"]["clue_decision"]["kind"] == "ask_clue"
+    case, body = turn(case, "沒有", assertion="absent", convergence=convergence)
     assert body["conversation_state"]["clue_decision"]["reason"] == "ai_resolved"
-    assert body["conversation_state"]["clue_questions_asked"] == 0
+    assert body["conversation_state"]["clue_questions_asked"] == 3
     assert_waiting_confirmation(body, ENT)
 
 
@@ -400,7 +415,7 @@ def test_present_concept_with_one_current_candidate_holder_still_confirms():
     confirmed = clues.clue_confirmed_departments(asked, candidates, RECORDS)
     assert confirmed == {ORTHO}
     decision = clues.decide(
-        ai_resolved_dept_id=None, candidates=candidates, scores={ORTHO: 2, ENT: 1}, askable=[],
+        ai_resolved_dept_id=None, candidates=candidates, scores={ORTHO: 2, ENT: 1}, askable=[clue("耳鳴", {ENT})],
         questions_asked=1, tiebreak_used=False, user_declined=False, clue_confirmed_dept_ids=confirmed,
         question_limit=5, non_target_dept_ids={FAMILY},
     )
@@ -453,9 +468,10 @@ def test_decide_breaks_a_tie_with_the_ai_rank():
 
 
 def test_turn_limit_decides_only_a_single_top_target_department():
+    # Both had present answers and B was asked less often, so the clue answers alone settle nothing.
     common = dict(ai_resolved_dept_id=None, askable=[clue("咳嗽", {A, B})], questions_asked=4, tiebreak_used=False,
-                  user_declined=False, clue_confirmed_dept_ids=set(), question_limit=5, non_target_dept_ids={FAMILY},
-                  ai_order=[B, A])
+                  user_declined=False, clue_confirmed_dept_ids={A, B}, question_limit=5, non_target_dept_ids={FAMILY},
+                  ai_order=[B, A], asked_counts={A: 3, B: 1})
     before = clues.decide(candidates={A, B, FAMILY}, scores={A: 2, B: 1, FAMILY: 1}, **common)
     assert (before.kind, before.reason) == ("ask_clue", "continue")
     single = clues.decide(candidates={A, B, FAMILY}, scores={A: 2, B: 1, FAMILY: 1}, turn_limit_reached=True, **common)
@@ -467,19 +483,32 @@ def test_turn_limit_decides_only_a_single_top_target_department():
     assert (family.kind, family.reason) == ("ask_clue", "continue")
 
 
+def unsettled_answers():
+    """A asked twice with one present answer, challenger B once with a present answer."""
+    return [
+        ClueConceptRecord(concept="甲", dept_id=A, dept_ids=[A], question_index=1, answer="present"),
+        ClueConceptRecord(concept="乙", dept_id=A, dept_ids=[A], question_index=2, answer="absent"),
+        ClueConceptRecord(concept="丙", dept_id=B, dept_ids=[B], question_index=3, answer="present"),
+        ClueConceptRecord(concept="丁", dept_id=A, dept_ids=[A], question_index=4, answer="absent"),
+    ]
+
+
 def test_safety_net_turn_decides_the_top_department_instead_of_asking():
     settings = get_settings()
+    retrieved = [hit(A, "頭暈"), hit(A, "頭痛"), hit(B, "頭暈")]
     case = decision_case(asked=4)
+    case.conversation_state.clue_concepts_asked = unsettled_answers()
     case.conversation_state.turn_count = settings.safety_net_ask_turn - 1
-    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], [hit(A, "頭暈"), hit(A, "頭痛"), hit(B, "頭暈")], ACTIVE)
+    reasoning.apply_clue_decision(case, [clue("咳嗽", {A, B})], retrieved, ACTIVE)
     assert (case.conversation_state.clue_decision.kind, case.conversation_state.clue_decision.reason) == (
         "decide", "turn_limit_top_score")
     assert case.department_result.dept_id == A and case.conversation_state.department_status == "resolved"
     # Once the safety-net question was asked, the patient's choice to continue is kept.
     later = decision_case(asked=4)
+    later.conversation_state.clue_concepts_asked = unsettled_answers()
     later.conversation_state.turn_count = settings.safety_net_ask_turn
     later.conversation_state.safety_net_asked = True
-    reasoning.apply_clue_decision(later, [clue("咳嗽", {A, B})], [hit(A, "頭暈"), hit(A, "頭痛"), hit(B, "頭暈")], ACTIVE)
+    reasoning.apply_clue_decision(later, [clue("咳嗽", {A, B})], retrieved, ACTIVE)
     assert later.conversation_state.clue_decision.kind == "ask_clue"
 
 
@@ -503,6 +532,9 @@ def test_tie_outside_the_ai_ranking_still_falls_back_to_family_medicine():
 
 def test_family_medicine_ranked_first_in_a_tie_uses_the_general_confirmation():
     case = ranked(decision_case(candidates=(A, FAMILY)), [FAMILY, A])
+    # A single target department: the accompanying-symptom question was answered with nothing new.
+    case.conversation_state.companion_questions_asked = 1
+    case.conversation_state.companion_question_sources = ["頭暈"]
     case.history_records = [Message(role="user", content="頭暈"), Message(role="user", content="沒有")]
     case.patient_input.symptom = "頭暈"
     case.conversation_state.clarification_evidence = {clues.clue_intent(1): "沒有"}
@@ -569,6 +601,9 @@ def test_benchmark_family_medicine_fallbacks_take_the_ai_ranked_department(name)
     order = BENCHMARK_FINAL_TURNS[name]
     tied = set(order) | {FAMILY}
     case = ranked(decision_case(candidates=tuple(sorted(tied))), order)
+    # c09_run1 has a single target department, whose accompanying-symptom question is done.
+    case.conversation_state.companion_questions_asked = 1
+    case.conversation_state.companion_question_sources = ["症狀"]
     reasoning.apply_clue_decision(case, [], [hit(dept_id, "症狀") for dept_id in tied], ACTIVE)
     decision = case.conversation_state.clue_decision
     assert (decision.kind, decision.dept_id, decision.reason) == ("decide", order[0], "tie_broken_by_ai_rank")

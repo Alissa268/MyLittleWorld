@@ -39,7 +39,7 @@ _SYMPTOM_FIELDS = {"symptom", "accompanying_symptoms"}
 _NEVER_ASK_MARKERS = ("愛滋", "梅毒", "淋病", "菜花", "披衣菌", "性病", "癌", "腫瘤", "惡性", "白血病", "懷孕")
 _CONCLUDED_ANSWERS = {"present", "absent"}
 
-DecisionKind = Literal["ask_clue", "decide", "tiebreak", "family_medicine", "defer_to_safety_net"]
+DecisionKind = Literal["ask_clue", "ask_companion", "decide", "tiebreak", "family_medicine", "defer_to_safety_net"]
 
 
 @dataclass(frozen=True)
@@ -306,6 +306,12 @@ def department_scores(
     return {dept_id: len(texts[dept_id]) + len(questions[dept_id]) for dept_id in candidates}
 
 
+def scored_patient_sources(retrieved: list[dict]) -> list[str]:
+    """Distinct patient text pieces behind retrieved evidence, clue answers excluded."""
+    return sorted({item["patient_source_text"] for item in retrieved
+                   if item.get("evidence_origin") != CLUE_ANSWER_ORIGIN})
+
+
 def clue_confirmed_departments(
     asked: list[ClueConceptRecord], candidates: set[int], records: list[dict] | None = None,
 ) -> set[int]:
@@ -327,15 +333,83 @@ def tiebreak_clues(
     return rank_clue_concepts(eligible, len(eligible), priority)
 
 
+def asked_question_counts(
+    asked: list[ClueConceptRecord], candidates: set[int], records: list[dict] | None = None,
+) -> dict[int, int]:
+    """Distinct answered clue questions that asked a concept each candidate currently holds."""
+    questions: dict[int, set[int]] = {dept_id: set() for dept_id in candidates}
+    for record in asked:
+        if record.answer == "unanswered":
+            continue
+        for dept_id in answered_concept_departments(record, records):
+            if dept_id in questions:
+                questions[dept_id].add(record.question_index)
+    return {dept_id: len(found) for dept_id, found in questions.items()}
+
+
+def ranked_targets(
+    candidates: set[int], scores: dict[int, int], ai_order: Iterable[int] = (),
+    non_target_dept_ids: Iterable[int] = (),
+) -> list[int]:
+    """Target departments by score, then the convergence AI's order, then id."""
+    position = {dept_id: index for index, dept_id in enumerate(dict.fromkeys(ai_order))}
+    targets = candidates - set(non_target_dept_ids)
+    return sorted(targets, key=lambda dept_id: (-scores.get(dept_id, 0), position.get(dept_id, len(position)), dept_id))
+
+
+def clue_target_department(
+    ranked: list[int], asked_counts: dict[int, int], confirmed: set[int],
+) -> int | None:
+    """The department the next clue question asks about.
+
+    Until a clue answer is present, ranked departments are asked in turn. Afterwards the
+    leader and the strongest challenger alternate: the one asked fewer times goes next,
+    the leader on a draw, so a department never wins only by being asked more often.
+    """
+    if not ranked:
+        return None
+    if not confirmed & set(ranked):
+        return next((dept_id for dept_id in ranked if not asked_counts.get(dept_id)), ranked[0])
+    if len(ranked) == 1:
+        return ranked[0]
+    leader, challenger = ranked[0], ranked[1]
+    return challenger if asked_counts.get(challenger, 0) < asked_counts.get(leader, 0) else leader
+
+
+def _settled_reason(
+    ranked: list[int], scores: dict[int, int], asked_counts: dict[int, int], confirmed: set[int],
+) -> str | None:
+    """Why the clue answers already settle two or more target departments, or None.
+
+    A leader strictly ahead settles when the challenger had no present answer, or was asked
+    at least as often. A top tie settles only when every tied department had a present
+    answer and was asked equally often; an all-absent tie keeps asking.
+    """
+    leader, challenger = ranked[0], ranked[1]
+    if scores.get(leader, 0) > scores.get(challenger, 0):
+        if challenger not in confirmed or asked_counts.get(challenger, 0) >= asked_counts.get(leader, 0):
+            return "clue_confirmed_single_department" if confirmed & set(ranked) == {leader} else "leader_confirmed"
+        return None
+    tied = [dept_id for dept_id in ranked if scores.get(dept_id, 0) == scores.get(leader, 0)]
+    if all(dept_id in confirmed for dept_id in tied) and len({asked_counts.get(dept_id, 0) for dept_id in tied}) == 1:
+        return "balanced_tie"
+    return None
+
+
 def decide(
     *, ai_resolved_dept_id: int | None, candidates: set[int], scores: dict[int, int],
     askable: list[ClueConcept], questions_asked: int, tiebreak_used: bool,
     user_declined: bool, clue_confirmed_dept_ids: set[int], question_limit: int,
     non_target_dept_ids: Iterable[int] = (), ai_order: Iterable[int] = (),
-    turn_limit_reached: bool = False,
+    turn_limit_reached: bool = False, min_questions: int = 0,
+    asked_counts: dict[int, int] | None = None, companion_due: bool = False,
 ) -> ClueDecision:
     """Apply rules A/C and the decision triggers; every decision still needs user confirmation.
 
+    With two or more target departments nothing settles before ``min_questions`` clue
+    questions (unless the patient declines or no clue is askable); the convergence AI's
+    resolution waits for them too. A single target department (family medicine is never
+    one) first gets the open accompanying-symptom question while ``companion_due``.
     A tied top score goes to the tied department ranked first in ``ai_order`` (this turn's
     validated convergence candidates); only when none of them is ranked does it fall back
     to family medicine. No extra tiebreak question is asked, so ``tiebreak_used`` is unused.
@@ -344,16 +418,24 @@ def decide(
     """
     if not candidates:
         return ClueDecision("defer_to_safety_net", reason="no_candidates")
-    if ai_resolved_dept_id is not None and ai_resolved_dept_id in candidates:
-        return ClueDecision("decide", dept_id=ai_resolved_dept_id, reason="ai_resolved")
+    ranked = ranked_targets(candidates, scores, ai_order, non_target_dept_ids)
+    confirmed = clue_confirmed_dept_ids & candidates
+    single_target = len(ranked) <= 1
+    enough_questions = single_target or not askable or questions_asked >= min_questions
     if user_declined:
         reason = "user_declined"
-    elif len(clue_confirmed_dept_ids & candidates) == 1:
-        reason = "clue_confirmed_single_department"
+    elif single_target and companion_due:
+        return ClueDecision("ask_companion", reason="single_candidate")
+    elif ai_resolved_dept_id is not None and ai_resolved_dept_id in candidates and enough_questions:
+        return ClueDecision("decide", dept_id=ai_resolved_dept_id, reason="ai_resolved")
+    elif single_target:
+        reason = "single_candidate"
     elif not askable:
         reason = "no_askable_clues"
     elif questions_asked >= question_limit:
         reason = "question_limit"
+    elif enough_questions and (settled := _settled_reason(ranked, scores, asked_counts or {}, confirmed)):
+        reason = settled
     elif turn_limit_reached:
         reason = "turn_limit_top_score"
     else:

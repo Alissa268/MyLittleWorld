@@ -30,6 +30,7 @@ from app.services.conversation_service import (
     capture_prior_answer_reference,
     capture_safety_screen_answer,
     clear_answered_pending,
+    companion_question_due,
     request_clarification,
     safety_net_family_medicine_reason,
     safety_screen_resolved,
@@ -330,6 +331,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and (not safety_check_turn or safety_completed_this_turn or case.conversation_state.safety_answer_attempts < SAFETY_ANSWER_CAP)
                     # Backend re-asks its fixed availability question; no planner call is needed.
                     and not awaiting_availability_answer(case)
+                    # Nor for the fixed accompanying-symptom question of a single-department case.
+                    and not companion_question_due(case)
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
