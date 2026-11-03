@@ -22,7 +22,8 @@ def test_taichung_table_is_a_marked_fallback_without_family_medicine():
 def test_specialty_complaints_reach_their_department():
     assert literal_departments("最近很憂鬱") == {"精神科"}
     assert literal_departments("我很焦慮") == {"一般內科", "精神科"}
-    assert literal_departments("痔瘡在痛") == {"直腸外科"}
+    # 鳳林分院 lists 痔瘡 under 一般外科 too (2026-11-04).
+    assert literal_departments("痔瘡在痛") == {"直腸外科", "一般外科"}
     assert literal_departments("便血") == {"胃腸肝膽科", "直腸外科"}
     assert literal_departments("腳踝扭傷") == {"骨科"}
     assert literal_departments("手骨折") == {"骨科"}

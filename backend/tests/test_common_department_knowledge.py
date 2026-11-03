@@ -55,7 +55,8 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("耳朵疼痛") == {"耳科"}
     assert literal_departments("天旋地轉") == {"神經內科"}
     assert literal_departments("手腳麻木") == {"神經內科", "神經外科"}
-    assert literal_departments("解尿困難") == {"泌尿外科"}
+    # 屏東榮總「該看哪一科?」lists 解尿困難 under 婦產科 and 腎臟科 too (2026-11-04).
+    assert literal_departments("解尿困難") == {"泌尿外科", "婦產科", "腎臟科"}
     assert literal_departments("眼屎很多") == {"眼科"}
     # 乳房特別門診 / 心臟血管外科 follow the Taichung VGH symptom table (breast pain → 一般外科;
     # plain numbness is not a 心臟外科 symptom there), mapped onto existing departments.

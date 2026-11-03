@@ -20,6 +20,9 @@ _SOURCE_POLICY = {
     ("vghtc", "department_service"): (3, {"www.vghtc.gov.tw"}),
     ("vghtc", "symptom_department_guidance"): (3, {"www.vghtc.gov.tw"}),
     ("vghks", "symptom_department_guidance"): (4, {"www.vghks.gov.tw"}),
+    ("ptvgh", "symptom_department_guidance"): (5, {"www.ptvgh.gov.tw"}),
+    # The VGH branch hospitals follow the four VGHs.
+    ("vgh_branch", "symptom_department_guidance"): (6, {"org.vghtpe.gov.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",
