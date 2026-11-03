@@ -29,6 +29,7 @@ _SOURCE_POLICY = {
     # Private hospitals come last.
     ("femh", "symptom_department_guidance"): (8, {"www.femh.org.tw"}),
     ("edah", "symptom_department_guidance"): (8, {"webreg.edah.org.tw"}),
+    ("skh", "symptom_department_guidance"): (8, {"www.skh.org.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",
