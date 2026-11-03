@@ -113,16 +113,18 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     # then the Taichung symptom table and five Taipei department pages (psychiatry, colorectal, ortho, dental, thoracic),
     # then the rest of the Taichung symptom table for every department but psychiatry (same source, 262 records)
     # and two ihealth gynecology pages (8 records), then 142 more ihealth pages that name a clinic (181 records).
-    assert len(sources) == 220
-    assert len(records) == 1333
-    # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB.
-    assert len(mappings) == 36
+    # 2026-11-04: Kaohsiung VGH 「該看哪一科?」 (262 records).
+    assert len(sources) == 221
+    assert len(records) == 1595
+    # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB;
+    # 2026-11-04 adds 手外科, 職業醫學科, 新生兒科暨健兒門診 from the 310 APP department list.
+    assert len(mappings) == 39
     assert len({source["source_id"] for source in sources}) == len(sources)
     assert {record["evidence_type"] for record in records} == {
         "direct_routing_evidence",
         "department_specialty_evidence",
     }
-    assert all(record["source_hospital"] in {"vghtpe", "vghtc"} for record in records)
+    assert all(record["source_hospital"] in {"vghtpe", "vghtc", "vghks"} for record in records)
     assert all(record["source_url"].startswith("https://") for record in records)
     assert all(record["source_id"] != "app_sql_inventory_2026_09_29" for record in records)
 

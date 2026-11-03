@@ -443,10 +443,10 @@ def test_clue_answer_also_extracted_as_a_symptom_scores_once():
 
 
 def test_specialty_only_kb_concept_is_not_offered():
-    assert {r["evidence_type"] for r in RECORDS if r["concept"] == "拉皮"} == {"department_specialty_evidence"}
-    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "拉皮")
+    assert {r["evidence_type"] for r in RECORDS if r["concept"] == "臉型雕塑"} == {"department_specialty_evidence"}
+    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "臉型雕塑")
     offered = {clue.concept for clue in clues.clue_concepts(RECORDS, {holder, ENT}, set(), [])}
-    assert offered and "拉皮" not in offered
+    assert offered and "臉型雕塑" not in offered
 
 
 def test_kb_concept_with_direct_and_specialty_records_is_offered_for_every_holder():
@@ -462,11 +462,11 @@ def test_kb_concept_with_direct_and_specialty_records_is_offered_for_every_holde
 def test_specialty_evidence_still_counts_in_retrieved_and_scores():
     case = kb_case()
     # The chief complaint: a department that does not hold it is no clue candidate.
-    case.history_records = [Message(role="user", content="拉皮")]
-    case.semantic_extractions = [extraction("拉皮", "拉皮")]
+    case.history_records = [Message(role="user", content="臉型雕塑")]
+    case.semantic_extractions = [extraction("臉型雕塑", "臉型雕塑")]
     retrieved = converge(case)["retrieved_official_evidence"]
-    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "拉皮")
-    assert any(item["knowledge_concept"] == "拉皮" and item["dept_id"] == holder for item in retrieved)
+    holder = next(r["canonical_dept_id"] for r in RECORDS if r["concept"] == "臉型雕塑")
+    assert any(item["knowledge_concept"] == "臉型雕塑" and item["dept_id"] == holder for item in retrieved)
     scores = clues.department_scores(retrieved, clues.candidate_dept_ids(retrieved), [])
     assert scores[holder] == 1
     assert holder in case.conversation_state.department_clue_candidates

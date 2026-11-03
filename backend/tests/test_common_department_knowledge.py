@@ -43,7 +43,8 @@ def test_supplements_cite_symptom_pages_and_skip_family_medicine():
 
 def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("皮膚癢") >= {"皮膚科"}
-    assert literal_departments("身上起蕁麻疹") == {"皮膚科", "過敏免疫風濕"}
+    # 高雄榮總「該看哪一科?」lists 蕁麻疹 under 一般內科 too (2026-11-04).
+    assert literal_departments("身上起蕁麻疹") == {"皮膚科", "過敏免疫風濕", "一般內科"}
     assert literal_departments("最近一直腹脹") == {"胃腸肝膽科"}
     assert literal_departments("胃灼熱") == {"胃腸肝膽科"}
     assert literal_departments("喘不過氣") == {"胸腔內科", "心臟內科"}

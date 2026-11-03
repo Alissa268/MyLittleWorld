@@ -19,6 +19,7 @@ _SOURCE_POLICY = {
     ("vghtpe", "clinic_service"): (2, {"wd.vghtpe.gov.tw"}),
     ("vghtc", "department_service"): (3, {"www.vghtc.gov.tw"}),
     ("vghtc", "symptom_department_guidance"): (3, {"www.vghtc.gov.tw"}),
+    ("vghks", "symptom_department_guidance"): (4, {"www.vghks.gov.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",
@@ -162,8 +163,9 @@ def validate_department_knowledge(
             raise ValueError("medical record official labels differ from reviewed mapping")
         if type(record["fallback_for_vghtpe"]) is not bool:
             raise ValueError("fallback_for_vghtpe must be boolean")
-        if record["fallback_for_vghtpe"] != (record["source_hospital"] == "vghtc"):
-            raise ValueError("Taichung records must be marked as fallback")
+        # Every hospital other than Taipei VGH only fills gaps in Taipei VGH's own guidance.
+        if record["fallback_for_vghtpe"] != (record["source_hospital"] != "vghtpe"):
+            raise ValueError("records outside Taipei VGH must be marked as fallback")
         key = (
             record["source_id"], record["canonical_dept_id"],
             normalize_concept(concept), record["evidence_type"],
