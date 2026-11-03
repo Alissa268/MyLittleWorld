@@ -45,16 +45,18 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("皮膚癢") >= {"皮膚科"}
     # 高雄榮總「該看哪一科?」lists 蕁麻疹 under 一般內科 too (2026-11-04).
     assert literal_departments("身上起蕁麻疹") == {"皮膚科", "過敏免疫風濕", "一般內科"}
-    # 三軍總醫院 lists 腹脹 under 大腸直腸外科 too (MND open data, 2026-11-04).
-    assert literal_departments("最近一直腹脹") == {"胃腸肝膽科", "直腸外科"}
+    # 三軍總醫院 lists 腹脹 under 大腸直腸外科 and 義大醫院 under 一般醫學內科 too (2026-11-04).
+    assert literal_departments("最近一直腹脹") == {"胃腸肝膽科", "直腸外科", "一般內科"}
     assert literal_departments("胃灼熱") == {"胃腸肝膽科"}
     assert literal_departments("喘不過氣") == {"胸腔內科", "心臟內科"}
-    assert literal_departments("背痛") == {"骨科", "復健醫學", "神經外科"}
+    # 雙和醫院 lists 背痛 under 神經科 too (2026-11-04).
+    assert literal_departments("背痛") == {"骨科", "復健醫學", "神經外科", "神經內科"}
     assert literal_departments("關節酸痛") == {"骨科", "復健醫學", "過敏免疫風濕"}
-    assert literal_departments("喉嚨痛") == {"感染科", "喉科"}
+    # 義大醫院 lists 喉嚨痛 under 一般醫學內科, and 眩暈(天旋地轉) under 耳鼻喉科 (2026-11-04).
+    assert literal_departments("喉嚨痛") == {"感染科", "喉科", "一般內科"}
     assert literal_departments("流鼻血") == {"鼻科"}
     assert literal_departments("耳朵疼痛") == {"耳科"}
-    assert literal_departments("天旋地轉") == {"神經內科"}
+    assert literal_departments("天旋地轉") == {"神經內科", "耳科"}
     assert literal_departments("手腳麻木") == {"神經內科", "神經外科"}
     # 屏東榮總「該看哪一科?」lists 解尿困難 under 婦產科 and 腎臟科 too (2026-11-04).
     assert literal_departments("解尿困難") == {"泌尿外科", "婦產科", "腎臟科"}

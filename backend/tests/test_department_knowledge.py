@@ -114,18 +114,20 @@ def test_migration_package_production_inventory_is_loaded(knowledge, mappings):
     # then the rest of the Taichung symptom table for every department but psychiatry (same source, 262 records)
     # and two ihealth gynecology pages (8 records), then 142 more ihealth pages that name a clinic (181 records).
     # 2026-11-04: Kaohsiung VGH 「該看哪一科?」 (262 records), Pingtung VGH 「該看哪一科?」 (93 records),
-    # the Fenglin and Yuli branch clinic tables (52 records), the MND military hospital symptom table (226 records).
-    assert len(sources) == 225
-    assert len(records) == 1966
+    # the Fenglin and Yuli branch clinic tables (52 records), the MND military hospital symptom table (226 records),
+    # 雙和醫院 (118 records), 亞東醫院 and 義大醫院 (205 records).
+    assert len(sources) == 228
+    assert len(records) == 2289
     # 35 Phase 3 departments plus 兒童腸胃科 (1322), verified on the live 310 DB;
-    # 2026-11-04 adds 手外科, 職業醫學科, 新生兒科暨健兒門診, 兒童泌尿暨兒童外科 from the 310 APP department list.
-    assert len(mappings) == 40
+    # 2026-11-04 adds 手外科, 職業醫學科, 新生兒科暨健兒門診, 兒童泌尿暨兒童外科, 矯正牙科, 兒童牙科
+    # from the 310 APP department list.
+    assert len(mappings) == 42
     assert len({source["source_id"] for source in sources}) == len(sources)
     assert {record["evidence_type"] for record in records} == {
         "direct_routing_evidence",
         "department_specialty_evidence",
     }
-    assert all(record["source_hospital"] in {"vghtpe", "vghtc", "vghks", "ptvgh", "vgh_branch", "mnd_military"} for record in records)
+    assert all(record["source_hospital"] in {"vghtpe", "vghtc", "vghks", "ptvgh", "vgh_branch", "mnd_military", "mohw_shh", "femh", "edah"} for record in records)
     assert all(record["source_url"].startswith("https://") for record in records)
     assert all(record["source_id"] != "app_sql_inventory_2026_09_29" for record in records)
 

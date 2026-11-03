@@ -25,6 +25,10 @@ _SOURCE_POLICY = {
     ("vgh_branch", "symptom_department_guidance"): (6, {"org.vghtpe.gov.tw"}),
     # Public hospitals come after the VGH system: the military hospitals' symptom table is MND open data.
     ("mnd_military", "symptom_department_guidance"): (7, {"www.mnd.gov.tw"}),
+    ("mohw_shh", "symptom_department_guidance"): (7, {"shh.tmu.edu.tw"}),
+    # Private hospitals come last.
+    ("femh", "symptom_department_guidance"): (8, {"www.femh.org.tw"}),
+    ("edah", "symptom_department_guidance"): (8, {"webreg.edah.org.tw"}),
 }
 _RECORD_FIELDS = (
     "department_name", "official_department_labels", "concept", "evidence_type",

@@ -394,13 +394,14 @@ def test_present_clue_holder_that_misses_the_chief_complaint_stays_out():
                       convergence=BackPainConvergence())
     state = case.conversation_state
     assert RHEUMA not in state.department_clue_candidates
-    asked = next(record for record in state.clue_concepts_asked if record.concept == "關節痛")
+    # 「關節痛」 is no longer asked first: 一般內科 holds it and 「腰酸背痛」 too since 2026-11-04 (義大醫院).
+    asked = next(record for record in state.clue_concepts_asked if record.concept == "晨起關節僵硬")
     assert asked.dept_ids == [ORTHO]
 
-    case, body = turn(case, "有關節疼", assertion=lambda name: "present" if name == "關節痛" else "absent",
+    case, body = turn(case, "早上關節會僵硬", assertion=lambda name: "present" if name == "晨起關節僵硬" else "absent",
                       convergence=BackPainConvergence())
     state = case.conversation_state
-    # 「關節痛」 is also a 風濕 concept, but 風濕 does not hold 「腰酸背痛」 (2026-11-03 chief complaint rule).
+    # 「晨起關節僵硬」 is also a 風濕 concept, but 風濕 does not hold 「腰酸背痛」 (2026-11-03 chief complaint rule).
     assert ORTHO in state.department_clue_candidates and RHEUMA not in state.department_clue_candidates
     assert state.clue_decision.kind == "ask_clue"
     assert state.department_status != "resolved" and body["department_result"] is None
