@@ -6,7 +6,7 @@ from app.services.conversation_service import _clue_prompt, ClueQuestionSpec
 from app.services.department_knowledge import load_department_knowledge
 
 FAMILY = get_settings().family_medicine_dept_id
-ORTHO, NEUROSURG, REHAB, NEURO, URO, PAIN, PLASTIC = 1298, 1244, 1265, 1274, 1314, 1345, 1294
+ORTHO, NEUROSURG, REHAB, NEURO, URO, PAIN, PLASTIC, GYN = 1298, 1244, 1265, 1274, 1314, 1345, 1294, 1319
 A, B = 1101, 1102
 
 
@@ -106,14 +106,14 @@ def test_back_pain_first_clue_targets_likely_departments_not_urology_or_family_m
                    for r in records]
     case = back_pain_case()
     retrieved = reasoning.retrieve_official_evidence(case, records, resolutions)
-    # 整形外科 joins through 「手腳會麻」 on the Taichung symptom table (added 2026-11-03).
-    assert clues.candidate_dept_ids(retrieved) == {ORTHO, NEUROSURG, REHAB, NEURO, URO, PAIN, PLASTIC, FAMILY}
+    # 整形外科 joins through 「手腳會麻」 and 婦產科 through 「腰酸背痛」 on the Taichung symptom table (2026-11-03).
+    assert clues.candidate_dept_ids(retrieved) == {ORTHO, NEUROSURG, REHAB, NEURO, URO, PAIN, PLASTIC, GYN, FAMILY}
 
     askable = reasoning.store_clue_offer(case, records, retrieved)
     offer = case.conversation_state.department_clue_offer
     first = set(offer[0].dept_ids)
     assert first & {ORTHO, NEUROSURG, REHAB}
-    assert first - {URO, FAMILY}
+    assert first - {URO, GYN, FAMILY}
     assert all(set(item.dept_ids) - {FAMILY} for item in offer)
     assert all(clue.dept_ids - {FAMILY} for clue in askable)
     selected, target = clues.template_clue_selection(offer, get_settings().clue_concepts_per_question)

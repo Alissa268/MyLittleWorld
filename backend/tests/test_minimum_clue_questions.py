@@ -8,7 +8,7 @@ from app.services import conversation_service
 from app.services import department_clues as clues
 from tests.test_clue_decision import ACTIVE, FAMILY, clue, decision_case, hit, new_case, ranked, symptom, turn
 
-DERM, RHEUM, PLASTIC, DENTAL = 1252, 1255, 1294, 1248
+DERM, RHEUM, PLASTIC, DENTAL, COLORECTAL = 1252, 1255, 1294, 1248, 1245
 
 
 def decide(**overrides):
@@ -130,17 +130,18 @@ def test_clue_offer_holds_only_the_target_departments_clues():
 # --- Chat flow -------------------------------------------------------------------------------------
 
 def test_single_department_symptom_gets_one_open_question_before_confirmation():
-    case = new_case("companion-tooth")
+    # 「牙痛」 also reaches 口腔顎面外科 since the 2026-11-03 Taichung table batch; 「痔瘡」 is still one department.
+    case = new_case("companion-hemorrhoid")
     case.conversation_state.clarification_evidence = {"onset_time": "昨天開始"}
-    case, body = turn(case, "我牙痛", [symptom("牙痛", "牙痛")])
+    case, body = turn(case, "我痔瘡", [symptom("痔瘡", "痔瘡")])
     state = body["conversation_state"]
     assert state["clue_decision"]["kind"] == "ask_companion"
     assert state["reply_source"] == "COMPANION_QUESTION" and body["department_result"] is None
-    assert body["next_question"] == "除了「牙痛」，最近還有沒有其他不舒服的地方？"
+    assert body["next_question"] == "除了「痔瘡」，最近還有沒有其他不舒服的地方？"
     assert state["pending_clarification_intent"] == conversation_service.COMPANION_PENDING_INTENT
     case, body = turn(case, "沒有了", **no_more("沒有了"))
     decision = body["conversation_state"]["clue_decision"]
-    assert (decision["kind"], decision["reason"], decision["dept_id"]) == ("decide", "single_candidate", DENTAL)
+    assert (decision["kind"], decision["reason"], decision["dept_id"]) == ("decide", "single_candidate", COLORECTAL)
     assert body["conversation_state"]["companion_questions_asked"] == 1
     assert body["conversation_state"]["stage"] == "waiting_confirmation"
 
@@ -154,9 +155,9 @@ def no_more(text):
 def test_companion_answer_with_a_new_scored_symptom_asks_once_more():
     case = new_case("companion-again")
     case.conversation_state.clarification_evidence = {"onset_time": "昨天開始"}
-    case, _ = turn(case, "我牙痛", [symptom("牙痛", "牙痛")])
-    # 「咀嚼困難」 is another official 牙科 concept, but it also brings other departments in.
-    case, body = turn(case, "吃東西咀嚼困難", [symptom("牙痛", "牙痛"), symptom("咀嚼困難", "咀嚼困難")])
+    case, _ = turn(case, "我痔瘡", [symptom("痔瘡", "痔瘡")])
+    # 「下腹痛」 is another official 直腸外科 concept, but it also brings other departments in.
+    case, body = turn(case, "還有下腹痛", [symptom("痔瘡", "痔瘡"), symptom("下腹痛", "下腹痛")])
     state = body["conversation_state"]
     if len([dept for dept in state["department_clue_candidates"] if dept != FAMILY]) == 1:
         assert body["next_question"] == conversation_service.COMPANION_FOLLOWUP_QUESTION
