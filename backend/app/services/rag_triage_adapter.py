@@ -29,7 +29,7 @@ from app.services.conversation_service import (
 )
 from app.services.rule_engine import QUESTION_TEXTS, RED_FLAG_QUESTION_KEY
 from app.services.department_clues import pending_clue_concepts
-from app.services.field_acceptance import ai_normalized_value_valid
+from app.services.field_acceptance import ai_normalized_value_rejection_reason, ai_normalized_value_valid
 from app.services.department_preference_service import validate_department_preference, active_department_candidates
 from app.services.pediatric_routing import apply_patient_profile, validate_patient_profile
 from app.services.ttas_evidence import apply_ttas_evidence, validate_ttas_evidence_items
@@ -443,6 +443,12 @@ def _semantic_extractions_from_ai(
             field,
             item.get("normalized_value"),
         )
+        normalized_value = item.get("normalized_value")
+        if field == "body_part" and _renamed_body_part(normalized_value, status, source_text):
+            # Anatomy stays in the patient's words: an AI rename (「屁股」→「臀部」) keeps the stated
+            # part instead of dropping it, so later steps still see 「屁股」 next to its symptom.
+            logger.info("semantic extraction body_part renamed_by_ai=true kept=source_text")
+            normalized_value = source_text
         if (
             field not in {
                 "symptom", "body_part", "duration", "severity", "onset",
@@ -452,7 +458,7 @@ def _semantic_extractions_from_ai(
             or not math.isfinite(confidence)
             or not 0.0 <= confidence <= 1.0
             or (medical_concept and assertion is None)
-            or not _semantic_value_valid(field, item.get("normalized_value"), status, source_text)
+            or not _semantic_value_valid(field, normalized_value, status, source_text)
             or not _source_text_grounded(source_text, user_sources or [])
         ):
             continue
@@ -460,7 +466,7 @@ def _semantic_extractions_from_ai(
             extractions.append(
                 SemanticExtraction(
                     field=field,
-                    normalized_value=item.get("normalized_value"),
+                    normalized_value=normalized_value,
                     semantic_status=status,
                     assertion=assertion,
                     confidence=confidence,
@@ -572,6 +578,15 @@ def _source_text_grounded(source_text: str, user_sources: list[str]) -> bool:
 
 def _semantic_value_valid(field: str, value: Any, status: str, source_text: str) -> bool:
     return ai_normalized_value_valid(field, value, status, source_text)
+
+
+def _renamed_body_part(value: Any, status: str, source_text: str) -> bool:
+    """A well-formed body part the AI renamed away from its own verbatim source_text."""
+    return (
+        ai_normalized_value_rejection_reason("body_part", value, status, source_text)
+        == "normalized_value_not_supported_by_source"
+        and ai_normalized_value_valid("body_part", source_text, status, source_text)
+    )
 
 
 def _build_turn_interpretation_repair_prompt(original_prompt: str, rejection_reason: str) -> str:

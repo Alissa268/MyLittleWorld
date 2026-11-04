@@ -52,10 +52,23 @@ def test_grounded_ai_values_do_not_need_patient_keyword_dictionaries(field, text
     assert getattr(container, field) == expected
 
 
+@pytest.mark.parametrize("text,value,source", [
+    ("我的屁股好痛", "臀部", "屁股"),
+    ("右手腕，鎖骨，頭暈", "左手腕", "右手腕"),
+    ("右手腕，鎖骨，頭暈", "右手腕", "手腕"),
+    ("右手腕，鎖骨，頭暈", "膝蓋", "鎖骨"),
+])
+def test_body_part_renamed_by_ai_keeps_the_patients_words(text, value, source):
+    case, _ = run_extraction(text, [extraction("body_part", value, source)])
+    assert case.patient_input.body_part == source
+    kept = [item for item in case.semantic_extractions if item.field == "body_part"]
+    assert [(item.normalized_value, item.source_text) for item in kept] == [(source, source)]
+
+
 @pytest.mark.parametrize("field,value,source,change", [
-    ("body_part", "左手腕", "右手腕", {}),
-    ("body_part", "右手腕", "手腕", {}),
-    ("body_part", "膝蓋", "鎖骨", {}),
+    ("body_part", "膝蓋", "鎖骨", {"confidence": 0.1}),
+    ("body_part", "膝蓋", "不存在", {}),
+    ("body_part", "膝蓋", "鎖骨", {"semantic_status": "invalid"}),
     ("body_part", ["手"], "手", {}),
     ("body_part", "手", "手", {"confidence": 0.1}),
     ("body_part", "手", "不存在", {}),
