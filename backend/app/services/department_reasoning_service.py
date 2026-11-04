@@ -132,8 +132,7 @@ def adjacent_present_spans(
     contains at least one present symptom span.
 
     ``bridge_degree_words`` also joins a body part to a symptom span when only degree words
-    sit between them (「屁股」好「痛」 → 「屁股好痛」), for semantic retrieval anchors only:
-    the fragment is still the patient's verbatim wording, and literal matching keeps touching spans.
+    sit between them (「屁股」好「痛」 → 「屁股好痛」); the fragment is still the patient's verbatim wording.
     """
     symptom_sources = _present_sources(evidence)
     body_sources = {
@@ -168,7 +167,7 @@ def adjacent_present_spans(
 
 
 def semantic_anchor_spans(case: TriageCase, evidence: list[dict]) -> list[tuple[str, tuple[str, ...]]]:
-    """Joined fragments a semantic link may anchor on: touching spans and degree-word bridges.
+    """Joined fragments an official match may anchor on: touching spans and degree-word bridges.
 
     Every stated body part counts, not only the latest one, so 「屁股好痛」 stays an anchor
     after 「大腿」 became the current part.
@@ -249,14 +248,42 @@ def literal_concepts(surface: str, concepts: dict[str, str], body_parts: set[str
             if any(at not in cut and not inside_longer(key, at) for at in starts)}
 
 
+def without_degree_words_after_parts(text: str, parts: set[str]) -> str:
+    """The text with degree words removed right after a stated body part (「腰好酸」 → 「腰酸」).
+
+    Degree words never change which department a complaint needs. Only the closed list
+    right after a verbatim body part is removed, so 「腰不酸」 stays as it is.
+    """
+    cuts = set()
+    for part in parts:
+        at = text.find(part)
+        while at != -1:
+            end = at + len(part)
+            gap = _DEGREE_WORDS.match(text, end)
+            if gap and gap.end() - end <= _MAX_DEGREE_GAP:
+                cuts.add((end, gap.end()))
+            at = text.find(part, at + 1)
+    kept, position = [], 0
+    for start, end in sorted(cuts):
+        if start >= position:
+            kept.append(text[position:start])
+            position = end
+    return "".join(kept) + text[position:]
+
+
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
-    """Match official concepts only against validated present semantic evidence."""
+    """Match official concepts only against validated present semantic evidence.
+
+    Each span is also compared with the degree words after a stated body part removed
+    (「我的腰好酸」 also as 「我的腰酸」); the anchor stays the patient's own wording.
+    """
     resolved = {
         entry["canonical_dept_id"]: entry
         for entry in resolutions if entry["status"] == "resolved"
     }
     concepts = {normalize_concept(record["concept"]): record["concept"] for record in records}
     body_parts = _body_part_words(case)
+    stated_parts = _body_part_texts(case)
     found: dict[tuple[int, str, str, str], dict] = {}
     evidence_items = accepted_semantic_evidence(case)
     surfaces_by_source: dict[str, set[str]] = {}
@@ -269,7 +296,7 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         source = evidence["source_text"]
         retrieval_surfaces = {
             normalize_concept(str(value))
-            for value in (evidence["normalized_value"], source)
+            for value in (evidence["normalized_value"], source, without_degree_words_after_parts(source, stated_parts))
             if isinstance(value, str) and value.strip()
         }
         surfaces_by_source.setdefault(source, set()).update(retrieval_surfaces)
@@ -284,13 +311,14 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     # A concept spanning touching present spans (e.g. two halves of one compound phrase)
     # is matched against the verbatim joined fragment. It must need every part: a concept
     # that a shorter chain or a single part already covers is not re-anchored, so one
-    # patient phrase never counts twice.
+    # patient phrase never counts twice. A body part and a symptom with only degree words
+    # between them (「腰」好「酸」) are joined too and compared without those words.
     contradicted = _contradicted_concepts(evidence_items)
-    for fragment, parts in adjacent_present_spans(_user_texts(case), evidence_items):
-        surface = normalize_concept(fragment)
+    for fragment, parts in semantic_anchor_spans(case, evidence_items):
+        surfaces = {normalize_concept(fragment), normalize_concept(without_degree_words_after_parts(fragment, stated_parts))}
         shorter = {normalize_concept(fragment[len(parts[0]):]), normalize_concept(fragment[:-len(parts[-1])])}
         shorter |= {value for part in parts for value in surfaces_by_source.get(part, set())}
-        for concept in literal_concepts(surface, concepts, body_parts):
+        for concept in set().union(*(literal_concepts(surface, concepts, body_parts) for surface in surfaces)):
             normalized_concept = normalize_concept(concept)
             if normalized_concept in contradicted or any(normalized_concept in value for value in shorter):
                 continue
@@ -304,10 +332,16 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
 
 
 async def _complete_with_retry(prompt: str, purpose: str, case: TriageCase) -> str:
-    """Retry once when the AI call itself fails; an answer that breaks the rules is not retried."""
+    """Retry once when the AI call itself fails; an answer that breaks the rules is not retried.
+
+    A refused request (4xx other than 429, e.g. 402 quota used up) fails the same way again.
+    """
     try:
         return await complete_runtime_json(prompt, purpose=purpose)
     except Exception as exc:
+        status = getattr(exc, "status_code", None)
+        if isinstance(status, int) and 400 <= status < 500 and status != 429:
+            raise
         logger.warning("%s retrying case_id=%s error_type=%s", purpose, case.case_id, type(exc).__name__)
         return await complete_runtime_json(prompt, purpose=purpose)
 

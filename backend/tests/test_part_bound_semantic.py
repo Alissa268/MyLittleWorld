@@ -204,8 +204,53 @@ def test_only_degree_words_bridge_a_part_and_a_symptom():
     assert bridged("屁股真的很痛") == ["屁股真的很痛"]
     # A clause break, another word or a long gap is no bridge.
     assert bridged("屁股，好痛") == bridged("屁股坐久了痛") == bridged("屁股有點非常真的痛") == []
-    # Literal matching keeps joining touching spans only.
+    # Without the bridge only touching spans join.
     assert reasoning.adjacent_present_spans(["我的屁股好痛"], evidence) == []
+
+
+WAIST = {record["canonical_dept_id"] for record in lookup_concept("腰酸", RECORDS)}
+
+
+def sore_waist(case_id, chief_extractions, message="我的腰好酸"):
+    case = TriageCase(case_id=case_id)
+    case.history_records = [Message(role="user", content=message)]
+    case.semantic_extractions = chief_extractions
+    return case
+
+
+def test_degree_words_after_a_body_part_are_dropped_for_literal_matching():
+    parts = {"腰"}
+    assert reasoning.without_degree_words_after_parts("我的腰好酸", parts) == "我的腰酸"
+    assert reasoning.without_degree_words_after_parts("腰真的很酸", parts) == "腰酸"
+    # Negation, other words or a long gap stay.
+    for text in ("我的腰不酸", "腰坐久了酸", "腰有點非常真的酸"):
+        assert reasoning.without_degree_words_after_parts(text, parts) == text
+    assert reasoning.without_degree_words_after_parts("額頭好痛", {"額頭", "頭"}) == "額頭痛"
+
+
+def test_a_degree_word_after_the_part_no_longer_hides_a_literal_concept():
+    # Real AI 2026-11-04: 「我的腰好酸」 was normalized to 「酸痛」 and the audit refused 「酸」→「腰部酸痛」,
+    # so 2 of 5 runs ended with no department although 「腰酸」 is official.
+    case = sore_waist("waist-literal", [extraction("腰", "腰", "body_part"), extraction("酸痛", "腰好酸")])
+    literal = reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)
+    assert WAIST and {(row["patient_source_text"], row["knowledge_concept"], row["dept_id"]) for row in literal} == {
+        ("腰好酸", "腰酸", dept) for dept in WAIST}
+
+
+def test_a_split_part_and_symptom_across_a_degree_word_match_literally_once():
+    case = sore_waist("waist-split", [extraction("腰", "腰", "body_part"), extraction("酸痛", "酸")])
+    literal = reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)
+    assert {(row["patient_source_text"], row["knowledge_concept"]) for row in literal} == {("腰好酸", "腰酸")}
+    assert {tuple(row["patient_source_parts"]) for row in literal} == {("腰", "酸")}
+
+
+def test_dropping_degree_words_keeps_the_inside_a_word_rule_and_negation():
+    case = sore_waist("forehead", [extraction("額頭", "額頭", "body_part"), extraction("疼痛", "額頭好痛")], "額頭好痛")
+    assert "頭痛" not in {row["knowledge_concept"] for row in reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)}
+    absent = extraction("酸痛", "腰不酸")
+    absent.assertion = "absent"
+    case = sore_waist("waist-absent", [extraction("腰", "腰", "body_part"), absent], "我的腰不酸")
+    assert reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS) == []
 
 
 class FlakyProvider(Provider):
@@ -226,6 +271,25 @@ def test_a_failed_ai_step_is_retried_once():
     retrieved = reason(split_buttock("buttock-retry"), FlakyProvider([("屁股好痛", "臀部疼痛", "same")]))
     assert {row["dept_id"] for row in retrieved} == REHAB
     assert reason(split_buttock("buttock-retry-twice"), FlakyProvider([("屁股好痛", "臀部疼痛", "same")], 2)) == []
+
+
+class Refused(Exception):
+    status_code = 402
+
+
+def test_a_refused_ai_request_is_not_retried():
+    class RefusedProvider(Provider):
+        calls = 0
+
+        async def __call__(self, prompt, *, purpose):
+            if purpose == "department_semantic_retrieval":
+                self.calls += 1
+                raise Refused
+            return await super().__call__(prompt, purpose=purpose)
+
+    provider = RefusedProvider([("屁股好痛", "臀部疼痛", "same")])
+    assert reason(split_buttock("buttock-refused"), provider) == []
+    assert provider.calls == 1
 
 
 def test_invalid_audit_part_view_is_ignored():
