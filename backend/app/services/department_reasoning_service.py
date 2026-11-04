@@ -19,7 +19,8 @@ from app.services import pediatric_routing as pediatric
 from app.services.ai_service import complete_runtime_json
 from app.services.confidence_scoring import ACCEPT_THRESHOLD
 from app.services.conversation_service import (
-    COMPANION_PENDING_INTENT, COMPANION_QUESTION_LIMIT, body_part_question, safety_screen_resolved,
+    COMPANION_PENDING_INTENT, COMPANION_QUESTION_LIMIT, NO_OFFICIAL_EVIDENCE_REASON, body_part_question,
+    safety_screen_resolved,
 )
 from app.services.department_knowledge import (
     canonical_department_id, load_department_knowledge, lookup_concept, normalize_concept, resolve_department_names,
@@ -876,7 +877,7 @@ async def reason_about_departments(case: TriageCase) -> None:
         ))
         retrieved = subject_filtered_evidence(case, retrieved)
         if not retrieved:
-            state.department_uncertainty_reason = "目前沒有可精確對應正式科別的官方症狀證據"
+            state.department_uncertainty_reason = NO_OFFICIAL_EVIDENCE_REASON
             apply_clue_decision(case, [], [], active)
             return
         payload = {

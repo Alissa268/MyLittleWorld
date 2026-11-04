@@ -272,3 +272,48 @@ def test_stuck_turn_after_choosing_continue_asks_an_open_question_not_a_retry(ru
 def test_registration_requests_are_described_to_the_turn_interpreter():
     prompt = adapter._build_symptom_collection_prompt(ambiguous_case(3, case_id="safety-net-prompt"), ["我要先掛號"])
     assert "「先決定掛號」" in prompt and "「我要先掛號」" in prompt
+
+
+def reasoning_outcome(department, *, reason=None, candidates=()):
+    """Mimic one department reasoning turn: its uncertainty reason and clue candidates."""
+    async def outcome(case, *args, **kwargs):
+        state = case.conversation_state
+        state.department_uncertainty_reason = reason
+        state.department_clue_candidates = list(candidates)
+    department.side_effect = outcome
+
+
+def test_no_candidate_at_all_asks_on_turn_three_and_only_once(runtime):
+    # 2026-11-04: 「舌頭痛」「屁股疼」 matched nothing in the knowledge base and were asked about for eight turns.
+    client, interpreter, _, department = runtime
+    reasoning_outcome(department, reason=cs.NO_OFFICIAL_EVIDENCE_REASON)
+    case = ambiguous_case(SETTINGS.safety_net_no_candidate_turn - 1)
+    asked = stall(client, interpreter, case)
+    assert asked["conversation_state"]["turn_count"] == SETTINGS.safety_net_no_candidate_turn
+    assert asked["next_question"] == cs.SAFETY_NET_QUESTION
+
+    choice(interpreter, "繼續描述", "continue")
+    post(client, case, "我想繼續描述")
+    for _ in range(SETTINGS.safety_net_no_candidate_turn + 2, ASK + 2):
+        assert stall(client, interpreter, case)["next_question"] != cs.SAFETY_NET_QUESTION
+
+
+def test_family_medicine_as_the_only_candidate_also_asks_on_turn_three(runtime):
+    client, interpreter, _, department = runtime
+    reasoning_outcome(department, candidates=[FAMILY])
+    case = ambiguous_case(SETTINGS.safety_net_no_candidate_turn - 1)
+    assert stall(client, interpreter, case)["next_question"] == cs.SAFETY_NET_QUESTION
+
+
+@pytest.mark.parametrize("reason,candidates", [
+    (None, [1274, FAMILY]),  # candidates that do not converge still wait for turn eight
+    ("正式科別主資料目前無法取得", []),  # SQL unavailable says nothing about the knowledge base
+    ("科別證據比對暫時無法完成", []),  # neither does a failed reasoning turn
+])
+def test_turn_three_is_only_for_a_knowledge_base_that_matched_nothing(runtime, reason, candidates):
+    client, interpreter, _, department = runtime
+    reasoning_outcome(department, reason=reason, candidates=candidates)
+    case = ambiguous_case(SETTINGS.safety_net_no_candidate_turn - 1)
+    result = stall(client, interpreter, case)
+    assert result["conversation_state"]["turn_count"] == SETTINGS.safety_net_no_candidate_turn
+    assert result["next_question"] != cs.SAFETY_NET_QUESTION

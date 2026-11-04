@@ -26,6 +26,8 @@ SAFETY_ANSWER_CAP = 3
 SAFETY_NET_PENDING_INTENT = "safety_net_choice"
 SAFETY_NET_QUESTION = "目前還沒辦法確定要看哪一科，要繼續描述，還是先掛家庭醫學科？"
 SAFETY_NET_REASONS = frozenset({"safety_net_choice", "safety_net_turn_cap", "user_declined_no_candidates"})
+# Set only when department reasoning ran and the knowledge base matched nothing the patient said.
+NO_OFFICIAL_EVIDENCE_REASON = "目前沒有可精確對應正式科別的官方症狀證據"
 BODY_PART_PENDING_INTENT = "symptom_body_part"
 # Only one target department: an open question can surface symptoms pointing elsewhere.
 COMPANION_PENDING_INTENT = "other_discomfort"
@@ -1173,7 +1175,9 @@ def advance_conversation(
         return
     # Stalled replies no longer end the case: consecutive_no_progress_turns never exceeds
     # turn_count, so a stalled case reaches this one-time question at the same turn.
-    if (not state.safety_net_asked and state.turn_count >= settings.safety_net_ask_turn
+    if (not state.safety_net_asked and (state.turn_count >= settings.safety_net_ask_turn
+                                         or (state.turn_count >= settings.safety_net_no_candidate_turn
+                                             and _knowledge_found_no_department(case)))
             and state.department_status != "resolved" and safety_screen_resolved(case)
             and state.pending_clue_question_index is None):
         _ask_safety_net_question(case)
@@ -1424,6 +1428,18 @@ def _ask_availability(case: TriageCase) -> None:
     case.triage.next_question = question
     case.triage.is_final = False
     case.triage.reasons.append("症狀資訊已完成，確認前詢問看診時間；時間不是醫療完成門檻。")
+
+
+def _knowledge_found_no_department(case: TriageCase) -> bool:
+    """Department reasoning ran and reached no candidate except family medicine (e.g. 「舌頭痛」).
+
+    A failed reasoning turn (SQL or AI unavailable) also leaves no candidates, so it never counts.
+    """
+    state = case.conversation_state
+    found = set(state.department_clue_candidates) | {item.dept_id for item in state.candidate_departments}
+    if found:
+        return not found - {get_settings().family_medicine_dept_id}
+    return state.department_uncertainty_reason == NO_OFFICIAL_EVIDENCE_REASON
 
 
 def _ask_safety_net_question(case: TriageCase) -> None:
