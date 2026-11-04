@@ -173,6 +173,19 @@ def _mark_span_parts(rows: list[dict], evidence: list[dict], case: TriageCase) -
     return rows
 
 
+# Words a shorter official concept can start inside of: 「頭痛」 in 「舌頭痛」, 「經痛」 in 「神經痛」,
+# 「背痛」 in 「手背痛」, 「肌炎」 in 「心肌炎」, 「囊腫」 in 「陰囊腫大」, 「頸痛」 in 「子宮頸痛」.
+_ENCLOSING_WORDS = ("舌頭", "骨頭", "指頭", "趾頭", "乳頭", "奶頭", "龜頭", "拳頭", "肩頭", "鼻頭", "喉頭",
+                    "手背", "腳背", "足背", "神經", "心肌", "陰囊", "子宮頸")
+
+
+def contains_concept(surface: str, concept: str) -> bool:
+    """A normalized concept occurs in the surface somewhere it does not start inside an enclosing word."""
+    inside = {start for word in _ENCLOSING_WORDS for at in range(len(surface))
+              if surface.startswith(word, at) for start in range(at + 1, at + len(word))}
+    return any(surface.startswith(concept, at) and at not in inside for at in range(len(surface)))
+
+
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
     """Match official concepts only against validated present semantic evidence."""
     resolved = {
@@ -198,7 +211,7 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         surfaces_by_source.setdefault(source, set()).update(retrieval_surfaces)
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
-            if not any(normalized_concept in surface for surface in retrieval_surfaces):
+            if not any(contains_concept(surface, normalized_concept) for surface in retrieval_surfaces):
                 continue
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["canonical_dept_id"])
@@ -217,7 +230,7 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         shorter |= {value for part in parts for value in surfaces_by_source.get(part, set())}
         for concept in concepts:
             normalized_concept = normalize_concept(concept)
-            if (normalized_concept not in surface or normalized_concept in contradicted
+            if (not contains_concept(surface, normalized_concept) or normalized_concept in contradicted
                     or any(normalized_concept in value for value in shorter)):
                 continue
             for record in lookup_concept(concept, records):
