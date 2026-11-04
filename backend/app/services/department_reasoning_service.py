@@ -347,8 +347,12 @@ async def retrieve_semantic_official_evidence(
         "（例『右耳痛』可對應『耳痛』）；但不同部位不可（例『舌頭痛』不是『頭痛』）。"
         "尤其『腫脹』不能自行當成已確認的『水腫』，『疼痛』不能自行加上『酸』或『麻』。"
         "不得因為概念可能與症狀有醫學關聯就保留，必須是這段原話實際表達的症狀。"
+        "另外逐筆標 body_part_match：概念寫的部位與原文部位是同一部位（同義說法或只少了左右側，"
+        "例『屁股』與『臀部』、『右耳』與『耳』）填 same；概念沒有寫部位（例『麻木』）填 none；"
+        "概念的部位比原文大或不同（例『大腿』對『下肢』）填 other。"
         "請逐筆判斷並解釋，不確定則 supported=false。不可新增或改寫連結。只回 JSON {\"judgments\":["
-        "{\"patient_source_text\":\"...\",\"knowledge_concept\":\"...\",\"supported\":true,\"reason\":\"依據\"}]}。\n"
+        "{\"patient_source_text\":\"...\",\"knowledge_concept\":\"...\",\"supported\":true,"
+        "\"body_part_match\":\"same\",\"reason\":\"依據\"}]}。\n"
         + json.dumps(dict(accepted_semantic_evidence=evidence, proposed_matches=links, **combined_payload),
                      ensure_ascii=False)
     )
@@ -357,7 +361,7 @@ async def retrieve_semantic_official_evidence(
         if not isinstance(audit, dict) or set(audit) != {"judgments"} or not isinstance(audit["judgments"], list):
             return []
         original = {(item["patient_source_text"], item["knowledge_concept"]) for item in links}
-        retained = set()
+        retained, part_match = set(), {}
         for item in audit["judgments"]:
             if not isinstance(item, dict):
                 continue
@@ -366,16 +370,20 @@ async def retrieve_semantic_official_evidence(
                     and item.get("supported") is True and isinstance(item.get("reason"), str)
                     and item["reason"].strip()):
                 retained.add((source, concept))
-        return _mark_span_parts(
-            [item for item in found.values() if (item["patient_source_text"], item["knowledge_concept"]) in retained],
-            evidence, case,
-        )
+                if item.get("body_part_match") in _BODY_PART_MATCHES:
+                    part_match[(source, concept)] = item["body_part_match"]
+        rows = [item for item in found.values() if (item["patient_source_text"], item["knowledge_concept"]) in retained]
+        for item in rows:
+            if (item["patient_source_text"], item["knowledge_concept"]) in part_match:
+                item["body_part_match"] = part_match[(item["patient_source_text"], item["knowledge_concept"])]
+        return _mark_span_parts(rows, evidence, case)
     except Exception as exc:
         logger.warning("retrieval entailment unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
         return []
 
 
 _MAX_SEMANTIC_LINKS = 50
+_BODY_PART_MATCHES = {"same", "none", "other"}
 
 
 def _present_normalized_values(evidence: list[dict]) -> set[str]:
@@ -430,6 +438,8 @@ def retained_semantic_official_evidence(
                 knowledge_concept=record["concept"], knowledge_evidence_text=record["evidence_text"],
                 source_priority=record["source_priority"],
             )
+            if link.body_part_match is not None:
+                found[key]["body_part_match"] = link.body_part_match
     state.semantic_official_links = kept
     return _mark_span_parts(list(found.values()), evidence, case)
 
@@ -488,6 +498,38 @@ def _chief_complaint(case: TriageCase, evidence: list[dict]) -> str:
                  if message.role == "user" and any(source in message.content for source in symptoms)), "")
 
 
+def chief_complaint_departments(case: TriageCase, rows: list[dict]) -> set[int]:
+    """Departments, family medicine aside, reached by evidence from the chief complaint message."""
+    chief = _chief_complaint(case, accepted_semantic_evidence(case))
+    return {row["dept_id"] for row in rows
+            if chief and row.get("evidence_origin") != clues.CLUE_ANSWER_ORIGIN
+            and row["patient_source_text"] in chief} - {get_settings().family_medicine_dept_id}
+
+
+_SIDE = re.compile(r"\A(?:左右|左|右|雙|兩)(?:邊|側)?")
+
+
+def part_bound_semantic_rows(case: TriageCase, rows: list[dict]) -> list[dict]:
+    """AI links that keep the body part the patient said.
+
+    A link stays when its concept contains the stated part without its side (「右耳」 is in
+    「耳痛」). Otherwise the audit's view decides: a wider or other part (「大腿有點酸」→「下肢酸痛」,
+    only 心臟外科) is refused even when the AI split off no part (「痛」 of 「我的屁股好痛」); the
+    same part (「屁股」 and 「臀部」) or a concept naming no part stays. Without that view, a link
+    stays only when the symptom has no stated part, which the subject filter then handles.
+    """
+    parts = _body_part_texts(case)
+    kept = []
+    for row in rows:
+        _, stated, _ = _symptom_subject(case, row["patient_source_text"], parts)
+        concept = normalize_concept(row["knowledge_concept"])
+        match = row.get("body_part_match")
+        if (any(normalize_concept(_SIDE.sub("", part) or part) in concept for part in stated)
+                or match in {"same", "none"} or (match is None and not stated)):
+            kept.append(row)
+    return kept
+
+
 def decision_candidates(case: TriageCase, retrieved: list[dict]) -> set[int]:
     """Candidates that may be recommended: those the chief complaint reached, when any did.
 
@@ -497,10 +539,7 @@ def decision_candidates(case: TriageCase, retrieved: list[dict]) -> set[int]:
     """
     candidates = clues.candidate_dept_ids(retrieved)
     family = get_settings().family_medicine_dept_id
-    chief = _chief_complaint(case, accepted_semantic_evidence(case))
-    reached = {row["dept_id"] for row in retrieved
-               if chief and row.get("evidence_origin") != clues.CLUE_ANSWER_ORIGIN
-               and row["patient_source_text"] in chief} - {family}
+    reached = chief_complaint_departments(case, retrieved)
     if not reached:
         return candidates
     off_complaint = candidates - reached - {family}
@@ -731,14 +770,17 @@ def _clue_answers(case: TriageCase) -> list[dict]:
 def remember_semantic_official_links(case: TriageCase, retrieved: list[dict]) -> None:
     """Persist audited (source, concept) pairs so later lexical hits cannot drop them."""
     state = case.conversation_state
-    known = {(link.patient_source_text, link.knowledge_concept) for link in state.semantic_official_links}
+    known = {(link.patient_source_text, link.knowledge_concept): link for link in state.semantic_official_links}
     for item in retrieved:
         pair = (item["patient_source_text"], item["knowledge_concept"])
-        if pair not in known:
-            known.add(pair)
-            state.semantic_official_links.append(SemanticOfficialLink(
-                patient_source_text=pair[0], knowledge_concept=pair[1],
-            ))
+        if pair in known:
+            # The latest audit's body-part view replaces an older one.
+            known[pair].body_part_match = item.get("body_part_match") or known[pair].body_part_match
+        else:
+            known[pair] = SemanticOfficialLink(
+                patient_source_text=pair[0], knowledge_concept=pair[1], body_part_match=item.get("body_part_match"),
+            )
+            state.semantic_official_links.append(known[pair])
     state.semantic_official_links = state.semantic_official_links[-_MAX_SEMANTIC_LINKS:]
 
 
@@ -869,6 +911,15 @@ async def reason_about_departments(case: TriageCase) -> None:
             retrieved, await retrieve_semantic_official_evidence(case, records, resolutions),
         )
         remember_semantic_official_links(case, semantic)
+        # Unless the chief complaint has official evidence without a widened body part, no AI
+        # link may widen one: the department would be guessed from the wider part alone.
+        bound = part_bound_semantic_rows(case, semantic), part_bound_semantic_rows(case, retained)
+        if not chief_complaint_departments(case, retrieved + bound[0] + bound[1]):
+            dropped = [row for row in semantic + retained if row not in bound[0] + bound[1]]
+            if dropped:
+                logger.info("part-bound semantic filter case_id=%s dropped=%s", case.case_id, sorted(
+                    {(row["dept_id"], row["patient_source_text"], row["knowledge_concept"]) for row in dropped}))
+            semantic, retained = bound
         retrieved = _merge_official_evidence(retrieved, semantic)
         retrieved = _merge_official_evidence(retrieved, retained)
         retrieved = _merge_official_evidence(retrieved, clues.clue_answer_evidence(

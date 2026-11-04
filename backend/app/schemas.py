@@ -306,6 +306,8 @@ class SemanticOfficialLink(BaseModel):
     # An audited semantic retrieval link; rebuilt into official evidence only while still grounded.
     patient_source_text: str
     knowledge_concept: str
+    # The audit's view of the concept's body part: same part, no part, or a wider/other part.
+    body_part_match: Optional[Literal["same", "none", "other"]] = None
 
 
 class ClueConceptRecord(BaseModel):
