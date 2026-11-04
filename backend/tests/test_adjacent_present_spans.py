@@ -88,7 +88,8 @@ def test_split_compound_phrase_reaches_department_convergence_payload():
 
 def test_body_part_and_touching_symptom_match_whole_concept():
     case = interpreted(("下背痛", [item("body_part", "下背", "下背"), item("symptom", "疼痛", "痛")]))
-    assert pairs(literal(case)) == {("下背痛", "下背痛"), ("下背痛", "背痛")}
+    # 「背痛」 starts inside the body part 下背 and inside 下背痛, so it is left to semantic retrieval.
+    assert pairs(literal(case)) == {("下背痛", "下背痛")}
 
 
 def test_concept_already_covered_by_shorter_chain_is_not_reanchored():

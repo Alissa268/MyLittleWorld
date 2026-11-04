@@ -173,17 +173,36 @@ def _mark_span_parts(rows: list[dict], evidence: list[dict], case: TriageCase) -
     return rows
 
 
-# Words a shorter official concept can start inside of: 「頭痛」 in 「舌頭痛」, 「經痛」 in 「神經痛」,
-# 「背痛」 in 「手背痛」, 「肌炎」 in 「心肌炎」, 「囊腫」 in 「陰囊腫大」, 「頸痛」 in 「子宮頸痛」.
-_ENCLOSING_WORDS = ("舌頭", "骨頭", "指頭", "趾頭", "乳頭", "奶頭", "龜頭", "拳頭", "肩頭", "鼻頭", "喉頭",
-                    "手背", "腳背", "足背", "神經", "心肌", "陰囊", "子宮頸")
+def _body_part_words(case: TriageCase) -> set[str]:
+    """Every validated body part the AI split off, as normalized source text and value."""
+    return {
+        normalize_concept(str(value))
+        for item in validated_semantic_evidence_history(case)
+        if item["field"] == "body_part" and item["semantic_status"] in {"available", "partial"}
+        for value in (item["source_text"], item["normalized_value"])
+        if isinstance(value, str) and len(value.strip()) > 1
+    }
 
 
-def contains_concept(surface: str, concept: str) -> bool:
-    """A normalized concept occurs in the surface somewhere it does not start inside an enclosing word."""
-    inside = {start for word in _ENCLOSING_WORDS for at in range(len(surface))
-              if surface.startswith(word, at) for start in range(at + 1, at + len(word))}
-    return any(surface.startswith(concept, at) and at not in inside for at in range(len(surface)))
+def literal_concepts(surface: str, concepts: dict[str, str], body_parts: set[str]) -> set[str]:
+    """Official concepts in a normalized surface, except where one starts inside a word.
+
+    A concept starting inside an AI body part (「頭痛」 in 「舌頭」痛, also 「耳痛」 in 「右耳」痛) or
+    inside a longer official concept found there (「經痛」 in 「坐骨神經痛」) is not a literal match;
+    semantic retrieval, where the AI judges the meaning, can still link it.
+    ``concepts`` maps normalized concept to official concept.
+    """
+    positions = {key: [at for at in range(len(surface)) if surface.startswith(key, at)] for key in concepts}
+    positions = {key: starts for key, starts in positions.items() if starts}
+    cut = {start for word in body_parts for at in range(len(surface)) if surface.startswith(word, at)
+           for start in range(at + 1, at + len(word))}
+
+    def inside_longer(key: str, at: int) -> bool:
+        return any(len(other) > len(key) and start < at and at + len(key) <= start + len(other)
+                   for other, starts in positions.items() for start in starts)
+
+    return {concepts[key] for key, starts in positions.items()
+            if any(at not in cut and not inside_longer(key, at) for at in starts)}
 
 
 def retrieve_official_evidence(case: TriageCase, records: list[dict], resolutions: list[dict]) -> list[dict]:
@@ -192,7 +211,8 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         entry["canonical_dept_id"]: entry
         for entry in resolutions if entry["status"] == "resolved"
     }
-    concepts = {record["concept"] for record in records}
+    concepts = {normalize_concept(record["concept"]): record["concept"] for record in records}
+    body_parts = _body_part_words(case)
     found: dict[tuple[int, str, str, str], dict] = {}
     evidence_items = accepted_semantic_evidence(case)
     surfaces_by_source: dict[str, set[str]] = {}
@@ -209,10 +229,8 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
             if isinstance(value, str) and value.strip()
         }
         surfaces_by_source.setdefault(source, set()).update(retrieval_surfaces)
-        for concept in concepts:
-            normalized_concept = normalize_concept(concept)
-            if not any(contains_concept(surface, normalized_concept) for surface in retrieval_surfaces):
-                continue
+        matched = set().union(*(literal_concepts(surface, concepts, body_parts) for surface in retrieval_surfaces))
+        for concept in matched:
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["canonical_dept_id"])
                 if resolution is None:
@@ -228,10 +246,9 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
         surface = normalize_concept(fragment)
         shorter = {normalize_concept(fragment[len(parts[0]):]), normalize_concept(fragment[:-len(parts[-1])])}
         shorter |= {value for part in parts for value in surfaces_by_source.get(part, set())}
-        for concept in concepts:
+        for concept in literal_concepts(surface, concepts, body_parts):
             normalized_concept = normalize_concept(concept)
-            if (not contains_concept(surface, normalized_concept) or normalized_concept in contradicted
-                    or any(normalized_concept in value for value in shorter)):
+            if normalized_concept in contradicted or any(normalized_concept in value for value in shorter):
                 continue
             for record in lookup_concept(concept, records):
                 resolution = resolved.get(record["canonical_dept_id"])
@@ -325,6 +342,8 @@ async def retrieve_semantic_official_evidence(
         + ("錨點若列在 combined_present_source_texts，是多段相接 present evidence 合成的整段原文，"
            "應以整段原話判斷，而非只看其中一段；" if combined else "") +
         "必須一起參考 evidence 的 body_part，不能因為錨點只有『疼痛』而忽略已提供的疼痛部位。"
+        "概念的部位可以是原文部位的解剖學上位部位：少了左右側或更細的位置不算改變含義"
+        "（例『右耳痛』可對應『耳痛』）；但不同部位不可（例『舌頭痛』不是『頭痛』）。"
         "尤其『腫脹』不能自行當成已確認的『水腫』，『疼痛』不能自行加上『酸』或『麻』。"
         "不得因為概念可能與症狀有醫學關聯就保留，必須是這段原話實際表達的症狀。"
         "請逐筆判斷並解釋，不確定則 supported=false。不可新增或改寫連結。只回 JSON {\"judgments\":["
