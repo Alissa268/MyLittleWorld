@@ -161,8 +161,8 @@ def test_a_split_body_part_is_shortlisted_with_its_symptom():
     with patch.object(reasoning.concept_shortlist, "shortlist", new=shortlist):
         retrieved = reason(case, Provider([("痛", "臀部疼痛", "same")]))
     # 「屁股」 still counts after 「大腿」 replaced it as the current part; only part and symptom of
-    # one message are joined, and 「大腿有點酸」 already holds its part.
-    assert set(queries[0]) - {"痛", "疼痛", "大腿有點酸", "酸"} == {"屁股痛"}
+    # one message are joined, and 「大腿有點酸」 already holds its part. 「屁股好痛」 is the degree-word anchor.
+    assert set(queries[0]) - {"痛", "疼痛", "大腿有點酸", "酸"} == {"屁股痛", "屁股好痛"}
     # The anchor stays the patient's own 「痛」.
     assert REHAB and {(row["patient_source_text"], row["dept_id"]) for row in retrieved} == {("痛", dept) for dept in REHAB}
 
@@ -170,6 +170,62 @@ def test_a_split_body_part_is_shortlisted_with_its_symptom():
 def test_touching_part_and_symptom_add_no_joined_query():
     case = sore_buttock("buttock-touching")
     assert reasoning.part_symptom_queries(case, reasoning.accepted_semantic_evidence(case)) == set()
+
+
+def split_buttock(case_id):
+    return sore_buttock(case_id, chief_extractions=[extraction("屁股", "屁股", "body_part"), extraction("疼痛", "痛")])
+
+
+def test_a_degree_word_between_part_and_symptom_gives_one_verbatim_anchor():
+    # Replay 2026-11-04: with 「屁股」 and 「痛」 split, both AI steps saw only 「痛」, so retrieval
+    # wrote the non-verbatim 「屁股痛」 and the audit refused 「原文只說痛」.
+    retrieved = reason(split_buttock("buttock-bridge"), Provider([("屁股好痛", "臀部疼痛", "same")]))
+    assert REHAB and {(row["patient_source_text"], row["dept_id"]) for row in retrieved} == {
+        ("屁股好痛", dept) for dept in REHAB}
+    # Scored once, as its two parts.
+    assert {tuple(row["patient_source_parts"]) for row in retrieved} == {("屁股", "痛")}
+
+
+def test_the_degree_word_anchor_is_kept_on_later_turns():
+    case = split_buttock("buttock-bridge-retained")
+    case.conversation_state.semantic_official_links = [
+        SemanticOfficialLink(patient_source_text="屁股好痛", knowledge_concept="臀部疼痛", body_part_match="same")]
+    assert {row["dept_id"] for row in reason(case, Provider([]))} == REHAB
+
+
+def test_only_degree_words_bridge_a_part_and_a_symptom():
+    evidence = [extraction("屁股", "屁股", "body_part"), extraction("疼痛", "痛")]
+    evidence = [item.model_dump() for item in evidence]
+
+    def bridged(text):
+        return [fragment for fragment, _ in reasoning.adjacent_present_spans([text], evidence, bridge_degree_words=True)]
+
+    assert bridged("我的屁股好痛") == ["屁股好痛"]
+    assert bridged("屁股真的很痛") == ["屁股真的很痛"]
+    # A clause break, another word or a long gap is no bridge.
+    assert bridged("屁股，好痛") == bridged("屁股坐久了痛") == bridged("屁股有點非常真的痛") == []
+    # Literal matching keeps joining touching spans only.
+    assert reasoning.adjacent_present_spans(["我的屁股好痛"], evidence) == []
+
+
+class FlakyProvider(Provider):
+    """The first call for each AI step fails, as when Cerebras does not answer."""
+
+    def __init__(self, links, failures=1):
+        super().__init__(links)
+        self.failures = {"department_semantic_retrieval": failures, "department_retrieval_entailment": failures}
+
+    async def __call__(self, prompt, *, purpose):
+        if self.failures.get(purpose):
+            self.failures[purpose] -= 1
+            raise TimeoutError
+        return await super().__call__(prompt, purpose=purpose)
+
+
+def test_a_failed_ai_step_is_retried_once():
+    retrieved = reason(split_buttock("buttock-retry"), FlakyProvider([("屁股好痛", "臀部疼痛", "same")]))
+    assert {row["dept_id"] for row in retrieved} == REHAB
+    assert reason(split_buttock("buttock-retry-twice"), FlakyProvider([("屁股好痛", "臀部疼痛", "same")], 2)) == []
 
 
 def test_invalid_audit_part_view_is_ignored():

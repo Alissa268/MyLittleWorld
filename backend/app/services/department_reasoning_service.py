@@ -117,19 +117,30 @@ def accepted_semantic_evidence(case: TriageCase) -> list[dict]:
     return effective_semantic_evidence(case)
 
 
-def adjacent_present_spans(user_texts: list[str], evidence: list[dict]) -> list[tuple[str, tuple[str, ...]]]:
+_DEGREE_WORDS = re.compile("(?:有點|有些|非常|真的|一直|特別|比較|好|很|超|蠻|滿|太|也|還|都|會)+")
+_MAX_DEGREE_GAP = 4
+
+
+def adjacent_present_spans(
+    user_texts: list[str], evidence: list[dict], *, bridge_degree_words: bool = False,
+) -> list[tuple[str, tuple[str, ...]]]:
     """Join validated spans that touch in one message, using only AI-grounded source_text.
 
     Parts are present symptom spans and body_part spans; absent/uncertain spans never take
     part. A span found more than once in a message has no certain position there, so it is
     skipped for that message. Each result is ``(verbatim fragment, part sources)`` and
     contains at least one present symptom span.
+
+    ``bridge_degree_words`` also joins a body part to a symptom span when only degree words
+    sit between them (「屁股」好「痛」 → 「屁股好痛」), for semantic retrieval anchors only:
+    the fragment is still the patient's verbatim wording, and literal matching keeps touching spans.
     """
     symptom_sources = _present_sources(evidence)
-    part_sources = symptom_sources | {
+    body_sources = {
         item["source_text"] for item in evidence
         if item["field"] == "body_part" and item["semantic_status"] in {"available", "partial"}
     }
+    part_sources = symptom_sources | body_sources
     merged: dict[str, tuple[str, ...]] = {}
     for text in user_texts:
         starts: dict[int, list[str]] = {}
@@ -137,17 +148,33 @@ def adjacent_present_spans(user_texts: list[str], evidence: list[dict]) -> list[
             if text.count(source) == 1:
                 starts.setdefault(text.index(source), []).append(source)
 
-        def extend(end: int, chain: tuple[str, ...]) -> None:
-            for source in sorted(starts.get(end, [])):
+        def extend(begin: int, end: int, chain: tuple[str, ...]) -> None:
+            following = [(end, source) for source in sorted(starts.get(end, []))]
+            if bridge_degree_words and chain[-1] in body_sources:
+                gap = _DEGREE_WORDS.match(text, end)
+                if gap and gap.end() - end <= _MAX_DEGREE_GAP:
+                    following += [(gap.end(), source) for source in sorted(starts.get(gap.end(), []))
+                                  if source in symptom_sources]
+            for at, source in following:
                 longer = chain + (source,)
                 if any(part in symptom_sources for part in longer):
-                    merged.setdefault(text[end - sum(map(len, chain)):end + len(source)], longer)
-                extend(end + len(source), longer)
+                    merged.setdefault(text[begin:at + len(source)], longer)
+                extend(begin, at + len(source), longer)
 
         for start, sources in sorted(starts.items()):
             for source in sorted(sources):
-                extend(start + len(source), (source,))
+                extend(start, start + len(source), (source,))
     return list(merged.items())
+
+
+def semantic_anchor_spans(case: TriageCase, evidence: list[dict]) -> list[tuple[str, tuple[str, ...]]]:
+    """Joined fragments a semantic link may anchor on: touching spans and degree-word bridges.
+
+    Every stated body part counts, not only the latest one, so 「屁股好痛」 stays an anchor
+    after 「大腿」 became the current part.
+    """
+    parts = [item for item in validated_semantic_evidence_history(case) if item["field"] == "body_part"]
+    return adjacent_present_spans(_user_texts(case), [*evidence, *parts], bridge_degree_words=True)
 
 
 def part_symptom_queries(case: TriageCase, evidence: list[dict]) -> set[str]:
@@ -182,7 +209,7 @@ def _official_row(resolution: dict, source: str, record: dict) -> dict:
 def _mark_span_parts(rows: list[dict], evidence: list[dict], case: TriageCase) -> list[dict]:
     """Tag rows anchored on a joined fragment with its parts so scoring counts it once."""
     plain = _present_sources(evidence)
-    spans = {fragment: parts for fragment, parts in adjacent_present_spans(_user_texts(case), evidence)
+    spans = {fragment: parts for fragment, parts in semantic_anchor_spans(case, evidence)
              if fragment not in plain}
     for row in rows:
         if row["patient_source_text"] in spans:
@@ -276,12 +303,21 @@ def retrieve_official_evidence(case: TriageCase, records: list[dict], resolution
     return _mark_span_parts(list(found.values()), evidence_items, case)
 
 
+async def _complete_with_retry(prompt: str, purpose: str, case: TriageCase) -> str:
+    """Retry once when the AI call itself fails; an answer that breaks the rules is not retried."""
+    try:
+        return await complete_runtime_json(prompt, purpose=purpose)
+    except Exception as exc:
+        logger.warning("%s retrying case_id=%s error_type=%s", purpose, case.case_id, type(exc).__name__)
+        return await complete_runtime_json(prompt, purpose=purpose)
+
+
 async def retrieve_semantic_official_evidence(
     case: TriageCase, records: list[dict], resolutions: list[dict],
 ) -> list[dict]:
     """Bridge wording to the existing official catalog, never invent routing data."""
     evidence = accepted_semantic_evidence(case)
-    combined = [fragment for fragment, _ in adjacent_present_spans(_user_texts(case), evidence)]
+    combined = [fragment for fragment, _ in semantic_anchor_spans(case, evidence)]
     present_sources = _present_sources(evidence) | set(combined)
     # Only sent when present, so prompts for single-span evidence stay unchanged.
     combined_payload = dict(combined_present_source_texts=combined) if combined else {}
@@ -315,7 +351,7 @@ async def retrieve_semantic_official_evidence(
                      ensure_ascii=False)
     )
     try:
-        proposal = json.loads((await complete_runtime_json(prompt, purpose="department_semantic_retrieval")).strip())
+        proposal = json.loads((await _complete_with_retry(prompt, "department_semantic_retrieval", case)).strip())
     except Exception as exc:
         logger.warning("semantic retrieval unavailable case_id=%s error_type=%s", case.case_id, type(exc).__name__)
         return []
@@ -373,7 +409,7 @@ async def retrieve_semantic_official_evidence(
                      ensure_ascii=False)
     )
     try:
-        audit = json.loads((await complete_runtime_json(audit_prompt, purpose="department_retrieval_entailment")).strip())
+        audit = json.loads((await _complete_with_retry(audit_prompt, "department_retrieval_entailment", case)).strip())
         if not isinstance(audit, dict) or set(audit) != {"judgments"} or not isinstance(audit["judgments"], list):
             return []
         original = {(item["patient_source_text"], item["knowledge_concept"]) for item in links}
@@ -430,9 +466,7 @@ def retained_semantic_official_evidence(
     """
     state = case.conversation_state
     evidence = accepted_semantic_evidence(case)
-    present_sources = _present_sources(evidence) | {
-        fragment for fragment, _ in adjacent_present_spans(_user_texts(case), evidence)
-    }
+    present_sources = _present_sources(evidence) | {fragment for fragment, _ in semantic_anchor_spans(case, evidence)}
     contradicted = _contradicted_concepts(evidence)
     resolved = {item["canonical_dept_id"]: item for item in resolutions if item["status"] == "resolved"}
     kept, found = [], {}

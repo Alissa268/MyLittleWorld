@@ -98,5 +98,7 @@ def test_semantic_failure_keeps_the_literal_result():
     literal = reasoning.retrieve_official_evidence(case, RECORDS, RESOLUTIONS)
     provider = Provider([("眼睛紅紅的很癢", "眼睛癢")], fail_semantic=True)
     assert reason(case, provider) == literal
-    assert provider.purposes == ["department_semantic_retrieval", "department_convergence"]
+    # A failed call is retried once before semantic retrieval is given up.
+    assert provider.purposes == ["department_semantic_retrieval", "department_semantic_retrieval",
+                                 "department_convergence"]
     assert case.conversation_state.semantic_official_links == []
