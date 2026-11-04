@@ -27,6 +27,9 @@ class Settings(BaseSettings):
     cerebras_api_key: str = Field(default="", alias="CEREBRAS_API_KEY")
     cerebras_model: Literal["gpt-oss-120b"] = Field(default="gpt-oss-120b", alias="CEREBRAS_MODEL")
     ai_timeout_seconds: float = Field(default=8.0, alias="AI_TIMEOUT_SECONDS")
+    # true＝所有 Cerebras 呼叫都用 temperature=0＋固定 seed（同一句話盡量得到同一個答案）；
+    # false＝只有醫師專長評分固定，其他呼叫用供應商預設溫度
+    ai_temperature_zero: bool = Field(default=True, alias="AI_TEMPERATURE_ZERO")
     ai_reply_generation_enabled: bool = Field(default=False, alias="AI_REPLY_GENERATION_ENABLED")
     ai_reply_timeout_seconds: float = Field(default=20.0, alias="AI_REPLY_TIMEOUT_SECONDS")
     ai_doctor_scoring_enabled: bool = Field(default=False, alias="AI_DOCTOR_SCORING_ENABLED")

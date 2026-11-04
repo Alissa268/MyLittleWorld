@@ -232,7 +232,7 @@ async def _complete_cerebras(
         }
         if json_mode:
             request["response_format"] = {"type": "json_object"}
-        if deterministic:
+        if deterministic or getattr(settings, "ai_temperature_zero", True):
             # Same prompt, same answer as far as the provider allows.
             request["temperature"] = 0
             request["seed"] = DETERMINISTIC_SEED

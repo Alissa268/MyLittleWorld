@@ -64,16 +64,36 @@ class CerebrasRuntimeContractTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(ai_service.RUNTIME_AI_MODEL, "gpt-oss-120b")
 
-    async def test_deterministic_request_fixes_temperature_and_seed_only_when_asked(self):
+    async def test_every_request_fixes_temperature_and_seed_by_default(self):
         reply = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))])
         create = AsyncMock(return_value=reply)
         client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        settings = _settings()
+        settings.ai_temperature_zero = True
         with patch.object(ai_service, "_cerebras_client", client):
-            await ai_service._complete_cerebras("p", _settings(), json_mode=True, deterministic=True)
-            await ai_service._complete_cerebras("p", _settings(), json_mode=True)
+            await ai_service._complete_cerebras("p", settings, json_mode=True)
+
+        request = create.await_args.kwargs
+        self.assertEqual(request["temperature"], 0)
+        self.assertEqual(request["seed"], ai_service.DETERMINISTIC_SEED)
+
+    async def test_switch_off_keeps_temperature_zero_only_when_asked(self):
+        reply = SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(content='{"ok":true}'))])
+        create = AsyncMock(return_value=reply)
+        client = SimpleNamespace(chat=SimpleNamespace(completions=SimpleNamespace(create=create)))
+        settings = _settings()
+        settings.ai_temperature_zero = False
+        with patch.object(ai_service, "_cerebras_client", client):
+            await ai_service._complete_cerebras("p", settings, json_mode=True, deterministic=True)
+            await ai_service._complete_cerebras("p", settings, json_mode=True)
 
         deterministic, default = (call.kwargs for call in create.await_args_list)
         self.assertEqual(deterministic["temperature"], 0)
         self.assertEqual(deterministic["seed"], ai_service.DETERMINISTIC_SEED)
         self.assertNotIn("temperature", default)
         self.assertNotIn("seed", default)
+
+    def test_temperature_zero_is_the_configured_default(self):
+        from app.config import Settings
+
+        self.assertTrue(Settings.model_fields["ai_temperature_zero"].default)
