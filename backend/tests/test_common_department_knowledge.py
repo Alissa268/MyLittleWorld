@@ -57,7 +57,8 @@ def test_common_complaints_reach_the_listed_specialties():
     assert literal_departments("流鼻血") == {"鼻科"}
     assert literal_departments("耳朵疼痛") == {"耳科"}
     assert literal_departments("天旋地轉") == {"神經內科", "耳科"}
-    assert literal_departments("手腳麻木") == {"神經內科", "神經外科"}
+    # 臺北榮總復健醫學部 doctors list 手腳麻木 too (醫師及專長查詢, 2026-11-04).
+    assert literal_departments("手腳麻木") == {"神經內科", "神經外科", "復健醫學"}
     # 屏東榮總「該看哪一科?」lists 解尿困難 under 婦產科 and 腎臟科 too (2026-11-04).
     assert literal_departments("解尿困難") == {"泌尿外科", "婦產科", "腎臟科"}
     assert literal_departments("眼屎很多") == {"眼科"}
@@ -65,6 +66,22 @@ def test_common_complaints_reach_the_listed_specialties():
     # plain numbness is not a 心臟外科 symptom there), mapped onto existing departments.
     assert literal_departments("乳房脹痛") == {"婦產科", "一般外科"}
     assert literal_departments("周邊血管阻塞") == {"心臟外科"}
+
+
+def test_vghtpe_doctor_keywords_cover_buttock_and_elbow_pain_without_new_clues():
+    # Taipei VGH 醫師及專長查詢, full department lists (2026-11-04): 復健醫學部 lists 臀部疼痛 and 手肘疼痛.
+    assert literal_departments("臀部疼痛") == {"復健醫學"}
+    assert literal_departments("手肘疼痛") == {"復健醫學"}
+    path = KNOWLEDGE_DIR / "supplemental_guidance_20261104_vghtpe_docsearch_full.json"
+    data = json.loads(path.read_text(encoding="utf-8"))
+    for source in data["sources"]:
+        assert source["source_url"].startswith("https://www.vghtpe.gov.tw/docsearch.action?more=")
+    locked = {"頭痛", "頭暈", "胸痛", "胸悶", "心悸", "咳嗽", "發燒", "腹瀉", "腹痛", "拉肚子", "肚子痛"}
+    for record in data["records"]:
+        # Doctor specialties only score; they never become clue questions.
+        assert record["evidence_type"] == "department_specialty_evidence"
+        assert record["department_name"] != "家庭醫學科(一般門診/戒菸)"
+        assert record["concept"] not in locked
 
 
 def test_departments_awaiting_a_310_decision_are_not_mapped():
