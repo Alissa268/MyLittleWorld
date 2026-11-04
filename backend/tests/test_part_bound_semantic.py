@@ -19,6 +19,7 @@ COLORECTAL = {record["canonical_dept_id"] for record in lookup_concept("臀部�
 NUMB = {record["canonical_dept_id"] for record in lookup_concept("麻木", RECORDS)}
 EAR = {record["canonical_dept_id"] for record in lookup_concept("耳痛", RECORDS)}
 DIZZY = {record["canonical_dept_id"] for record in lookup_concept("頭暈", RECORDS)}
+REHAB = {record["canonical_dept_id"] for record in lookup_concept("臀部疼痛", RECORDS)}
 
 
 def extraction(value, source, field="symptom"):
@@ -144,6 +145,31 @@ def test_a_chief_complaint_with_official_evidence_keeps_widened_links():
     assert ("大腿有點酸", "下肢酸痛") in {(row["patient_source_text"], row["knowledge_concept"]) for row in retrieved}
     # The chief complaint filter still keeps a department that does not see 頭暈 out of the decision.
     assert not (CARDIAC - DIZZY) & set(case.conversation_state.department_clue_candidates)
+
+
+def test_a_split_body_part_is_shortlisted_with_its_symptom():
+    # Replay 2026-11-04: 「我的屁股好痛」 split into 「屁股」 and 「痛」 was shortlisted from 「痛」 alone,
+    # so 「臀部疼痛」 (Taipei VGH 復健醫學部 doctors) never reached the AI.
+    case = sore_buttock("buttock-split", chief_extractions=[extraction("屁股", "屁股", "body_part"),
+                                                            extraction("疼痛", "痛")])
+    queries = []
+
+    async def shortlist(texts, catalog):
+        queries.append(texts)
+        return None
+
+    with patch.object(reasoning.concept_shortlist, "shortlist", new=shortlist):
+        retrieved = reason(case, Provider([("痛", "臀部疼痛", "same")]))
+    # 「屁股」 still counts after 「大腿」 replaced it as the current part; only part and symptom of
+    # one message are joined, and 「大腿有點酸」 already holds its part.
+    assert set(queries[0]) - {"痛", "疼痛", "大腿有點酸", "酸"} == {"屁股痛"}
+    # The anchor stays the patient's own 「痛」.
+    assert REHAB and {(row["patient_source_text"], row["dept_id"]) for row in retrieved} == {("痛", dept) for dept in REHAB}
+
+
+def test_touching_part_and_symptom_add_no_joined_query():
+    case = sore_buttock("buttock-touching")
+    assert reasoning.part_symptom_queries(case, reasoning.accepted_semantic_evidence(case)) == set()
 
 
 def test_invalid_audit_part_view_is_ignored():

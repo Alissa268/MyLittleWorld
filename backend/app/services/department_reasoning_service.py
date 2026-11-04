@@ -150,6 +150,22 @@ def adjacent_present_spans(user_texts: list[str], evidence: list[dict]) -> list[
     return list(merged.items())
 
 
+def part_symptom_queries(case: TriageCase, evidence: list[dict]) -> set[str]:
+    """Each stated body part joined with each present symptom span of the same message.
+
+    For the concept shortlist only: adjacent_present_spans joins spans that touch, so
+    「我的屁股好痛」 split into 「屁股」 and 「痛」 was shortlisted from 「痛」 alone and
+    never offered 「臀部疼痛」. Every stated part counts, not only the latest one. The
+    joined text is not the patient's wording, so it never becomes an evidence anchor.
+    """
+    symptoms = _present_sources(evidence)
+    parts = _body_part_texts(case)
+    return {
+        part + symptom for text in _user_texts(case) for part in parts if part in text
+        for symptom in symptoms if symptom in text and part not in symptom
+    }
+
+
 def _official_row(resolution: dict, source: str, record: dict) -> dict:
     return {
         "dept_id": resolution["db_dept_id"],
@@ -276,9 +292,9 @@ async def retrieve_semantic_official_evidence(
         return []
     # Only the concepts closest to the patient's words go to the AI, so the prompt
     # does not grow with the knowledge base; without the local model, the whole catalog.
-    catalog = await concept_shortlist.shortlist(
-        sorted(present_sources | _present_normalized_values(evidence)), catalog,
-    ) or catalog
+    # A body part is searched together with its symptom even when other words sit between them.
+    queries = present_sources | _present_normalized_values(evidence) | part_symptom_queries(case, evidence)
+    catalog = await concept_shortlist.shortlist(sorted(queries), catalog) or catalog
     prompt = (
         "你只做官方知識詞彙的語意檢索，不決定科別、診斷或流程。"
         "依 accepted_semantic_evidence 中的症狀、部位、伴隨情況與否定證據，"
