@@ -279,3 +279,48 @@ def _now() -> datetime:
 
 def _row(schedule_id: str, value: str, session: str) -> dict:
     return {"schedule_id": schedule_id, "date": value, "session": session}
+
+
+TOMORROW_TEXT = "明天下午可以，後天不行"
+
+
+def test_relative_day_is_counted_from_the_backend_date():
+    proposals = [
+        {"kind": "relative_day", "relation": "prefer", "priority": 1, "day_offset": 1, "source_text": "明天", "confidence": 0.99},
+        {"kind": "relative_day", "relation": "exclude", "priority": None, "day_offset": 2, "source_text": "後天不行", "confidence": 0.99},
+    ]
+    accepted = validate_and_resolve_time_preferences(
+        proposals, user_sources=[TOMORROW_TEXT], reference_date=date(2026, 11, 4)
+    )
+    assert [item.resolved_dates for item in accepted] == [["2026-11-05"], ["2026-11-06"]]
+    across_year = validate_and_resolve_time_preferences(
+        proposals[:1], user_sources=[TOMORROW_TEXT], reference_date=date(2026, 12, 31)
+    )
+    assert across_year[0].resolved_dates == ["2027-01-01"]
+
+
+def test_relative_date_without_a_value_is_still_rejected():
+    # 310: the AI sent 「明天」 as kind=date with no date_value, and the date was lost.
+    proposal = [{"kind": "date", "relation": "prefer", "priority": 1, "source_text": "明天", "confidence": 0.99}]
+    assert validate_and_resolve_time_preferences(
+        proposal, user_sources=[TOMORROW_TEXT], reference_date=date(2026, 11, 4)
+    ) == []
+
+
+def test_relative_day_answers_the_date_dimension():
+    from app.services.conversation_service import availability_dimension_has_data
+
+    case = TriageCase(case_id="relative-day-dimension")
+    case.availability.time_preferences = validate_and_resolve_time_preferences(
+        [{"kind": "relative_day", "relation": "prefer", "priority": 1, "day_offset": 1, "source_text": "明天", "confidence": 0.99}],
+        user_sources=[TOMORROW_TEXT], reference_date=date(2026, 11, 4),
+    )
+    assert availability_dimension_has_data(case, "date")
+
+
+def test_turn_interpreter_prompt_teaches_relative_day():
+    case = TriageCase(case_id="relative-day-prompt")
+    prompt = rag_triage_adapter._build_symptom_collection_prompt(case, [TOMORROW_TEXT])
+    assert "kind=relative_day" in prompt
+    assert '"kind":"relative_day","relation":"prefer","priority":1,"day_offset":1' in prompt
+    assert '"kind":"relative_day","relation":"exclude","priority":null,"day_offset":2' in prompt

@@ -33,7 +33,7 @@ SESSION_VALUE = {
     "evening": "晚上",
 }
 DATE_KINDS = frozenset({
-    "date", "date_range", "relative_week", "relative_weekday", "weekday", "weekday_group",
+    "date", "date_range", "relative_day", "relative_week", "relative_weekday", "weekday", "weekday_group",
 })
 _PROPOSAL_KEYS = {
     "kind",
@@ -44,6 +44,7 @@ _PROPOSAL_KEYS = {
     "date_value",
     "start_date",
     "end_date",
+    "day_offset",
     "week_offset",
     "weekday",
     "weekdays",
@@ -247,6 +248,8 @@ def _resolve_dates(preference: TimePreference, reference_date: date) -> list[dat
         start = date.fromisoformat(preference.start_date or "")
         end = date.fromisoformat(preference.end_date or "")
         return [start + timedelta(days=offset) for offset in range((end - start).days + 1)]
+    if preference.kind == "relative_day":
+        return [reference_date + timedelta(days=preference.day_offset or 0)]
     if preference.kind in {"relative_week", "relative_weekday"}:
         monday = reference_date - timedelta(days=reference_date.weekday())
         week_start = monday + timedelta(weeks=preference.week_offset or 0)
@@ -312,6 +315,7 @@ def _preference_identity(preference: TimePreference) -> tuple[Any, ...]:
         preference.date_value,
         preference.start_date,
         preference.end_date,
+        preference.day_offset,
         preference.week_offset,
         preference.weekday,
         tuple(preference.weekdays),

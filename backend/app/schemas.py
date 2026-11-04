@@ -45,6 +45,7 @@ TTASEvaluationStatus = Literal["matched", "insufficient_information"]
 TimePreferenceKind = Literal[
     "date",
     "date_range",
+    "relative_day",
     "relative_week",
     "relative_weekday",
     "weekday",
@@ -219,6 +220,8 @@ class TimePreference(BaseModel):
     date_value: Optional[str] = None
     start_date: Optional[str] = None
     end_date: Optional[str] = None
+    # 今天 0、明天 1、後天 2…；Backend 以當輪台北日期換算
+    day_offset: Optional[int] = Field(default=None, ge=0, le=90)
     week_offset: Optional[int] = Field(default=None, ge=0, le=52)
     weekday: Optional[TimePreferenceWeekday] = None
     weekdays: List[TimePreferenceWeekday] = Field(default_factory=list)
@@ -254,6 +257,7 @@ class TimePreference(BaseModel):
         required = {
             "date": bool(self.date_value),
             "date_range": bool(self.start_date and self.end_date),
+            "relative_day": self.day_offset is not None,
             "relative_week": self.week_offset is not None,
             "relative_weekday": self.week_offset is not None and self.weekday is not None,
             "weekday": self.weekday is not None,

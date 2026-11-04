@@ -146,3 +146,12 @@ def test_accepted_time_preferences_are_logged_with_their_rank(caplog):
     line = next(record.getMessage() for record in caplog.records if "time preferences" in record.getMessage())
     assert "case_id=time-log proposed=2" in line
     assert '"priority": 1, "target": "wednesday", "dates": ["2026-11-11"], "source": "最好下週三"' in line
+
+
+def test_tomorrow_and_day_after_show_backend_dates():
+    text = "明天下午可以，後天不行"
+    assert summary(text, [
+        pref("relative_day", "prefer", "明天", day_offset=1),
+        pref("session", "prefer", "下午可以", session="afternoon"),
+        pref("relative_day", "exclude", "後天不行", day_offset=2),
+    ], today=WEDNESDAY) == "就醫時間偏好：11 月 5 日（週四）下午；11 月 6 日（週五）不方便。"

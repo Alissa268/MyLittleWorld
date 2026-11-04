@@ -73,7 +73,7 @@ def _log_time_preferences(case_id: str, proposed: object, accepted: list[TimePre
         "time preferences case_id=%s proposed=%s accepted=%s",
         case_id, len(proposed) if isinstance(proposed, list) else 0,
         json.dumps([dict(kind=item.kind, relation=item.relation, priority=item.priority,
-                         target=item.weekday or item.session or item.weekdays or item.date_value or item.week_offset,
+                         target=item.weekday or item.session or item.weekdays or item.date_value or item.day_offset or item.week_offset,
                          dates=item.resolved_dates, source=item.source_text) for item in accepted],
                    ensure_ascii=False),
     )
@@ -683,7 +683,7 @@ def _build_symptom_collection_prompt(
   23. 不得把患者的主觀形容或一般症狀升格成臨床 modifier、病因或診斷。特別是：不得從「喘得很嚴重」自行產生 respiratory_distress=severe；不得自行判定 shock、ill_appearing、cardiac_chest_pain_suspected、high_risk_injury_mechanism 或 pain_location_class；不得由「昏迷／叫不醒」自行估算 GCS；不得由「很燒／很冷」自行估算 temperature_c；不得由眼痛／灼熱反推化學暴露；不得由紅疹／腫脹反推昆蟲螫傷；不得由疼痛／腫脹反推 open fracture 或骨折／脫臼變形。只有 current_user_text 直接支持 catalog 所描述的結構化事實時才可輸出。
   24. age_years / age_months 只在本輪有逐字年齡證據時抽取；若 Backend 另有 trusted profile，該 trusted fact 由 Backend 合併，不需要你猜。
   25. 你只負責抽 TTAS evidence。不得推算、提議或輸出任何 TTAS 級數；也不得輸出 urgency_score、warning_required、red_flags_checked、stage、is_complete、科別、醫師、掛號決策。
-  26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。沒有「這／本／下／下下」等字的星期幾（例「最好週三」「週五不行」）是指每週的那一天，必須用 kind=weekday，不得當成本週的 relative_weekday；只有原文明確說「這週三」「本週三」「下週三」時才用 relative_weekday。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
+  26. 同一次 interpretation 另以 time_preferences 表達本輪明確的看診時間限制與順位。kind 只能是 date、date_range、relative_day、relative_week、relative_weekday、weekday、weekday_group、session；relation 只能是 exclude、prefer、acceptable。prefer/acceptable 必須有正整數 priority，exclude 的 priority 必須是 null。相對星期只輸出 week_offset 與英文 weekday，不得自行輸出實際日期；Backend 會以 Asia/Taipei 當輪日期換算。「今天／明天／後天／大後天」「N 天後」用 kind=relative_day，只輸出 day_offset（今天 0、明天 1、後天 2、大後天 3、N 天後 N），不得輸出 date_value。kind=date 只用於原文說出幾月幾號的日期，而且必須有 date_value；你不知道今天的日期，不得用 kind=date 表示相對日期。沒有「這／本／下／下下」等字的星期幾（例「最好週三」「週五不行」）是指每週的那一天，必須用 kind=weekday，不得當成本週的 relative_weekday；只有原文明確說「這週三」「本週三」「下週三」時才用 relative_weekday。session 只能是 morning、afternoon、evening。每筆 source_text 必須是本輪最短連續逐字原文，confidence 為 0 到 1。沒有提到的時段不得輸出 exclude；「最好下午」是 prefer，不是只能下午；「只能下午」須把其他時段分別輸出 exclude。AI 不得選 SQL Schedule 或推薦排名。
   27. 同一次輸出 dialogue_act，僅含 act、source_text、confidence。act 只能是 answer、request_explanation、claims_already_answered、correction、new_information、decline_further_questions、unknown、off_topic。decline_further_questions 只用於使用者明確表示不想再回答問題、或已無法再提供更多資訊（例如「不想再回答了，直接幫我選科」「我真的說不出更多了」）；使用者表示想直接掛號、不要再問（例如「我要先掛號」「直接幫我掛號」「我想要掛號不要再問」）也是 decline_further_questions，即使句子以「我說」開頭也一樣：那是在重申要求，不是 claims_already_answered；單純回答「沒有」「不知道」某一題是 answer，不是 decline_further_questions。以本輪逐字原文支持對話行為，confidence 為有限 0 到 1。要求解釋問題不是未回答的醫療事實；表示已回答不等於已有可接受證據。dialogue_act 不得取代 semantic_extractions、pending_answer 或 TTAS evidence；一句話要求解釋並新增症狀時，兩者都要抽取。不得透過 act 設定任何 workflow 或安全狀態。
   28. 新增 prior_answer_reference，預設為 null。只有 dialogue_act=claims_already_answered、有 active pending intent 且不是 safety_screen 時，才可引用 prior_accepted_semantic_evidence 中真正回答該 pending question 的既有證據；只輸出 answered_intent、answer_source_text、answer_confidence。answered_intent 必須完全等於 pending intent，source 必須逐字等於一筆 prior accepted extraction 的 source_text，confidence 為 0 到 1。不得只引用 raw history、不得引用本輪剛抽的新證據、不得把 uncertain 當已回答；找不到可靠答案就保持 null。此 reference 不代表科別已收斂，也絕不可完成 safety screen。
   29. dialogue_act=correction 時，仍須逐欄抽出本輪直接支持的更正 evidence；若修正 medical concept，分別輸出舊概念的 grounded absent 與新概念的 grounded present，不得刪掉無關症狀。correction act 本身不會改值；Backend 只接受 grounded、高信心且 schema 合法的本輪欄位。不得輸出 revision_mode 或其他 workflow 指令。
@@ -813,6 +813,12 @@ time_preferences 應輸出（priority 依意思決定，不是依說出的先後
   {{"kind":"weekday_group","relation":"acceptable","priority":3,"weekdays":["monday","tuesday","wednesday","thursday","friday"],"source_text":"其他平日也可以","confidence":0.98}},
   {{"kind":"session","relation":"exclude","priority":null,"session":"morning","source_text":"上午不行","confidence":0.99}},
   {{"kind":"session","relation":"prefer","priority":1,"session":"afternoon","source_text":"下午最好","confidence":0.99}}
+]
+current_user_text:「明天下午可以，後天不行」→
+[
+  {{"kind":"relative_day","relation":"prefer","priority":1,"day_offset":1,"source_text":"明天","confidence":0.99}},
+  {{"kind":"session","relation":"prefer","priority":1,"session":"afternoon","source_text":"下午可以","confidence":0.99}},
+  {{"kind":"relative_day","relation":"exclude","priority":null,"day_offset":2,"source_text":"後天不行","confidence":0.99}}
 ]
 此 AI 輸出不可包含 reference_date 或 resolved_dates；兩者由 Backend 在接受 grounded preference 時寫入。
 
