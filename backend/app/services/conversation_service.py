@@ -124,6 +124,32 @@ def requested_department_adopted(case: TriageCase) -> bool:
             and requested is not None and result.dept_id == requested)
 
 
+def symptom_grounded(case: TriageCase) -> bool:
+    """The accepted main symptom appears in the patient's own words."""
+    symptom = case.patient_input.symptom
+    return bool(symptom) and any(
+        symptom in item.content for item in case.history_records if item.role == "user"
+    )
+
+
+def _ask_symptom_for_requested_department(case: TriageCase) -> None:
+    """「我想看婦產科」 with no symptom yet: the Backend asks its fixed symptom question.
+
+    chat.py prefixes 「收到，已記錄您希望看{科別}…」. 起因：AI planner 改問「請問您目前最主要的
+    不適症狀是什麼？」，蓋掉確認句，病人以為系統沒聽到要看的科。
+    """
+    state = case.conversation_state
+    state.clarification_status = "clarifying"
+    state.uncertainty_reasons = ["已記錄指定科別，仍需了解主要症狀"]
+    state.next_information_needed = []
+    state.last_question_key = "symptom"
+    state.reply_source = "REQUESTED_DEPARTMENT_SYMPTOM"
+    state.is_complete = False
+    case.triage.need_more_info = True
+    case.triage.next_question = QUESTION_TEXTS["symptom"]
+    case.triage.is_final = False
+
+
 def safety_screen_resolved(case: TriageCase) -> bool:
     return case.patient_input.red_flags_checked or bool(case.patient_input.red_flags)
 
@@ -1094,6 +1120,7 @@ def advance_conversation(
     current_extractions: list[SemanticExtraction],
     made_progress: bool = False,
     availability_changed: bool = False,
+    department_requested_this_turn: bool = False,
 ) -> None:
     """Apply only validated clarification proposals and Backend-owned state gates."""
     state = case.conversation_state
@@ -1118,10 +1145,7 @@ def advance_conversation(
             0 if made_progress else state.consecutive_no_progress_turns + len(user_sources)
         )
 
-    grounded_symptom = bool(case.patient_input.symptom) and any(
-        case.patient_input.symptom in item.content
-        for item in case.history_records if item.role == "user"
-    )
+    grounded_symptom = symptom_grounded(case)
     grounded_detail = bool(state.clarification_evidence) or any(
         item.field in _DETAIL_FIELDS
         and item.semantic_status in {"available", "partial"}
@@ -1140,6 +1164,9 @@ def advance_conversation(
         for field, reason in state.clarification_reasons.items()
     )
     safety_ready = grounded_symptom and grounded_detail and not low_confidence
+    if department_requested_this_turn and not grounded_symptom:
+        _ask_symptom_for_requested_department(case)
+        return
     # A reopened screen (new symptom after the first screen) is asked at once.
     if (safety_ready or state.safety_rescreen_sources) and not safety_screen_resolved(case):
         if state.turn_count >= get_settings().hard_turn_cap:

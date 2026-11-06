@@ -40,6 +40,7 @@ from app.services.conversation_service import (
     safety_screen_resolved,
     safety_unresolved_stop,
     settle_unanswered_clue_question,
+    symptom_grounded,
     validated_dialogue_act,
 )
 from app.services.department_reasoning_service import accepted_semantic_evidence, reason_about_departments
@@ -404,6 +405,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and not revision_detail_due
                     # The reopened safety screen is a fixed question.
                     and not case.conversation_state.safety_rescreen_sources
+                    # 「我想看婦產科」 with no symptom: Backend asks its fixed symptom question.
+                    and not (department_preference_name and not symptom_grounded(case))
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
@@ -426,6 +429,7 @@ async def chat(req: ChatRequest) -> TriageResult:
                         current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
                         made_progress=bool(_clinical_progress_facts(case) - prior_medical_facts),
                         availability_changed=_availability_facts(case) != prior_availability_facts,
+                        department_requested_this_turn=department_preference_name is not None,
                     )
                 if not has_user_input and not safety_check_turn and not case.history_records:
                     case.conversation_state.last_question_key = "symptom"
