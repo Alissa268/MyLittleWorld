@@ -31,6 +31,8 @@ from app.services.conversation_service import (
     capture_prior_answer_reference,
     capture_safety_screen_answer,
     clear_answered_pending,
+    known_symptom_concepts,
+    reopen_safety_screen_for_new_symptoms,
     companion_question_due,
     request_clarification,
     safety_net_family_medicine_reason,
@@ -78,6 +80,7 @@ async def chat(req: ChatRequest) -> TriageResult:
         department_before = case.conversation_state.department_status
         department_id_before = case.department_result.dept_id if case.department_result else None
         prior_extractions = tuple(item.model_copy(deep=True) for item in case.semantic_extractions)
+        prior_symptoms = known_symptom_concepts(case)
         prior_medical_facts = _clinical_progress_facts(case)
         availability_pending_before = awaiting_availability_answer(case)
         prior_availability_facts = _availability_facts(case)
@@ -139,7 +142,9 @@ async def chat(req: ChatRequest) -> TriageResult:
             detail="quick_search 不進行問診，請改呼叫 /schedules/search。",
         )
 
-    if req.revision_requested:
+    # A safety stop is final: 「我想修改」 must not reopen it (a reported 「有」 could otherwise
+    # be followed by 「沒有」 and continue to booking). The request falls through and gets the stop reply.
+    if req.revision_requested and not _stopped_for_safety(case):
         with perf.measure("deterministic_parse"):
             _begin_revision(case)
         with perf.measure("case_store"):
@@ -262,6 +267,12 @@ async def chat(req: ChatRequest) -> TriageResult:
             case, safety_interpretation, user_text_parts,
             dialogue_act=getattr(ai_suggestion, "dialogue_act", None),
             current_extractions=(ai_suggestion.semantic_extractions or []) if ai_suggestion else [],
+            # The AI call failed this turn: the reply was never judged and is not an unclear answer.
+            # Without any configured AI the screen still ends after SAFETY_ANSWER_CAP replies.
+            interpretation_unavailable=bool(
+                has_user_input and semantic_ai_allowed
+                and (ai_suggestion is None or getattr(ai_suggestion, "provider_failed", False))
+            ),
         )
         safety_completed_this_turn = bool(
             safety_check_turn
@@ -310,6 +321,13 @@ async def chat(req: ChatRequest) -> TriageResult:
                     if not prior_captured:
                         capture_pending_answer(case, pending_interpretation, user_text_parts)
                     clear_answered_pending(case)
+                    if turn_interpretation_complete:
+                        # A symptom first said after the safety screen opens the screen again
+                        # before any department decision this turn.
+                        reopen_safety_screen_for_new_symptoms(
+                            case, ai_suggestion.semantic_extractions or [], user_text_parts,
+                            prior_symptoms=prior_symptoms, prior_user_sources=prior_user_sources,
+                        )
                 # After 「我想修改」, a message that changes no symptom, time or department (or
                 # could not be understood) asks what to change instead of re-confirming or retrying.
                 revision_detail_due = bool(
@@ -325,6 +343,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     and turn_interpretation_complete
                     and (not safety_check_turn or safety_completed_this_turn)
                     and not revision_detail_due
+                    # A reopened safety screen comes first; departments are recomputed once it is done.
+                    and not case.conversation_state.safety_rescreen_sources
                 )
                 # An availability answer with no new symptom keeps the department already decided;
                 # re-running convergence on unchanged evidence could reopen it.
@@ -355,6 +375,8 @@ async def chat(req: ChatRequest) -> TriageResult:
                     # Nor for the fixed accompanying-symptom question of a single-department case.
                     and not companion_question_due(case)
                     and not revision_detail_due
+                    # The reopened safety screen is a fixed question.
+                    and not case.conversation_state.safety_rescreen_sources
                 )
                 if clarification_planning_allowed:
                     with perf.measure("conversation_clarification"), ai_phase("conversation_clarification"):
@@ -542,6 +564,15 @@ def _is_urgent_terminal(case: TriageCase) -> bool:
     )
 
 
+def _stopped_for_safety(case: TriageCase) -> bool:
+    """TTAS urgency, a reported positive screen answer, or a screen that could not be answered."""
+    state = case.conversation_state
+    return bool(
+        state.clarification_status == "urgent" or case.triage.warning_required
+        or state.safety_positive_reported or safety_unresolved_stop(case)
+    )
+
+
 def _sync_confirmation_flags(case: TriageCase) -> None:
     if case.confirmed:
         case.conversation_state.confirmed = True
@@ -640,7 +671,8 @@ def _begin_revision(case: TriageCase) -> None:
     case.conversation_state.turn_count = 0
     case.conversation_state.consecutive_no_progress_turns = 0
     case.conversation_state.clarification_status = "collecting"
-    # A corrected symptom starts a new safety screen.
+    # Never reached from a safety stop (_stopped_for_safety); a symptom first said in the
+    # revision reopens the safety screen (reopen_safety_screen_for_new_symptoms).
     case.conversation_state.safety_positive_reported = False
     case.conversation_state.uncertainty_reasons = []
     case.conversation_state.next_information_needed = []
@@ -672,7 +704,7 @@ def _begin_revision(case: TriageCase) -> None:
 
 
 def _should_treat_user_input_as_revision(case: TriageCase, req: ChatRequest) -> bool:
-    if req.confirmed or req.revision_requested:
+    if req.confirmed or req.revision_requested or _stopped_for_safety(case):
         return False
     has_user_text = bool(req.message and req.message.strip()) or any(
         message.role == "user" and message.content.strip()
