@@ -1,7 +1,7 @@
 import json
 import logging
 
-from fastapi import APIRouter, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException, Response
 
 from app.config import get_settings
 from app.schemas import CaseResumeResult, ChatRequest, ConversationStage, Message, TriageCase, TriageResult, VisitType
@@ -10,6 +10,7 @@ from app.services.case_store import (
     case_is_urgent, clear_recommendations, create_case, get_case, peek_case, sanitize_untrusted_snapshot, save_case,
 )
 from app.services.case_resume_service import build_case_resume
+from app.services.rate_limit import enforce_chat_rate_limit
 from app.services.chat_perf import (
     ai_phase,
     begin_chat_perf,
@@ -55,6 +56,8 @@ router = APIRouter(prefix="/chat", tags=["chat"])
 logger = logging.getLogger(__name__)
 
 DEPARTMENT_CLARIFICATION_KEY = "department_clarification"
+MAX_MESSAGE_CHARS = 100
+MESSAGE_TOO_LONG_REPLY = "您這次說的內容超過 100 個字，請分成幾次、每次 100 字以內再傳一次。"
 URGENT_WARNING_FALLBACK = (
     "初步篩檢結果顯示您的狀況可能較危急，線上問診無法判斷嚴重程度，因此不會繼續掛號導引。"
     "請立即前往急診；情況危急請撥打 119。"
@@ -70,7 +73,7 @@ async def resume_case(case_id: str, response: Response) -> CaseResumeResult:
     return build_case_resume(case)
 
 
-@router.post("", response_model=TriageResult)
+@router.post("", response_model=TriageResult, dependencies=[Depends(enforce_chat_rate_limit)])
 async def chat(req: ChatRequest) -> TriageResult:
     perf, perf_token = begin_chat_perf()
     with perf.measure("case_prepare"):
@@ -141,6 +144,30 @@ async def chat(req: ChatRequest) -> TriageResult:
             status_code=400,
             detail="quick_search 不進行問診，請改呼叫 /schedules/search。",
         )
+
+    # Over-long input is answered before any AI call and is not recorded, so a pasted essay
+    # cannot burn AI quota. A safety stop still wins: that case keeps getting its stop reply.
+    if _message_too_long(req) and not _stopped_for_safety(case):
+        with perf.measure("case_store"):
+            save_case(case)
+        logger.info("chat message too long case_id=%s limit=%s", case.case_id, MAX_MESSAGE_CHARS)
+        response = TriageResult(
+            case_id=case.case_id,
+            triage_case=case,
+            conversation_state=case.conversation_state,
+            triage=case.triage,
+            department_result=case.department_result,
+            next_question=MESSAGE_TOO_LONG_REPLY,
+            reply=MESSAGE_TOO_LONG_REPLY,
+            needMoreInfo=True,
+            triage_reasons=case.triage.reasons,
+        )
+        record_chat_response_trace(
+            deterministic_next_question=MESSAGE_TOO_LONG_REPLY,
+            final_reply=MESSAGE_TOO_LONG_REPLY,
+        )
+        finish_chat_perf(perf, perf_token)
+        return response
 
     # A safety stop is final: 「我想修改」 must not reopen it (a reported 「有」 could otherwise
     # be followed by 「沒有」 and continue to booking). The request falls through and gets the stop reply.
@@ -619,6 +646,11 @@ def _resolve_case(req: ChatRequest) -> TriageCase:
         save_case(case)
         return case
     return create_case(lookup_id)
+
+
+def _message_too_long(req: ChatRequest) -> bool:
+    texts = [req.message or ""] + [item.content for item in req.messages if item.role == "user"]
+    return any(len(text.strip()) > MAX_MESSAGE_CHARS for text in texts)
 
 
 def _request_has_text_input(req: ChatRequest) -> bool:
